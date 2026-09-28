@@ -5,9 +5,10 @@ Revises:
 Create Date: 2026-09-28
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "0001_initial"
 down_revision = None
@@ -27,7 +28,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=24), nullable=False),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("chunk_count", sa.Integer(), nullable=False),
-        sa.Column("metadata", sa.dialects.postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("metadata", JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
@@ -39,7 +40,7 @@ def upgrade() -> None:
         sa.Column("document_id", sa.Uuid(), nullable=False),
         sa.Column("ordinal", sa.Integer(), nullable=False),
         sa.Column("text", sa.Text(), nullable=False),
-        sa.Column("locator", sa.dialects.postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("locator", JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("embedding", Vector(384), nullable=True),
         sa.Column("is_derived", sa.Boolean(), nullable=False),
         sa.ForeignKeyConstraint(["document_id"], ["documents.id"], ondelete="CASCADE"),
@@ -52,6 +53,7 @@ def upgrade() -> None:
         "chats",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("document_id", sa.Uuid(), nullable=False),
+        sa.Column("codex_thread_id", sa.String(length=255), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["document_id"], ["documents.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -63,7 +65,7 @@ def upgrade() -> None:
         sa.Column("chat_id", sa.Uuid(), nullable=False),
         sa.Column("role", sa.String(length=16), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("citations", sa.dialects.postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("citations", JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["chat_id"], ["chats.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -76,7 +78,7 @@ def upgrade() -> None:
         sa.Column("key", sa.String(length=40), nullable=False),
         sa.Column("question", sa.Text(), nullable=False),
         sa.Column("answer", sa.Text(), nullable=False),
-        sa.Column("citations", sa.dialects.postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("citations", JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["document_id"], ["documents.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),

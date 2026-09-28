@@ -4,22 +4,22 @@ import csv
 import io
 import re
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as SafeElementTree
 from docx import Document as DocxDocument
 from docx.document import Document as DocxDocumentType
-from docx.table import Table as DocxTable
-from docx.text.paragraph import Paragraph as DocxParagraph
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
-
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv", ".xml"}
 MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
@@ -117,7 +117,7 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         blocks: list[SourceBlock] = []
         extracted_chars = 0
         for page_number, page in enumerate(pages, start=1):
-            page_text = page.extract_text(extraction_mode="layout") or page.extract_text() or ""
+            page_text = "" if "/Contents" not in page else page.extract_text(extraction_mode="layout") or page.extract_text() or ""
             extracted_chars += len(page_text.strip())
             blocks.extend(_split_long_text(page_text, {"kind": "pdf", "page": page_number, "label": f"Страница {page_number}"}))
     except DocumentParsingError:
@@ -237,13 +237,12 @@ def _parse_csv(data: bytes) -> ParsedDocument:
     text = _decode_text(data)
     try:
         dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
+        delimiter = dialect.delimiter
     except csv.Error:
         dialect = csv.excel
-        if text.count(";") > text.count(","):
-            dialect = csv.excel
-            dialect.delimiter = ";"
+        delimiter = ";" if text.count(";") > text.count(",") else ","
     try:
-        rows = list(csv.reader(io.StringIO(text, newline=""), dialect))
+        rows = list(csv.reader(io.StringIO(text, newline=""), dialect=dialect, delimiter=delimiter))
     except csv.Error as exc:
         raise DocumentParsingError("Не удалось разобрать строки CSV.") from exc
     rows = [row for row in rows if any(cell.strip() for cell in row)]
@@ -281,6 +280,24 @@ def _parse_csv(data: bytes) -> ParsedDocument:
             group = []
             group_chars = 0
             group_start = row_number
+        if len(line) > CSV_GROUP_CHARS:
+            if group:
+                blocks.append(SourceBlock("\n".join(group), {
+                    "kind": "csv",
+                    "label": f"Строки {group_start}–{row_number - 1}",
+                    "row_start": group_start,
+                    "row_end": row_number - 1,
+                }))
+                group = []
+                group_chars = 0
+            blocks.extend(_split_long_text(line, {
+                "kind": "csv",
+                "label": f"Строка {row_number}",
+                "row_start": row_number,
+                "row_end": row_number,
+            }, target=CSV_GROUP_CHARS))
+            group_start = row_number + 1
+            continue
         group.append(line)
         group_chars += len(line) + 1
     if group:
@@ -311,7 +328,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
         "row_count": len(data_rows),
         "column_count": len(headers),
         "columns": headers,
-        "delimiter": dialect.delimiter,
+        "delimiter": delimiter,
         "numeric_columns": numeric_columns,
     }
     return ParsedDocument("csv", blocks, metadata)

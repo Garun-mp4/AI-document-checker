@@ -6,7 +6,7 @@
 
 Требуются Docker Desktop с Compose и интернет для первичной загрузки контейнеров и локальной модели эмбеддингов.
 
-1. Скопируйте `.env.example` в `.env` и при желании задайте собственный пароль PostgreSQL. Не добавляйте `.env` в Git.
+1. Скопируйте `.env.example` в `.env` и при желании задайте собственный пароль PostgreSQL латинскими буквами и цифрами. Не добавляйте `.env` в Git.
 2. В каталоге проекта выполните:
 
    ```powershell
@@ -45,4 +45,8 @@
 - `frontend/` — React, TypeScript, Vite, nginx.
 - `docker-compose.yml` поднимает PostgreSQL/pgvector, API и веб-клиент.
 
-API доступно в браузере через `/api/v1`; интерактивная OpenAPI-справка в контейнере API — `/docs`.
+API доступно через `/api/v1`; интерактивная OpenAPI-справка — [http://localhost:5173/docs](http://localhost:5173/docs). API-порт остаётся внутри сети Docker Compose.
+
+## Проверки
+
+Чтобы прогнать проверки парсеров в локальной среде Python, установите `backend/requirements-test.txt`, перейдите в `backend/` и выполните `python -m pytest`. Тесты покрывают координаты источников, CSV-разделители и точные числовые агрегаты, а также ошибки PDF, DOCX и XML.

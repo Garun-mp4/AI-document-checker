@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai_codex import AsyncCodex, ExternalMessage, Sandbox
+from openai_codex import ApprovalMode, AsyncCodex, CodexError, ExternalMessage, Sandbox
 
 from app.config import settings
 
@@ -47,7 +47,7 @@ class CodexService:
         try:
             self.client = AsyncCodex()
             await self.client.__aenter__()
-        except Exception as exc:
+        except (CodexError, OSError, RuntimeError) as exc:
             self.startup_error = str(exc)
             logger.exception("Codex SDK could not start")
 
@@ -95,7 +95,7 @@ class CodexService:
                     result["error"] = f"Уровень reasoning {settings.codex_reasoning_effort} не поддерживается выбранной моделью."
                 else:
                     result["error"] = None
-        except Exception as exc:
+        except (CodexError, OSError, TimeoutError) as exc:
             result["error"] = self._friendly_error(exc)
             logger.warning("Could not read Codex account/model status: %s", exc)
         self._status_cache = (loop.time(), result.copy())
@@ -119,7 +119,7 @@ class CodexService:
                 return {"already_pending": True, "verification_url": self.verification_url, "user_code": self.user_code}
             try:
                 handle = await self.client.login_chatgpt_device_code()
-            except Exception as exc:
+            except (CodexError, OSError, TimeoutError) as exc:
                 self.login_state = "failed"
                 self.login_error = self._friendly_error(exc)
                 raise CodexUnavailable(self.login_error) from exc
@@ -144,7 +144,7 @@ class CodexService:
                 self.login_error = state.get("error") or "Вход завершился, но Codex не подтвердил авторизацию."
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except (CodexError, OSError, TimeoutError) as exc:
             self.login_state = "failed"
             self.login_error = self._friendly_error(exc)
             logger.warning("Codex device login did not complete: %s", exc)
@@ -155,6 +155,7 @@ class CodexService:
         await self.require_ready()
         assert self.client is not None
         thread = await self.client.thread_start(
+            approval_mode=ApprovalMode.deny_all,
             ephemeral=True,
             model=settings.codex_model,
             cwd=self._work_dir,
@@ -167,6 +168,7 @@ class CodexService:
                 namespace="untrusted_document_context",
                 content=json.dumps(payload, ensure_ascii=False),
             ),
+            approval_mode=ApprovalMode.deny_all,
             model=settings.codex_model,
             effort=settings.codex_reasoning_effort,
             output_schema=output_schema,
@@ -190,15 +192,17 @@ class CodexService:
             try:
                 thread = await self.client.thread_resume(
                     existing_thread_id,
+                    approval_mode=ApprovalMode.deny_all,
                     model=settings.codex_model,
                     cwd=self._work_dir,
                     base_instructions=BASE_INSTRUCTIONS,
                     sandbox=Sandbox.read_only,
                 )
-            except Exception as exc:
+            except (CodexError, OSError) as exc:
                 logger.info("Could not resume Codex chat thread %s: %s", existing_thread_id, exc)
         if thread is None:
             thread = await self.client.thread_start(
+                approval_mode=ApprovalMode.deny_all,
                 model=settings.codex_model,
                 cwd=self._work_dir,
                 base_instructions=BASE_INSTRUCTIONS,
@@ -211,6 +215,7 @@ class CodexService:
                 namespace="untrusted_document_context",
                 content=json.dumps(payload, ensure_ascii=False),
             ),
+            approval_mode=ApprovalMode.deny_all,
             model=settings.codex_model,
             effort=settings.codex_reasoning_effort,
             sandbox=Sandbox.read_only,
