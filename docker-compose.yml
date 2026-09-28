@@ -1,0 +1,59 @@
+services:
+  db:
+    image: pgvector/pgvector:0.8.6-pg17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-document_checker}
+      POSTGRES_USER: ${POSTGRES_USER:-document_checker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-document-checker-local}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-document_checker} -d ${POSTGRES_DB:-document_checker}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-document_checker}:${POSTGRES_PASSWORD:-document-checker-local}@db:5432/${POSTGRES_DB:-document_checker}
+      CODEX_HOME: /data/codex
+      CODEX_MODEL: ${CODEX_MODEL:-gpt-6-luna}
+      CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-medium}
+      EMBEDDING_CACHE_DIR: /data/embeddings
+      UPLOAD_DIR: /data/uploads
+      MAX_UPLOAD_BYTES: 26214400
+      MODEL_CONTEXT_CHARS: 42000
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - document_uploads:/data/uploads
+      - codex_auth:/data/codex
+      - embedding_cache:/data/embeddings
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  document_uploads:
+  codex_auth:
+  embedding_cache:
