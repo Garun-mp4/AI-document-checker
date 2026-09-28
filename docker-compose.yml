@@ -20,6 +20,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-document_checker}:${POSTGRES_PASSWORD:-document-checker-local}@db:5432/${POSTGRES_DB:-document_checker}
       CODEX_HOME: /data/codex
+      HF_HOME: /data/embeddings/huggingface
       CODEX_MODEL: ${CODEX_MODEL:-gpt-6-luna}
       CODEX_REASONING_EFFORT: ${CODEX_REASONING_EFFORT:-medium}
       EMBEDDING_CACHE_DIR: /data/embeddings
@@ -46,7 +47,7 @@ services:
     build:
       context: ./frontend
     ports:
-      - "127.0.0.1:5173:80"
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
     depends_on:
       api:
         condition: service_healthy

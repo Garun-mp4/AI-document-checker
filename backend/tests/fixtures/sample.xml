@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project id="DEMO-001">
+  <title>Тестовый проект</title>
+  <owner role="executor">Алексей Пример</owner>
+  <technology>Python и PostgreSQL</technology>
+  <milestone due="2026-11-30">Проверка</milestone>
+</project>

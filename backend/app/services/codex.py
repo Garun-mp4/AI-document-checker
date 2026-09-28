@@ -87,7 +87,12 @@ class CodexService:
                 model = next((entry for entry in catalog.data if entry.model == settings.codex_model), None)
                 result["model_available"] = model is not None
                 if model is not None:
-                    supported = [getattr(item.effort, "value", item.effort) for item in model.supported_reasoning_efforts]
+                    supported = []
+                    for item in model.supported_reasoning_efforts:
+                        effort = getattr(item, "reasoning_effort", None)
+                        if effort is None:
+                            effort = getattr(item, "effort", item)
+                        supported.append(getattr(effort, "value", effort))
                     result["reasoning_available"] = settings.codex_reasoning_effort in supported
                 if not result["model_available"]:
                     result["error"] = f"Модель {settings.codex_model} недоступна для этого аккаунта Codex."

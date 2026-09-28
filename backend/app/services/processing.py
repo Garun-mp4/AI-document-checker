@@ -17,7 +17,7 @@ from app.services.codex import (
     CodexService,
     CodexUnavailable,
 )
-from app.services.embeddings import embed_passages
+from app.services.embeddings import EmbeddingConfigurationError, embed_passages
 from app.services.parsing import (
     DocumentParsingError,
     ParsedDocument,
@@ -235,6 +235,8 @@ class DocumentProcessor:
 
     @staticmethod
     def _processing_error(exc: Exception) -> str:
+        if isinstance(exc, EmbeddingConfigurationError):
+            return str(exc)
         lowered = str(exc).lower()
         if "connect" in lowered or "network" in lowered or "download" in lowered or "https" in lowered:
             return "Не удалось загрузить локальную модель или связаться с Codex. Проверьте интернет и повторите обработку."

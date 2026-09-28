@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, select
 
@@ -12,8 +12,10 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import Chunk, Document, Insight
 from app.services.citations import format_source_markers
-from app.services.codex import CodexService
 from app.services.retrieval import search_chunks
+
+if TYPE_CHECKING:
+    from app.services.codex import CodexService
 
 logger = logging.getLogger(__name__)
 

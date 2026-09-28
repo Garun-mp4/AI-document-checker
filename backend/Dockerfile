@@ -4,6 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     CODEX_HOME=/data/codex \
+    HF_HOME=/data/embeddings/huggingface \
     EMBEDDING_CACHE_DIR=/data/embeddings \
     UPLOAD_DIR=/data/uploads
 
