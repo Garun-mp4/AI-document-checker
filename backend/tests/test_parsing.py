@@ -104,6 +104,8 @@ def test_pdf_text_is_extracted_with_page_locator() -> None:
     parsed = parse_document("brief.pdf", stream.getvalue())
 
     assert parsed.metadata["page_count"] == 1
+    assert parsed.metadata["page_width"] == 300
+    assert parsed.metadata["page_height"] == 300
     assert parsed.blocks[0].locator["page"] == 1
     assert "Team Alpha" in parsed.blocks[0].text
 

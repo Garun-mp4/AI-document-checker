@@ -29,6 +29,31 @@ export interface SourceRef {
   is_derived: boolean
 }
 
+export type PreviewLayout = 'pdf' | 'paper' | 'table' | 'tree'
+export type PreviewBlockKind = 'page' | 'paragraph' | 'table' | 'row' | 'node' | 'text' | 'calculation'
+
+export interface PreviewBlock {
+  id: string
+  source_id: string
+  ordinal: number
+  kind: PreviewBlockKind
+  text: string
+  locator: SourceRef['locator']
+  rows: string[][] | null
+}
+
+export interface DocumentPreview {
+  document_id: string
+  file_type: string
+  layout: PreviewLayout
+  aspect_ratio: number
+  page_count: number | null
+  original_url: string | null
+  blocks: PreviewBlock[]
+  total_blocks: number
+  truncated: boolean
+}
+
 export interface Insight {
   id: string
   key: string

@@ -23,13 +23,14 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Paperclip,
   RotateCw,
   Send,
   ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, CodexStatus, DocumentRecord, Insight, SourceRef, StreamCitation } from './types'
+import type { ChatMessage, ChatRecord, CodexStatus, DocumentPreview, DocumentRecord, Insight, PreviewBlock, SourceRef, StreamCitation } from './types'
 
 const API = '/api/v1'
 const PAGE_SIZE = 40
@@ -64,7 +65,7 @@ function statusLabel(status: DocumentRecord['status']): string {
   }[status]
 }
 
-function locatorText(source: SourceRef | StreamCitation): string {
+function locatorText(source: { locator: SourceRef['locator'] }): string {
   const label = source.locator.label
   if (typeof label === 'string' && label) return label
   const page = source.locator.page
@@ -86,6 +87,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} МБ`
 }
 
+function pluralLabel(value: number, one: string, few: string, many = few): string {
+  const remainder = value % 100
+  if (remainder >= 11 && remainder <= 14) return many
+  switch (value % 10) {
+    case 1: return one
+    case 2:
+    case 3:
+    case 4: return few
+    default: return many
+  }
+}
+
 function relativeDate(value: string): string {
   const elapsed = Date.now() - new Date(value).getTime()
   const hours = Math.floor(elapsed / 3_600_000)
@@ -95,13 +108,50 @@ function relativeDate(value: string): string {
   return days === 1 ? 'вчера' : `${days} дн. назад`
 }
 
+function previewLocatorText(block: PreviewBlock): string {
+  const label = block.locator.label
+  if (typeof label === 'string' && label) return label
+  if (typeof block.locator.page === 'number') return `Страница ${block.locator.page}`
+  if (typeof block.locator.path === 'string') return block.locator.path
+  if (typeof block.locator.row_start === 'number') {
+    const end = typeof block.locator.row_end === 'number' ? block.locator.row_end : block.locator.row_start
+    return `Строки ${block.locator.row_start}–${end}`
+  }
+  if (typeof block.locator.line_start === 'number') {
+    const end = typeof block.locator.line_end === 'number' ? block.locator.line_end : block.locator.line_start
+    return `Строки ${block.locator.line_start}–${end}`
+  }
+  return 'Фрагмент документа'
+}
+
+function previewKindLabel(kind: PreviewBlock['kind']): string {
+  return {
+    page: 'Страница',
+    paragraph: 'Абзац',
+    table: 'Строка таблицы',
+    row: 'Строка',
+    node: 'Элемент XML',
+    text: 'Текст',
+    calculation: 'Расчёт приложения',
+  }[kind]
+}
+
+function PreviewSourceCallout({ source }: { source: SourceRef | StreamCitation | PreviewBlock | undefined }) {
+  if (!source) return null
+  return (
+    <div className="preview-source-callout" role="status">
+      <div className="preview-source-callout-heading"><BookOpen size={14} /><span>Текст источника · {locatorText(source)}</span></div>
+      <p>{source.text}</p>
+    </div>
+  )
+}
+
 function App() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [document, setDocument] = useState<DocumentRecord | null>(null)
   const [insights, setInsights] = useState<Insight[]>([])
   const [chunks, setChunks] = useState<SourceRef[]>([])
-  const [chunkOffset, setChunkOffset] = useState(0)
   const [chat, setChat] = useState<ChatRecord | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [codex, setCodex] = useState<CodexStatus | null>(null)
@@ -123,6 +173,9 @@ function App() {
   const [streamSources, setStreamSources] = useState<StreamCitation[]>([])
   const [toast, setToast] = useState('')
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
+  const [selectedSource, setSelectedSource] = useState<SourceRef | StreamCitation | null>(null)
+  const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null)
+  const [previewPage, setPreviewPage] = useState(1)
   const fileInput = useRef<HTMLInputElement>(null)
   const workArea = useRef<HTMLElement>(null)
   const conversation = useRef<HTMLDivElement>(null)
@@ -176,7 +229,6 @@ function App() {
     try {
       const result = await api<SourceRef[]>(`${API}/documents/${documentId}/chunks?offset=${offset}&limit=${PAGE_SIZE}`)
       setChunks(result)
-      setChunkOffset(offset)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось открыть текст документа.')
     } finally {
@@ -186,12 +238,15 @@ function App() {
 
   const loadReadyData = useCallback(async (documentId: string) => {
     try {
-      const [cardData, chatData] = await Promise.all([
+      const [cardData, chatData, previewData] = await Promise.all([
         api<Insight[]>(`${API}/documents/${documentId}/insights`),
         api<ChatRecord>(`${API}/documents/${documentId}/chat`),
+        api<DocumentPreview>(`${API}/documents/${documentId}/preview`),
       ])
       setInsights(cardData)
       setChat(chatData)
+      setDocumentPreview(previewData)
+      setPreviewPage(1)
       const savedMessages = await api<ChatMessage[]>(`${API}/chats/${chatData.id}/messages`)
       setMessages(savedMessages)
     } catch (error) {
@@ -204,6 +259,7 @@ function App() {
       setDocument(null)
       setInsights([])
       setChunks([])
+      setDocumentPreview(null)
       setChat(null)
       setMessages([])
       return
@@ -213,9 +269,11 @@ function App() {
     setDocument(null)
     setInsights([])
     setChunks([])
+    setDocumentPreview(null)
     setChat(null)
     setMessages([])
     setSelectedSourceId(null)
+    setSelectedSource(null)
     const refresh = async () => {
       try {
         const result = await api<DocumentRecord>(`${API}/documents/${selectedId}`)
@@ -304,15 +362,22 @@ function App() {
 
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
     if (!document) return
-    const offset = Math.floor(source.ordinal / PAGE_SIZE) * PAGE_SIZE
     setPreviewOpen(true)
     setSelectedSourceId(source.id)
-    await loadChunks(document.id, offset)
+    setSelectedSource(source)
+    const page = source.locator.page
+    if (typeof page === 'number' && page > 0) setPreviewPage(page)
+    const hasPreviewBlock = documentPreview?.blocks.some((block) => block.source_id === source.id)
+    if (!hasPreviewBlock) {
+      const offset = Math.floor(source.ordinal / PAGE_SIZE) * PAGE_SIZE
+      await loadChunks(document.id, offset)
+    }
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => window.document.getElementById(`source-${source.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+      window.requestAnimationFrame(() => window.document.getElementById(`preview-${source.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
     })
     setMobileChatOpen(false)
-  }, [document, loadChunks])
+  }, [document, documentPreview, loadChunks])
 
   const beginLogin = useCallback(async () => {
     try {
@@ -457,6 +522,7 @@ function App() {
   const activeStatus = visibleStatus ? ['queued', 'extracting', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
   const mainClasses = [
     'app-shell',
+    !selectedId ? 'empty-state' : '',
     !chatOpen ? 'chat-hidden' : '',
     chatFull ? 'chat-full' : '',
     mobileLibraryOpen ? 'mobile-library-open' : '',
@@ -529,7 +595,13 @@ function App() {
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV или XML</span></div>}
 
         {!selectedId || !visibleStatus ? (
-          <EmptyWorkspace isUploading={isUploading} onChoose={() => fileInput.current?.click()} documentsCount={documents.length} />
+          <EmptyWorkspace
+            isUploading={isUploading}
+            onChoose={() => fileInput.current?.click()}
+            documentsCount={documents.length}
+            onToggleLibrary={() => setSidebarCollapsed((value) => !value)}
+            onExpandChat={() => setChatFull(true)}
+          />
         ) : (
           <div className="document-workspace">
             <div className="document-toolbar">
@@ -572,34 +644,69 @@ function App() {
             {visibleStatus.status === 'ready' && document && (
               <div className="workspace-scroll" key={document.id}>
                 <div className="document-facts">
-                  <div className="fact-item"><BookOpen size={15} /><span><b>{document.chunk_count}</b> фрагментов текста</span></div>
+                  <div className="fact-item"><BookOpen size={15} /><span><b>{document.chunk_count}</b> {pluralLabel(document.chunk_count, 'фрагмент текста', 'фрагмента текста', 'фрагментов текста')}</span></div>
                   {typeof document.metadata.page_count === 'number' && <div className="fact-item"><AlignLeft size={15} /><span><b>{document.metadata.page_count}</b> стр.</span></div>}
                   {typeof document.metadata.row_count === 'number' && <div className="fact-item"><FileSpreadsheet size={15} /><span><b>{document.metadata.row_count}</b> строк · <b>{String(document.metadata.column_count ?? 0)}</b> столбцов</span></div>}
                   <div className="fact-item"><Clock3 size={15} /><span>Добавлен {relativeDate(document.created_at)}</span></div>
                 </div>
 
-                <section className={`source-viewer ${previewOpen ? 'viewer-open' : 'viewer-closed'}`} aria-label="Извлечённый текст документа">
+                <section className={`source-viewer ${previewOpen ? 'viewer-open' : 'viewer-closed'}`} aria-label="Оригинал и предпросмотр документа">
                   <div className="viewer-heading">
-                    <div className="viewer-heading-label"><AlignLeft size={16} /><strong>Текст документа</strong><span>{Math.min(chunkOffset + chunks.length, document.chunk_count)} из {document.chunk_count} фрагментов</span></div>
+                    <div className="viewer-heading-label"><BookOpen size={16} /><strong>Оригинал документа</strong><span>{documentPreview ? `${documentPreview.total_blocks} ${pluralLabel(documentPreview.total_blocks, 'фрагмент', 'фрагмента', 'фрагментов')}` : `${document.chunk_count} ${pluralLabel(document.chunk_count, 'фрагмент', 'фрагмента', 'фрагментов')}`}</span></div>
                     <div className="viewer-controls">
-                      <button className="icon-button" disabled={chunkOffset === 0 || loadingChunks} aria-label="Предыдущие фрагменты" onClick={() => void loadChunks(document.id, Math.max(0, chunkOffset - PAGE_SIZE))}><ChevronLeft size={17} /></button>
-                      <button className="icon-button" disabled={chunkOffset + chunks.length >= document.chunk_count || loadingChunks} aria-label="Следующие фрагменты" onClick={() => void loadChunks(document.id, chunkOffset + PAGE_SIZE)}><ChevronRight size={17} /></button>
-                      <button className="icon-button viewer-toggle" aria-expanded={previewOpen} aria-label={previewOpen ? 'Свернуть текст документа' : 'Развернуть текст документа'} onClick={() => setPreviewOpen((value) => !value)}>{previewOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>
+                      {documentPreview?.layout === 'pdf' && <>
+                        <span className="preview-page-label">{previewPage} / {documentPreview.page_count ?? '—'}</span>
+                        <button className="icon-button" disabled={previewPage <= 1} aria-label="Предыдущая страница" onClick={() => setPreviewPage((value) => Math.max(1, value - 1))}><ChevronLeft size={17} /></button>
+                        <button className="icon-button" disabled={previewPage >= (documentPreview.page_count ?? 1)} aria-label="Следующая страница" onClick={() => setPreviewPage((value) => Math.min(documentPreview.page_count ?? value + 1, value + 1))}><ChevronRight size={17} /></button>
+                      </>}
+                      <button className="icon-button viewer-toggle" aria-expanded={previewOpen} aria-label={previewOpen ? 'Свернуть просмотр документа' : 'Развернуть просмотр документа'} onClick={() => setPreviewOpen((value) => !value)}>{previewOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}</button>
                     </div>
                   </div>
                   {previewOpen && (
-                    <div className="source-list" aria-busy={loadingChunks}>
-                      {loadingChunks && chunks.length === 0 ? <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю текст…</div> : chunks.map((chunk) => (
-                        <article id={`source-${chunk.id}`} key={chunk.id} className={`source-chunk ${selectedSourceId === chunk.id ? 'source-highlight' : ''}`}>
-                          <div className="source-location">
-                            <span className="source-locator-dot" />
-                            <span>{locatorText(chunk)}</span>
-                            {chunk.is_derived && <span className="derived-tag"><Calculator size={12} /> Расчёт приложения</span>}
+                    <div className="document-preview" aria-busy={!documentPreview || loadingChunks}>
+                      {documentPreview?.original_url && <div className="preview-toolbar"><span>Фрагменты связаны с источниками</span><a href={documentPreview.original_url} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>}
+                      {!documentPreview && chunks.length === 0 ? (
+                        <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю предпросмотр…</div>
+                      ) : !documentPreview ? (
+                        <div className="source-list" aria-busy={loadingChunks}>
+                          {chunks.map((chunk) => (
+                            <article id={`source-${chunk.id}`} key={chunk.id} className={`source-chunk ${selectedSourceId === chunk.id ? 'source-highlight' : ''}`}>
+                              <div className="source-location"><span className="source-locator-dot" /><span>{locatorText(chunk)}</span>{chunk.is_derived && <span className="derived-tag"><Calculator size={12} /> Расчёт приложения</span>}</div>
+                              <p>{chunk.text}</p>
+                            </article>
+                          ))}
+                        </div>
+                      ) : documentPreview.layout === 'pdf' && documentPreview.original_url ? (
+                        <div className="pdf-preview-stack">
+                          <PreviewSourceCallout source={selectedSource ?? documentPreview.blocks[0]} />
+                          <div className="preview-paper-frame pdf-paper-frame" style={{ aspectRatio: documentPreview.aspect_ratio }}>
+                            <iframe key={`${document.id}-${previewPage}`} className="document-pdf-frame" title={`Оригинал ${document.filename}`} src={`${documentPreview.original_url}#page=${previewPage}`} />
                           </div>
-                          <p>{chunk.text}</p>
-                        </article>
-                      ))}
-                      {chunks.length === 0 && !loadingChunks && <div className="viewer-loading">Текстовые фрагменты не найдены.</div>}
+                        </div>
+                      ) : documentPreview.layout === 'table' ? (
+                        <div className="preview-paper-frame table-paper-frame" style={{ aspectRatio: documentPreview.aspect_ratio }}>
+                          <div className="preview-block-stack preview-table-stack">
+                            {documentPreview.blocks.map((block) => (
+                              <article id={`preview-${block.source_id}`} key={block.id} className={`preview-block preview-block-${block.kind} ${selectedSourceId === block.source_id ? 'preview-block-highlight' : ''}`}>
+                                <div className="preview-block-meta"><span className="preview-block-kind">{previewKindLabel(block.kind)}</span><span>{previewLocatorText(block)}</span></div>
+                                {block.rows ? <table className="preview-data-table"><tbody>{block.rows.map((row, rowIndex) => <tr key={`${block.id}-${rowIndex}`}>{row.map((cell, cellIndex) => <td key={`${block.id}-${rowIndex}-${cellIndex}`}>{cell || '—'}</td>)}</tr>)}</tbody></table> : <p>{block.text}</p>}
+                              </article>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className={`preview-paper-frame ${documentPreview.layout === 'tree' ? 'tree-paper-frame' : 'paper-paper-frame'}`} style={{ aspectRatio: documentPreview.aspect_ratio }}>
+                          <div className="preview-block-stack">
+                            {documentPreview.blocks.map((block) => (
+                              <article id={`preview-${block.source_id}`} key={block.id} className={`preview-block preview-block-${block.kind} ${selectedSourceId === block.source_id ? 'preview-block-highlight' : ''}`}>
+                                <div className="preview-block-meta"><span className="preview-block-kind">{previewKindLabel(block.kind)}</span><span>{previewLocatorText(block)}</span></div>
+                                <p>{block.text}</p>
+                              </article>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {documentPreview?.truncated && <p className="preview-truncated">Показаны первые {documentPreview.blocks.length.toLocaleString('ru-RU')} фрагментов. Остальные доступны через поиск и цитаты.</p>}
                     </div>
                   )}
                 </section>
@@ -750,13 +857,35 @@ function processingDescription(status: DocumentRecord['status']): string {
   }[status]
 }
 
-function EmptyWorkspace({ isUploading, onChoose, documentsCount }: { isUploading: boolean; onChoose: () => void; documentsCount: number }) {
+function EmptyWorkspace({
+  isUploading,
+  onChoose,
+  documentsCount,
+  onToggleLibrary,
+  onExpandChat,
+}: {
+  isUploading: boolean
+  onChoose: () => void
+  documentsCount: number
+  onToggleLibrary: () => void
+  onExpandChat: () => void
+}) {
   return (
     <div className="empty-workspace">
+      <div className="empty-workspace-toolbar">
+        <div className="chat-title">
+          <span className="chat-title-icon"><MessageSquareText size={16} /></span>
+          <div><strong>Чат с документом</strong><span>Ожидает документ</span></div>
+        </div>
+        <div className="chat-header-actions">
+          <button className="icon-button" aria-label="Развернуть чат" title="Развернуть чат" onClick={onExpandChat}><Maximize2 size={16} /></button>
+          <button className="icon-button" aria-label="Свернуть библиотеку" title="Свернуть библиотеку" onClick={onToggleLibrary}><PanelRightOpen size={16} /></button>
+        </div>
+      </div>
       <div className="empty-workspace-content">
         <span className="empty-eyebrow">АНАЛИЗ ДОКУМЕНТОВ</span>
-        <h1>Сначала — документ.<br /><span>Дальше разберёмся вместе.</span></h1>
-        <p className="empty-description">Загрузите файл, чтобы получить ответы по содержанию, увидеть цитаты и продолжить разговор в чате.</p>
+        <h1>Загрузите документ.<br /><span>Задавайте вопросы по его содержанию.</span></h1>
+        <p className="empty-description">Получайте ответы с цитатами и быстро находите нужное в тексте.</p>
         <button className="dropzone" onClick={onChoose} disabled={isUploading}>
           <span className="dropzone-icon">{isUploading ? <LoaderCircle className="spin" size={22} /> : <FileUp size={22} />}</span>
           <strong>{isUploading ? 'Сохраняю файл…' : 'Перетащите файл сюда'}</strong>
@@ -766,7 +895,19 @@ function EmptyWorkspace({ isUploading, onChoose, documentsCount }: { isUploading
         <div className="empty-footnote"><ShieldCheck size={15} /><span>Оригиналы и индексы остаются на вашем компьютере</span></div>
         {documentsCount > 0 && <p className="empty-library-note">Выберите сохранённый файл в библиотеке слева.</p>}
       </div>
-      <div className="empty-side-note"><span className="empty-side-line" /><span>ПОДТВЕРЖДЕНИЯ<br />НА КАЖДЫЙ ОТВЕТ</span></div>
+      <div className="empty-chat-compose-area">
+        <div className="empty-chat-composer">
+          <textarea rows={1} placeholder="Задайте вопрос по документу…" aria-label="Вопрос по документу" disabled />
+          <div className="empty-chat-footer">
+            <span>Чат станет доступен после загрузки документа</span>
+            <div className="empty-chat-actions">
+              <button className="icon-button" type="button" aria-label="Прикрепить документ" title="Прикрепить документ" onClick={onChoose}><Paperclip size={18} /></button>
+              <button className="send-button" type="button" aria-label="Отправить вопрос" disabled><Send size={15} /></button>
+            </div>
+          </div>
+        </div>
+        <p className="empty-chat-footnote">Ответы будут сопровождаться цитатами из документа.</p>
+      </div>
     </div>
   )
 }

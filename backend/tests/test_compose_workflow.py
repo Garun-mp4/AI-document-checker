@@ -20,6 +20,14 @@ EXPECTED_SOURCES = {
     "sample.csv": ("Стоимость: 125.25", "csv"),
     "sample.xml": ("Алексей Пример", "xml"),
 }
+EXPECTED_PREVIEW_LAYOUTS = {
+    "pdf": "pdf",
+    "docx": "paper",
+    "txt": "paper",
+    "md": "paper",
+    "csv": "table",
+    "xml": "tree",
+}
 
 
 @pytest.fixture(scope="module")
@@ -104,6 +112,20 @@ def _upload_and_assert_indexed(
         all_text = "\n".join(chunk["text"] for chunk in chunks)
         assert expected_text in all_text
         assert any(chunk["locator"].get("kind") == expected_kind for chunk in chunks)
+
+        preview_response = client.get(f"/api/v1/documents/{document_id}/preview")
+        assert preview_response.status_code == 200, preview_response.text
+        preview = preview_response.json()
+        assert preview["layout"] == EXPECTED_PREVIEW_LAYOUTS[document["file_type"]]
+        assert preview["total_blocks"] == document["chunk_count"]
+        assert preview["blocks"]
+        assert preview["blocks"][0]["source_id"] == preview["blocks"][0]["id"]
+        assert preview["original_url"].endswith(f"/documents/{document_id}/file")
+
+        original_response = client.get(f"/api/v1/documents/{document_id}/file")
+        assert original_response.status_code == 200, original_response.text
+        assert original_response.content
+        assert "inline" in original_response.headers.get("content-disposition", "")
 
         if document["file_type"] == "csv":
             metrics = {item["name"]: item for item in document["metadata"]["numeric_columns"]}

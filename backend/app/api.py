@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import re
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 
 from app.config import settings
@@ -18,6 +19,7 @@ from app.models import Chat, Chunk, Document, Insight, Message
 from app.schemas import (
     ChatOut,
     DocumentOut,
+    DocumentPreviewOut,
     InsightOut,
     MessageOut,
     SendMessageIn,
@@ -30,6 +32,7 @@ from app.services.parsing import (
     DocumentParsingError,
     safe_filename,
 )
+from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview
 from app.services.retrieval import search_chunks
 
 logger = logging.getLogger(__name__)
@@ -208,6 +211,55 @@ async def list_chunks(document_id: uuid.UUID, offset: int = 0, limit: int = 50) 
             id=str(chunk.id), text=chunk.text[:2_500], locator=chunk.locator,
             ordinal=chunk.ordinal, is_derived=chunk.is_derived,
         ) for chunk in chunks]
+
+
+@router.get("/documents/{document_id}/preview", response_model=DocumentPreviewOut)
+async def document_preview(document_id: uuid.UUID) -> DocumentPreviewOut:
+    """Return a citation-aware, document-shaped view for the workspace."""
+
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        chunks = (await session.execute(
+            select(Chunk)
+            .where(Chunk.document_id == document_id)
+            .order_by(Chunk.ordinal)
+            .limit(MAX_PREVIEW_BLOCKS + 1)
+        )).scalars().all()
+        payload = build_preview(
+            document_id=str(document.id),
+            file_type=document.file_type,
+            metadata=document.metadata_json or {},
+            chunks=chunks,
+            original_url=f"/api/v1/documents/{document.id}/file",
+            total_blocks=document.chunk_count,
+        )
+        return DocumentPreviewOut.model_validate(payload)
+
+
+@router.get("/documents/{document_id}/file")
+async def document_file(document_id: uuid.UUID) -> FileResponse:
+    """Serve the locally stored original for the native PDF viewer.
+
+    The path is checked against the configured upload directory before the
+    response is created.  This keeps the endpoint limited to uploaded files.
+    """
+
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        path = Path(document.storage_path).resolve()
+        upload_root = Path(settings.upload_dir).resolve()
+        if not path.is_relative_to(upload_root) or not path.is_file():
+            raise HTTPException(status_code=404, detail="Исходный файл документа недоступен.")
+        media_type = mimetypes.guess_type(document.filename)[0] or "application/octet-stream"
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={"Content-Disposition": "inline"},
+        )
 
 
 @router.get("/documents/{document_id}/insights", response_model=list[InsightOut])

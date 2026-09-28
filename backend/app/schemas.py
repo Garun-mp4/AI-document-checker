@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,30 @@ class SourceOut(BaseModel):
     locator: dict[str, Any]
     ordinal: int
     is_derived: bool
+
+
+class PreviewBlockOut(BaseModel):
+    """A visible document block that can be linked to a citation."""
+
+    id: str
+    source_id: str
+    ordinal: int
+    kind: Literal["page", "paragraph", "table", "row", "node", "text", "calculation"]
+    text: str
+    locator: dict[str, Any]
+    rows: list[list[str]] | None = None
+
+
+class DocumentPreviewOut(BaseModel):
+    document_id: str
+    file_type: str
+    layout: Literal["pdf", "paper", "table", "tree"]
+    aspect_ratio: float
+    page_count: int | None = None
+    original_url: str | None = None
+    blocks: list[PreviewBlockOut]
+    total_blocks: int
+    truncated: bool = False
 
 
 class InsightOut(BaseModel):

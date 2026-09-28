@@ -126,7 +126,17 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         raise DocumentParsingError("PDF повреждён или имеет неподдерживаемую структуру.") from exc
     if extracted_chars < 30 or not blocks:
         raise DocumentParsingError("В PDF не найден извлекаемый текст. Возможно, это скан; OCR пока не поддерживается.")
-    return ParsedDocument("pdf", blocks, {"page_count": len(pages)})
+    page_width = page_height = None
+    if pages:
+        try:
+            page_width = float(pages[0].mediabox.width)
+            page_height = float(pages[0].mediabox.height)
+        except (TypeError, ValueError):
+            page_width = page_height = None
+    metadata = {"page_count": len(pages)}
+    if page_width and page_height:
+        metadata.update({"page_width": page_width, "page_height": page_height})
+    return ParsedDocument("pdf", blocks, metadata)
 
 
 def _iter_docx_blocks(document: DocxDocumentType) -> Iterable[DocxParagraph | DocxTable]:
@@ -191,7 +201,15 @@ def _parse_docx(data: bytes) -> ParsedDocument:
                 }))
     if not blocks:
         raise DocumentParsingError("В DOCX не найден текст или заполненные строки таблиц.")
-    return ParsedDocument("docx", blocks, {"paragraph_count": paragraph_number, "table_count": table_number})
+    metadata: dict[str, Any] = {"paragraph_count": paragraph_number, "table_count": table_number}
+    if document.sections:
+        section = document.sections[0]
+        if section.page_width and section.page_height:
+            metadata.update({
+                "page_width": round(section.page_width.inches * 25.4, 2),
+                "page_height": round(section.page_height.inches * 25.4, 2),
+            })
+    return ParsedDocument("docx", blocks, metadata)
 
 
 def _parse_plain_text(data: bytes, file_type: str) -> ParsedDocument:
