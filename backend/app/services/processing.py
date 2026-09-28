@@ -65,6 +65,15 @@ class DocumentProcessor:
 
     async def start(self) -> None:
         async with SessionLocal() as session:
+            # Older databases may contain documents created before the chat
+            # library existed. Repair that relationship on startup so a
+            # restart never hides an existing document session.
+            document_ids = set((await session.execute(select(Document.id))).scalars().all())
+            chat_document_ids = set((await session.execute(select(Chat.document_id))).scalars().all())
+            session.add_all([
+                Chat(document_id=document_id)
+                for document_id in document_ids - chat_document_ids
+            ])
             interrupted = (await session.execute(
                 select(Document).where(Document.status.in_(PROCESSING_STATES))
             )).scalars().all()

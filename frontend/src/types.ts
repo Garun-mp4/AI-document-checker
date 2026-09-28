@@ -21,6 +21,24 @@ export interface DocumentRecord {
   updated_at: string
 }
 
+export interface ChatSummary {
+  id: string
+  document_id: string
+  title: string
+  filename: string
+  file_type: string
+  file_size: number
+  status: DocumentStatus
+  error_message: string | null
+  chunk_count: number
+  metadata: Record<string, unknown>
+  created_at: string
+  last_activity_at: string
+  message_count: number
+  last_message_at: string | null
+  last_message_preview: string | null
+}
+
 export interface SourceRef {
   id: string
   text: string

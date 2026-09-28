@@ -18,6 +18,7 @@ from app.database import SessionLocal
 from app.models import Chat, Chunk, Document, Insight, Message
 from app.schemas import (
     ChatOut,
+    ChatSummaryOut,
     DocumentOut,
     DocumentPreviewOut,
     InsightOut,
@@ -25,6 +26,7 @@ from app.schemas import (
     SendMessageIn,
     SourceOut,
 )
+from app.services.chat_library import build_chat_summary
 from app.services.citations import format_source_markers
 from app.services.codex import CodexModelUnavailable, CodexNeedsLogin, CodexUnavailable
 from app.services.parsing import (
@@ -106,6 +108,34 @@ async def list_documents() -> list[DocumentOut]:
         return [_document_out(document) for document in documents]
 
 
+@router.get("/chats", response_model=list[ChatSummaryOut])
+async def list_chat_library() -> list[ChatSummaryOut]:
+    """List persisted document conversations ordered by their last activity."""
+
+    async with SessionLocal() as session:
+        pairs = (await session.execute(
+            select(Chat, Document)
+            .join(Document, Document.id == Chat.document_id)
+            .order_by(Chat.created_at.desc())
+        )).all()
+        if not pairs:
+            return []
+        chat_ids = [chat.id for chat, _ in pairs]
+        messages = (await session.execute(
+            select(Message)
+            .where(Message.chat_id.in_(chat_ids))
+            .order_by(Message.created_at, Message.id)
+        )).scalars().all()
+        messages_by_chat: dict[uuid.UUID, list[Message]] = {chat_id: [] for chat_id in chat_ids}
+        for message in messages:
+            messages_by_chat.setdefault(message.chat_id, []).append(message)
+        summaries = [
+            build_chat_summary(chat, document, messages_by_chat.get(chat.id, []))
+            for chat, document in pairs
+        ]
+        return sorted(summaries, key=lambda item: item.last_activity_at, reverse=True)
+
+
 @router.post("/documents", response_model=DocumentOut, status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(request: Request, file: Annotated[UploadFile, File()]) -> DocumentOut:
     if not file.filename:
@@ -147,6 +177,9 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
         )
         async with SessionLocal() as session:
             session.add(document)
+            # Create the durable conversation before processing starts so a
+            # queued or failed upload is still visible in the chat library.
+            session.add(Chat(document_id=document_id))
             await session.commit()
             await session.refresh(document)
     except Exception:

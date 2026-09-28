@@ -30,11 +30,12 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, CodexStatus, DocumentPreview, DocumentRecord, Insight, PreviewBlock, SourceRef, StreamCitation } from './types'
+import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, PreviewBlock, SourceRef, StreamCitation } from './types'
 
 const API = '/api/v1'
 const PAGE_SIZE = 40
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml'
+const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -108,6 +109,21 @@ function relativeDate(value: string): string {
   return days === 1 ? 'вчера' : `${days} дн. назад`
 }
 
+function summaryToDocument(summary: ChatSummary): DocumentRecord {
+  return {
+    id: summary.document_id,
+    filename: summary.filename,
+    file_type: summary.file_type,
+    file_size: summary.file_size,
+    status: summary.status,
+    error_message: summary.error_message,
+    chunk_count: summary.chunk_count,
+    metadata: summary.metadata,
+    created_at: summary.created_at,
+    updated_at: summary.last_activity_at,
+  }
+}
+
 function previewLocatorText(block: PreviewBlock): string {
   const label = block.locator.label
   if (typeof label === 'string' && label) return label
@@ -147,8 +163,8 @@ function PreviewSourceCallout({ source }: { source: SourceRef | StreamCitation |
 }
 
 function App() {
-  const [documents, setDocuments] = useState<DocumentRecord[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [chats, setChats] = useState<ChatSummary[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
   const [document, setDocument] = useState<DocumentRecord | null>(null)
   const [insights, setInsights] = useState<Insight[]>([])
   const [chunks, setChunks] = useState<SourceRef[]>([])
@@ -187,14 +203,24 @@ function App() {
   }, [])
 
   const updateDocumentInLibrary = useCallback((record: DocumentRecord) => {
-    setDocuments((current) => current.map((item) => item.id === record.id ? record : item))
+    setChats((current) => current.map((item) => item.document_id === record.id ? {
+      ...item,
+      filename: record.filename,
+      file_type: record.file_type,
+      file_size: record.file_size,
+      status: record.status,
+      error_message: record.error_message,
+      chunk_count: record.chunk_count,
+      metadata: record.metadata,
+      last_activity_at: item.message_count ? item.last_activity_at : record.updated_at,
+    } : item))
   }, [])
 
   const refreshLibrary = useCallback(async () => {
     try {
-      const result = await api<DocumentRecord[]>(`${API}/documents`)
-      setDocuments(result)
-      setSelectedId((current) => current && result.some((item) => item.id === current) ? current : result[0]?.id ?? null)
+      const result = await api<ChatSummary[]>(`${API}/chats`)
+      setChats(result)
+      setSelectedId((current) => current && result.some((item) => item.document_id === current) ? current : result[0]?.document_id ?? null)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось загрузить библиотеку документов.')
     }
@@ -205,6 +231,11 @@ function App() {
     const timer = window.setInterval(() => void refreshLibrary(), 8_000)
     return () => window.clearInterval(timer)
   }, [refreshLibrary])
+
+  useEffect(() => {
+    if (selectedId) localStorage.setItem(SELECTED_CHAT_STORAGE_KEY, selectedId)
+    else localStorage.removeItem(SELECTED_CHAT_STORAGE_KEY)
+  }, [selectedId])
 
   useEffect(() => {
     let active = true
@@ -349,8 +380,8 @@ function App() {
     body.append('file', file)
     try {
       const created = await api<DocumentRecord>(`${API}/documents`, { method: 'POST', body })
-      setDocuments((current) => [created, ...current])
       setSelectedId(created.id)
+      void refreshLibrary()
       setPreviewOpen(true)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось загрузить документ.')
@@ -358,7 +389,7 @@ function App() {
       setIsUploading(false)
       if (fileInput.current) fileInput.current.value = ''
     }
-  }, [showToast])
+  }, [refreshLibrary, showToast])
 
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
     if (!document) return
@@ -407,7 +438,7 @@ function App() {
     if (!deleteTarget) return
     try {
       await api<void>(`${API}/documents/${deleteTarget.id}`, { method: 'DELETE' })
-      setDocuments((current) => current.filter((item) => item.id !== deleteTarget.id))
+      setChats((current) => current.filter((item) => item.document_id !== deleteTarget.id))
       if (selectedId === deleteTarget.id) setSelectedId(null)
       setDeleteTarget(null)
     } catch (error) {
@@ -473,6 +504,7 @@ function App() {
                 id: crypto.randomUUID(), role: 'assistant', content: finalText, citations,
                 created_at: new Date().toISOString(),
               }])
+              void refreshLibrary()
               setStreamText('')
               setStreamSources([])
             }
@@ -489,7 +521,7 @@ function App() {
     } finally {
       setIsSending(false)
     }
-  }, [chat, chatInput, isSending, showToast])
+  }, [chat, chatInput, isSending, refreshLibrary, showToast])
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -517,8 +549,8 @@ function App() {
     const position = streamingCitations.findIndex((source) => source.label === label)
     return position >= 0 ? `〔${position + 1}〕` : ''
   })
-  const currentListItem = documents.find((item) => item.id === selectedId)
-  const visibleStatus = document ?? currentListItem
+  const currentListItem = chats.find((item) => item.document_id === selectedId)
+  const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
   const activeStatus = visibleStatus ? ['queued', 'extracting', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
   const mainClasses = [
     'app-shell',
@@ -553,9 +585,9 @@ function App() {
         </div>
       </header>
 
-      <aside className={`library ${sidebarCollapsed ? 'library-manual-collapsed' : ''}`} aria-label="Библиотека документов">
+      <aside className={`library ${sidebarCollapsed ? 'library-manual-collapsed' : ''}`} aria-label="История чатов">
         <div className="library-heading">
-          <div className="library-title">Библиотека</div>
+          <div className="library-title">Чаты</div>
           <button className="icon-button collapse-library" aria-label={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} onClick={() => setSidebarCollapsed((value) => !value)}>
             {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
           </button>
@@ -563,29 +595,29 @@ function App() {
         </div>
         <button className="library-add" onClick={() => fileInput.current?.click()} disabled={isUploading}>
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
-          <span>Добавить документ</span>
+          <span>Новый чат</span>
         </button>
         <div className="library-list-heading">
-          <span>Недавние</span><span className="count-badge">{documents.length}</span>
+          <span>Недавние чаты</span><span className="count-badge">{chats.length}</span>
         </div>
         <div className="document-list">
-          {documents.length === 0 ? (
-            <div className="library-empty">Загруженные файлы появятся здесь</div>
-          ) : documents.map((item) => (
-            <div key={item.id} className={`document-row ${selectedId === item.id ? 'selected' : ''}`}>
-              <button className="document-select" onClick={() => { setSelectedId(item.id); setMobileLibraryOpen(false) }} title={item.filename}>
+          {chats.length === 0 ? (
+            <div className="library-empty">Чаты с документами появятся здесь</div>
+          ) : chats.map((item) => (
+            <div key={item.id} className={`document-row ${selectedId === item.document_id ? 'selected' : ''}`}>
+              <button className="document-select" onClick={() => { setSelectedId(item.document_id); setMobileLibraryOpen(false) }} title={item.filename}>
                 <span className="document-type-icon">{fileIcon(item.file_type, 17)}</span>
                 <span className="document-row-text">
-                  <span className="document-row-name">{item.filename}</span>
-                  <span className="document-row-meta"><span className={`status-dot status-${item.status}`} />{statusLabel(item.status)}</span>
+                  <span className="document-row-name">{item.title}</span>
+                  <span className="document-row-meta"><span className={`status-dot status-${item.status}`} />{item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status)}<span className="row-meta-divider">·</span>{relativeDate(item.last_activity_at)}</span>
                 </span>
               </button>
-              <button className="row-delete icon-button" aria-label={`Удалить ${item.filename}`} onClick={() => setDeleteTarget(item)}><Trash2 size={15} /></button>
+              <button className="row-delete icon-button" aria-label={`Удалить ${item.filename}`} onClick={() => setDeleteTarget(summaryToDocument(item))}><Trash2 size={15} /></button>
             </div>
           ))}
         </div>
         <div className="library-footer">
-          <span className="local-lock"><ShieldCheck size={14} /> Данные хранятся локально</span>
+          <span className="local-lock"><ShieldCheck size={14} /> История и документы хранятся локально</span>
           <span>до 25 МБ на файл</span>
         </div>
       </aside>
@@ -598,7 +630,7 @@ function App() {
           <EmptyWorkspace
             isUploading={isUploading}
             onChoose={() => fileInput.current?.click()}
-            documentsCount={documents.length}
+            documentsCount={chats.length}
             onToggleLibrary={() => setSidebarCollapsed((value) => !value)}
             onExpandChat={() => setChatFull(true)}
           />
@@ -893,7 +925,7 @@ function EmptyWorkspace({
           <small>PDF · DOCX · TXT · MD · CSV · XML <i /> до 25 МБ</small>
         </button>
         <div className="empty-footnote"><ShieldCheck size={15} /><span>Оригиналы и индексы остаются на вашем компьютере</span></div>
-        {documentsCount > 0 && <p className="empty-library-note">Выберите сохранённый файл в библиотеке слева.</p>}
+        {documentsCount > 0 && <p className="empty-library-note">Выберите сохранённый чат слева, чтобы продолжить работу.</p>}
       </div>
       <div className="empty-chat-compose-area">
         <div className="empty-chat-composer">

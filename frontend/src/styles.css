@@ -189,6 +189,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .document-row-text { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
 .document-row-name { overflow: hidden; color: var(--ink-soft); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .document-row-meta { display: flex; align-items: center; gap: 5px; color: var(--ink-tertiary); font-size: 11px; }
+.row-meta-divider { color: var(--line-strong); }
 .status-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #9c9c9c; }
 .status-ready { background: #141414; }
 .status-error, .status-needs_auth, .status-model_unavailable { background: #777; }

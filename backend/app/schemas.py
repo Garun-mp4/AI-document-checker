@@ -72,5 +72,25 @@ class ChatOut(BaseModel):
     document_id: str
 
 
+class ChatSummaryOut(BaseModel):
+    """A durable library entry representing one document conversation."""
+
+    id: str
+    document_id: str
+    title: str
+    filename: str
+    file_type: str
+    file_size: int
+    status: str
+    error_message: str | None
+    chunk_count: int
+    metadata: dict[str, Any]
+    created_at: datetime
+    last_activity_at: datetime
+    message_count: int
+    last_message_at: datetime | None = None
+    last_message_preview: str | None = None
+
+
 class SendMessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=4_000)

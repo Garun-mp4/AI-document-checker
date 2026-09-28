@@ -75,6 +75,40 @@ def test_compose_returns_codex_status_contract(compose_client: httpx.Client) -> 
     assert isinstance(status["reasoning_available"], bool)
 
 
+@pytest.mark.integration
+def test_compose_chat_library_keeps_session_after_reloading(compose_client: httpx.Client) -> None:
+    """A document session must be discoverable again by a fresh client request."""
+
+    _require_disconnected_codex(compose_client)
+    response = compose_client.post(
+        "/api/v1/documents",
+        files={"file": ("session.txt", (FIXTURES / "sample.txt").read_bytes(), "text/plain")},
+    )
+    assert response.status_code == 202, response.text
+    document_id = response.json()["id"]
+    try:
+        document = _wait_for_document(compose_client, document_id)
+        assert document["status"] == "needs_auth", document.get("error_message")
+
+        first_library = compose_client.get("/api/v1/chats")
+        assert first_library.status_code == 200, first_library.text
+        first_chat = next(item for item in first_library.json() if item["document_id"] == document_id)
+        assert first_chat["filename"] == "session.txt"
+        assert first_chat["title"] == "session.txt"
+        assert first_chat["message_count"] == 0
+        assert first_chat["last_message_at"] is None
+
+        # A second request models a browser reload: the server is the source of truth.
+        second_library = compose_client.get("/api/v1/chats")
+        assert second_library.status_code == 200, second_library.text
+        second_chat = next(item for item in second_library.json() if item["document_id"] == document_id)
+        assert second_chat["id"] == first_chat["id"]
+        assert second_chat["status"] == "needs_auth"
+    finally:
+        delete_response = compose_client.delete(f"/api/v1/documents/{document_id}")
+        assert delete_response.status_code == 204, delete_response.text
+
+
 def _wait_for_document(client: httpx.Client, document_id: str, timeout: float = 300.0) -> dict:
     deadline = time.monotonic() + timeout
     latest: dict = {}
