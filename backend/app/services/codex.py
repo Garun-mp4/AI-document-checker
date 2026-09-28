@@ -10,6 +10,13 @@ from typing import Any
 from openai_codex import ApprovalMode, AsyncCodex, CodexError, ExternalMessage, Sandbox
 
 from app.config import settings
+from app.services.codex_preferences import (
+    catalog_options,
+    model_display_name,
+    preferences_path,
+    read_preferences,
+    write_preferences,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +36,19 @@ class CodexModelUnavailable(CodexUnavailable):
     pass
 
 
+class CodexPreferenceError(CodexUnavailable):
+    pass
+
+
 class CodexService:
     def __init__(self) -> None:
+        self._preferences_file = preferences_path(settings.codex_home)
+        saved_preferences = read_preferences(
+            self._preferences_file,
+            {"model": settings.codex_model, "reasoning_effort": settings.codex_reasoning_effort},
+        )
+        settings.codex_model = saved_preferences["model"]
+        settings.codex_reasoning_effort = saved_preferences["reasoning_effort"]
         self.client: AsyncCodex | None = None
         self.startup_error: str | None = None
         self.login_state = "idle"
@@ -66,9 +84,11 @@ class CodexService:
         result: dict[str, Any] = {
             "authenticated": False,
             "model": settings.codex_model,
+            "model_label": model_display_name(settings.codex_model),
             "reasoning_effort": settings.codex_reasoning_effort,
             "model_available": False,
             "reasoning_available": False,
+            "models": [],
             "login_state": self.login_state,
             "login_error": self.login_error,
             "verification_url": self.verification_url,
@@ -84,15 +104,13 @@ class CodexService:
                 result["account_type"] = str(getattr(account.account, "type", "ChatGPT"))
             if result["authenticated"]:
                 catalog = await self.client.models()
-                model = next((entry for entry in catalog.data if entry.model == settings.codex_model), None)
+                models = catalog_options(catalog.data)
+                result["models"] = models
+                model = next((entry for entry in models if entry["id"] == settings.codex_model), None)
                 result["model_available"] = model is not None
                 if model is not None:
-                    supported = []
-                    for item in model.supported_reasoning_efforts:
-                        effort = getattr(item, "reasoning_effort", None)
-                        if effort is None:
-                            effort = getattr(item, "effort", item)
-                        supported.append(getattr(effort, "value", effort))
+                    result["model_label"] = model["label"]
+                    supported = {item["value"] for item in model["reasoning_efforts"]}
                     result["reasoning_available"] = settings.codex_reasoning_effort in supported
                 if not result["model_available"]:
                     result["error"] = f"Модель {settings.codex_model} недоступна для этого аккаунта Codex."
@@ -105,6 +123,34 @@ class CodexService:
             logger.warning("Could not read Codex account/model status: %s", exc)
         self._status_cache = (loop.time(), result.copy())
         return result
+
+    async def set_preferences(self, model: str, reasoning_effort: str) -> dict[str, Any]:
+        """Validate and persist a model/reasoning choice from the catalog."""
+
+        selected_model = model.strip().lower()
+        selected_effort = reasoning_effort.strip().lower()
+        if not selected_model or not selected_effort:
+            raise CodexPreferenceError("Выберите модель и уровень размышления.")
+
+        state = await self.status(refresh=True)
+        if not state["authenticated"]:
+            raise CodexNeedsLogin("Сначала подключите аккаунт Codex.")
+        options = state.get("models") or []
+        selected = next((item for item in options if item["id"] == selected_model), None)
+        if selected is None:
+            raise CodexPreferenceError("Выбранная модель недоступна для этого аккаунта Codex.")
+        supported = {item["value"] for item in selected["reasoning_efforts"]}
+        if selected_effort not in supported:
+            raise CodexPreferenceError("Выбранный уровень размышления не поддерживается этой моделью.")
+        try:
+            write_preferences(self._preferences_file, selected_model, selected_effort)
+        except OSError as exc:
+            logger.exception("Could not persist Codex preferences")
+            raise CodexPreferenceError("Не удалось сохранить настройки модели локально.") from exc
+        settings.codex_model = selected_model
+        settings.codex_reasoning_effort = selected_effort
+        self._status_cache = None
+        return await self.status(refresh=True)
 
     async def require_ready(self) -> None:
         state = await self.status(refresh=True)

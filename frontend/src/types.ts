@@ -96,14 +96,29 @@ export interface ChatRecord {
 export interface CodexStatus {
   authenticated: boolean
   model: string
+  model_label: string
   reasoning_effort: string
   model_available: boolean
   reasoning_available: boolean
+  models: CodexModelOption[]
   login_state: 'idle' | 'pending' | 'completed' | 'failed'
   login_error: string | null
   verification_url: string | null
   user_code: string | null
   error: string | null
+}
+
+export interface CodexModelOption {
+  id: string
+  label: string
+  description: string
+  reasoning_efforts: CodexReasoningOption[]
+}
+
+export interface CodexReasoningOption {
+  value: string
+  label: string
+  description: string
 }
 
 export interface StreamCitation {

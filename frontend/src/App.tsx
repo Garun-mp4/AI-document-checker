@@ -36,6 +36,8 @@ const API = '/api/v1'
 const PAGE_SIZE = 40
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml'
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
+const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
+const DEFAULT_CODEX_REASONING = 'medium'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -86,6 +88,17 @@ function fileIcon(fileType: string, size = 18) {
 function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} КБ`
   return `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} МБ`
+}
+
+function codexModelLabel(status: CodexStatus | null): string {
+  if (status?.model_label) return status.model_label
+  const model = status?.model || DEFAULT_CODEX_MODEL
+  return model.replace(/^gpt(?=-)/i, 'GPT').replace(/(?<=\d)-(?=[a-z])/gi, ' ').replace(/(?<=\s)([a-z])/g, (letter) => letter.toUpperCase())
+}
+
+function codexReasoningLabel(value: string | undefined): string {
+  const normalized = (value || DEFAULT_CODEX_REASONING).toLowerCase()
+  return normalized === 'xhigh' ? 'Xhigh' : normalized.charAt(0).toUpperCase() + normalized.slice(1)
 }
 
 function pluralLabel(value: number, one: string, few: string, many = few): string {
@@ -182,6 +195,8 @@ function App() {
   const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false)
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
+  const [codexSaving, setCodexSaving] = useState(false)
+  const [codexPreferenceMessage, setCodexPreferenceMessage] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
   const [chatInput, setChatInput] = useState('')
   const [isSending, setIsSending] = useState(false)
@@ -423,6 +438,37 @@ function App() {
     }
   }, [showToast])
 
+  const saveCodexPreferences = useCallback(async (model: string, reasoningEffort: string) => {
+    setCodexSaving(true)
+    setCodexPreferenceMessage('')
+    try {
+      const updated = await api<CodexStatus>(`${API}/codex/preferences`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, reasoning_effort: reasoningEffort }),
+      })
+      setCodex(updated)
+      setCodexPreferenceMessage('Настройки модели сохранены.')
+    } catch (error) {
+      setCodexPreferenceMessage(error instanceof Error ? error.message : 'Не удалось сохранить настройки модели.')
+    } finally {
+      setCodexSaving(false)
+    }
+  }, [])
+
+  const changeCodexModel = useCallback((model: string) => {
+    const option = codex?.models.find((item) => item.id === model)
+    const currentEffort = codex?.reasoning_effort || DEFAULT_CODEX_REASONING
+    const nextEffort = option?.reasoning_efforts.some((item) => item.value === currentEffort)
+      ? currentEffort
+      : option?.reasoning_efforts[0]?.value || currentEffort
+    void saveCodexPreferences(model, nextEffort)
+  }, [codex, saveCodexPreferences])
+
+  const changeCodexReasoning = useCallback((reasoningEffort: string) => {
+    void saveCodexPreferences(codex?.model || DEFAULT_CODEX_MODEL, reasoningEffort)
+  }, [codex, saveCodexPreferences])
+
   const retryDocument = useCallback(async () => {
     if (!document) return
     try {
@@ -540,6 +586,26 @@ function App() {
   }
 
   const authReady = Boolean(codex?.authenticated && codex.model_available && codex.reasoning_available)
+  const catalogModelOptions = codex?.models ?? []
+  const unavailableCurrentModel = codex?.model && catalogModelOptions.length && !catalogModelOptions.some((item) => item.id === codex.model) ? [{
+    id: codex.model,
+    label: `${codexModelLabel(codex)} · недоступна`,
+    description: 'Эта модель больше не доступна для текущего аккаунта.',
+    reasoning_efforts: [],
+  }] : []
+  const codexModelOptions = catalogModelOptions.length ? [...unavailableCurrentModel, ...catalogModelOptions] : [{
+    id: codex?.model || DEFAULT_CODEX_MODEL,
+    label: codexModelLabel(codex),
+    description: '',
+    reasoning_efforts: [{
+      value: codex?.reasoning_effort || DEFAULT_CODEX_REASONING,
+      label: codexReasoningLabel(codex?.reasoning_effort),
+      description: '',
+    }],
+  }]
+  const selectedCodexModel = codexModelOptions.find((item) => item.id === (codex?.model || DEFAULT_CODEX_MODEL)) || codexModelOptions[0]
+  const codexReasoningOptions = selectedCodexModel?.reasoning_efforts ?? []
+  const selectedCodexReasoning = codexReasoningOptions.find((option) => option.value === codex?.reasoning_effort)
   const streamedLabels = Array.from(new Set(Array.from(streamText.matchAll(/\[(S\d{2})\]/g), (match) => match[1])))
   const streamingCitations = streamedLabels.flatMap((label) => {
     const source = streamSources.find((item) => item.label === label)
@@ -572,10 +638,14 @@ function App() {
           <span className="brand-context">Рабочее пространство</span>
         </div>
         <div className="topbar-actions">
-          <button className={`connection-button ${authReady ? 'is-connected' : ''}`} onClick={() => setAuthOpen(true)}>
+          <button
+            className={`connection-button ${authReady ? 'is-connected' : ''}`}
+            aria-label={authReady ? `Codex подключён: ${codexModelLabel(codex)}, ${codexReasoningLabel(codex?.reasoning_effort)}` : 'Подключить Codex'}
+            onClick={() => setAuthOpen(true)}
+          >
             {authReady ? <ShieldCheck size={15} /> : <CircleHelp size={15} />}
             <span>{authReady ? 'Codex подключён' : 'Подключить Codex'}</span>
-            {authReady && <span className="connection-model">GPT-6 Luna · medium</span>}
+            {authReady && <span className="connection-model">{codexModelLabel(codex)} · {codexReasoningLabel(codex?.reasoning_effort)}</span>}
           </button>
           <button className="icon-button mobile-chat-toggle" aria-label="Открыть чат" onClick={() => { setChatOpen(true); setMobileChatOpen(true) }}><MessageSquareText size={18} /></button>
           <button className="button button-dark header-upload" onClick={() => fileInput.current?.click()} disabled={isUploading}>
@@ -834,12 +904,38 @@ function App() {
           <span className="modal-symbol"><ShieldCheck size={21} /></span>
           <span className="modal-eyebrow">ПОДКЛЮЧЕНИЕ МОДЕЛИ</span>
           <h2 id="auth-title">Вход в Codex</h2>
-          <p className="modal-intro">Для анализа используется GPT-6 Luna с уровнем reasoning medium через ваш аккаунт Codex. API-ключ не нужен.</p>
+          <p className="modal-intro">Для анализа используется {codexModelLabel(codex)} с уровнем reasoning {codexReasoningLabel(codex?.reasoning_effort).toLowerCase()} через ваш аккаунт Codex. API-ключ не нужен.</p>
           <div className="auth-details">
-            <div><span className="auth-detail-label">Модель</span><strong>GPT-6 Luna</strong></div>
-            <div><span className="auth-detail-label">Уровень анализа</span><strong>Medium</strong></div>
+            <div><span className="auth-detail-label">Модель</span><strong>{codexModelLabel(codex)}</strong></div>
+            <div><span className="auth-detail-label">Уровень анализа</span><strong>{codexReasoningLabel(codex?.reasoning_effort)}</strong></div>
             <div><span className="auth-detail-label">Состояние</span><strong>{authReady ? 'Подключено' : codex?.login_state === 'pending' ? 'Ожидание подтверждения' : 'Не подключено'}</strong></div>
           </div>
+          <div className="auth-settings" aria-label="Настройки модели Codex">
+            <label className="auth-setting">
+              <span className="auth-setting-label">Модель</span>
+              <select
+                value={codex?.model || DEFAULT_CODEX_MODEL}
+                onChange={(event) => changeCodexModel(event.target.value)}
+                disabled={!codex?.authenticated || !codex?.models?.length || codexSaving}
+              >
+                {codexModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+              {selectedCodexModel?.description && <small>{selectedCodexModel.description}</small>}
+            </label>
+            <label className="auth-setting">
+              <span className="auth-setting-label">Уровень размышления</span>
+              <select
+                value={codex?.reasoning_effort || DEFAULT_CODEX_REASONING}
+                onChange={(event) => changeCodexReasoning(event.target.value)}
+                disabled={!codex?.authenticated || !codex?.model_available || !codexReasoningOptions.length || codexSaving}
+              >
+                {codexReasoningOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              {selectedCodexReasoning?.description && <small>{selectedCodexReasoning.description}</small>}
+            </label>
+          </div>
+          <p className="auth-settings-note">{codexSaving ? 'Сохраняю настройки…' : codex?.authenticated && codex?.models?.length ? 'Доступны модели и уровни из вашего аккаунта Codex.' : 'Подключите аккаунт, чтобы выбрать доступные варианты.'}</p>
+          {codexPreferenceMessage && <p className="auth-settings-message" role="status">{codexPreferenceMessage}</p>}
           {codex?.login_state === 'pending' && codex.user_code ? (
             <div className="device-code-box">
               <span>Откройте страницу и введите код</span>
@@ -884,7 +980,7 @@ function processingDescription(status: DocumentRecord['status']): string {
     analyzing: 'Подбираю подтверждения и готовлю семь ответов.',
     ready: 'Документ проиндексирован и готов к вопросам.',
     needs_auth: 'Подключите аккаунт Codex, чтобы создать карточки и начать чат.',
-    model_unavailable: 'Проверьте доступность GPT-6 Luna для этого аккаунта.',
+    model_unavailable: 'Проверьте доступность выбранной модели для этого аккаунта.',
     error: 'Можно проверить файл или повторить обработку.',
   }[status]
 }

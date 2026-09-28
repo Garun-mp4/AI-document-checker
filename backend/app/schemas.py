@@ -94,3 +94,8 @@ class ChatSummaryOut(BaseModel):
 
 class SendMessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=4_000)
+
+
+class CodexPreferencesIn(BaseModel):
+    model: str = Field(min_length=1, max_length=100)
+    reasoning_effort: str = Field(min_length=1, max_length=20)

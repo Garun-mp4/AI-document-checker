@@ -450,6 +450,15 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .auth-details > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--surface-soft); }
 .auth-detail-label { color: var(--ink-tertiary); font-size: 11px; }
 .auth-details strong { overflow: hidden; color: var(--ink); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.auth-settings { display: grid; gap: 9px; margin: 15px 0 0; }
+.auth-setting { display: grid; gap: 6px; }
+.auth-setting-label { color: var(--ink-secondary); font-size: 11px; font-weight: 500; }
+.auth-setting select { width: 100%; min-height: 39px; padding: 0 32px 0 11px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: var(--paper); color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.auth-setting select:focus-visible { border-color: var(--ink); box-shadow: 0 0 0 2px rgb(0 0 0 / 9%); }
+.auth-setting select:disabled { color: var(--ink-tertiary); background: var(--surface-soft); cursor: not-allowed; }
+.auth-setting small { color: var(--ink-tertiary); font-size: 10px; line-height: 1.4; }
+.auth-settings-note, .auth-settings-message { margin: 8px 0 0; color: var(--ink-tertiary); font-size: 10px; line-height: 1.45; }
+.auth-settings-message { color: var(--ink-secondary); }
 .auth-steps { display: flex; flex-direction: column; gap: 8px; margin: 20px 0 22px; padding-left: 21px; color: var(--ink-secondary); font-size: 13px; line-height: 1.55; }
 .auth-steps li::marker { color: var(--ink); font-weight: 600; }
 .auth-start, .auth-link { width: 100%; }
@@ -590,6 +599,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .auth-details > div { padding: 8px 6px; }
   .auth-detail-label { font-size: 9px; }
   .auth-details strong { font-size: 11px; }
+  .auth-setting select { min-height: 37px; }
   .confirm-actions { flex-direction: column-reverse; }
   .confirm-actions .button { width: 100%; }
   .toast-message { right: 12px; bottom: 12px; }

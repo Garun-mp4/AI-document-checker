@@ -73,6 +73,21 @@ def test_compose_returns_codex_status_contract(compose_client: httpx.Client) -> 
     assert status["reasoning_effort"]
     assert isinstance(status["model_available"], bool)
     assert isinstance(status["reasoning_available"], bool)
+    assert isinstance(status["model_label"], str)
+    assert isinstance(status["models"], list)
+    for model in status["models"]:
+        assert model["id"]
+        assert model["label"]
+        assert isinstance(model["reasoning_efforts"], list)
+
+
+@pytest.mark.integration
+def test_compose_rejects_a_model_that_is_not_in_the_catalog(compose_client: httpx.Client) -> None:
+    response = compose_client.post(
+        "/api/v1/codex/preferences",
+        json={"model": "definitely-not-a-codex-model", "reasoning_effort": "medium"},
+    )
+    assert response.status_code in {409, 422}, response.text
 
 
 @pytest.mark.integration

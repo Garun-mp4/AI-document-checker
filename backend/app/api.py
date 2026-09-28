@@ -19,6 +19,7 @@ from app.models import Chat, Chunk, Document, Insight, Message
 from app.schemas import (
     ChatOut,
     ChatSummaryOut,
+    CodexPreferencesIn,
     DocumentOut,
     DocumentPreviewOut,
     InsightOut,
@@ -28,7 +29,12 @@ from app.schemas import (
 )
 from app.services.chat_library import build_chat_summary
 from app.services.citations import format_source_markers
-from app.services.codex import CodexModelUnavailable, CodexNeedsLogin, CodexUnavailable
+from app.services.codex import (
+    CodexModelUnavailable,
+    CodexNeedsLogin,
+    CodexPreferenceError,
+    CodexUnavailable,
+)
 from app.services.parsing import (
     SUPPORTED_EXTENSIONS,
     DocumentParsingError,
@@ -91,6 +97,18 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 @router.get("/codex/status")
 async def codex_status(request: Request) -> dict[str, Any]:
     return await request.app.state.codex.status()
+
+
+@router.post("/codex/preferences")
+async def codex_preferences(body: CodexPreferencesIn, request: Request) -> dict[str, Any]:
+    try:
+        return await request.app.state.codex.set_preferences(body.model, body.reasoning_effort)
+    except CodexNeedsLogin as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CodexPreferenceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CodexUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/codex/login/device-code")
