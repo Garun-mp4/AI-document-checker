@@ -208,6 +208,7 @@ function App() {
   const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null)
   const [previewPage, setPreviewPage] = useState(1)
   const fileInput = useRef<HTMLInputElement>(null)
+  const chatInputRef = useRef<HTMLTextAreaElement>(null)
   const workArea = useRef<HTMLElement>(null)
   const conversation = useRef<HTMLDivElement>(null)
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null)
@@ -377,6 +378,29 @@ function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+
+  useEffect(() => {
+    if (!authOpen && !deleteTarget) return
+    const dialog = window.document.querySelector<HTMLElement>('.modal-card')
+    if (!dialog) return
+    const focusableSelector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => element.offsetParent !== null)
+    focusable[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || focusable.length < 2) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && window.document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && window.document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.document.addEventListener('keydown', onKeyDown)
+    return () => window.document.removeEventListener('keydown', onKeyDown)
+  }, [authOpen, deleteTarget])
 
   const uploadFile = useCallback(async (file?: File) => {
     if (!file) return
@@ -629,6 +653,7 @@ function App() {
 
   return (
     <div className={mainClasses} style={{ '--chat-width': `${chatWidth}px` } as React.CSSProperties}>
+      <a className="skip-link" href="#main-content">К содержанию</a>
       <header className="topbar">
         <div className="topbar-brand">
           <button className="icon-button mobile-menu" aria-label="Открыть документы" onClick={() => setMobileLibraryOpen(true)}><Menu size={19} /></button>
@@ -647,7 +672,7 @@ function App() {
             <span>{authReady ? 'Codex подключён' : 'Подключить Codex'}</span>
             {authReady && <span className="connection-model">{codexModelLabel(codex)} · {codexReasoningLabel(codex?.reasoning_effort)}</span>}
           </button>
-          <button className="icon-button mobile-chat-toggle" aria-label="Открыть чат" onClick={() => { setChatOpen(true); setMobileChatOpen(true) }}><MessageSquareText size={18} /></button>
+          <button className="icon-button mobile-chat-toggle" aria-label="Открыть чат" aria-expanded={mobileChatOpen} aria-controls="document-chat" onClick={() => { setChatOpen(true); setMobileChatOpen(true) }}><MessageSquareText size={18} /></button>
           <button className="button button-dark header-upload" onClick={() => fileInput.current?.click()} disabled={isUploading}>
             {isUploading ? <LoaderCircle className="spin" size={16} /> : <FileUp size={16} />}
             <span>Загрузить файл</span>
@@ -692,8 +717,8 @@ function App() {
         </div>
       </aside>
 
-      <main className={`workspace ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
-        <input ref={fileInput} className="visually-hidden" type="file" accept={ACCEPTED} onChange={(event) => void uploadFile(event.target.files?.[0])} />
+      <main id="main-content" tabIndex={-1} className={`workspace ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
+        <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} aria-label="Выберите документ" onChange={(event) => void uploadFile(event.target.files?.[0])} />
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV или XML</span></div>}
 
         {!selectedId || !visibleStatus ? (
@@ -844,7 +869,7 @@ function App() {
       </main>
 
       {chatOpen && <div className="chat-resizer" role="separator" aria-label="Ширина чата" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={560} aria-valuenow={chatWidth} tabIndex={0} onPointerDown={startResize} onKeyDown={resizeByKeyboard} />}
-      <aside className={`chat-panel ${chatFull ? 'chat-panel-full' : ''}`} aria-label="Чат по документу">
+      <aside id="document-chat" className={`chat-panel ${chatFull ? 'chat-panel-full' : ''}`} aria-label="Чат по документу">
         <div className="chat-panel-header">
           <div className="chat-title"><span className="chat-title-icon"><MessageSquareText size={16} /></span><div><strong>Чат с документом</strong><span>{document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
           <div className="chat-header-actions">
@@ -866,7 +891,7 @@ function App() {
               <h3>С чего начнём?</h3>
               <p>Ответы будут основаны на тексте этого документа.</p>
               <div className="suggestion-list">
-                {['Кратко перескажи документ', 'Кто отвечает за выполнение?', 'Какие сроки указаны?'].map((question) => <button key={question} onClick={() => { setChatInput(question); }}><span>{question}</span><ArrowUp size={14} /></button>)}
+                {['Кратко перескажи документ', 'Кто отвечает за выполнение?', 'Какие сроки указаны?'].map((question) => <button key={question} type="button" onClick={() => { setChatInput(question); window.requestAnimationFrame(() => chatInputRef.current?.focus()) }}><span>{question}</span><ArrowUp size={14} /></button>)}
               </div>
             </div>
           ) : (
@@ -881,7 +906,10 @@ function App() {
           {!authReady && document?.status === 'ready' && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
           <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
             <textarea
+              ref={chatInputRef}
               rows={2}
+              name="chat-message"
+              autoComplete="off"
               value={chatInput}
               onChange={(event) => setChatInput(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() } }}
@@ -896,15 +924,15 @@ function App() {
         </div>
       </aside>
 
-      <div className="mobile-scrim" aria-hidden="true" onClick={() => { setMobileLibraryOpen(false); setMobileChatOpen(false) }} />
+      <button className="mobile-scrim" type="button" aria-label="Закрыть открытые панели" onClick={() => { setMobileLibraryOpen(false); setMobileChatOpen(false) }} />
 
       {authOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAuthOpen(false) }}>
-        <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-          <button className="icon-button modal-close" aria-label="Закрыть" onClick={() => setAuthOpen(false)}><X size={19} /></button>
+        <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="auth-title" aria-describedby="auth-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть" onClick={() => setAuthOpen(false)}><X size={19} /></button>
           <span className="modal-symbol"><ShieldCheck size={21} /></span>
           <span className="modal-eyebrow">ПОДКЛЮЧЕНИЕ МОДЕЛИ</span>
           <h2 id="auth-title">Вход в Codex</h2>
-          <p className="modal-intro">Для анализа используется {codexModelLabel(codex)} с уровнем reasoning {codexReasoningLabel(codex?.reasoning_effort).toLowerCase()} через ваш аккаунт Codex. API-ключ не нужен.</p>
+          <p id="auth-description" className="modal-intro">Для анализа используется {codexModelLabel(codex)} с уровнем reasoning {codexReasoningLabel(codex?.reasoning_effort).toLowerCase()} через ваш аккаунт Codex. API-ключ не нужен.</p>
           <div className="auth-details">
             <div><span className="auth-detail-label">Модель</span><strong>{codexModelLabel(codex)}</strong></div>
             <div><span className="auth-detail-label">Уровень анализа</span><strong>{codexReasoningLabel(codex?.reasoning_effort)}</strong></div>
@@ -957,17 +985,17 @@ function App() {
       </div>}
 
       {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteTarget(null) }}>
-        <section className="modal-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="delete-title">
-          <button className="icon-button modal-close" aria-label="Закрыть" onClick={() => setDeleteTarget(null)}><X size={19} /></button>
+        <section className="modal-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть" onClick={() => setDeleteTarget(null)}><X size={19} /></button>
           <span className="modal-symbol"><Trash2 size={20} /></span>
           <span className="modal-eyebrow">УДАЛЕНИЕ ДОКУМЕНТА</span>
           <h2 id="delete-title">Удалить файл?</h2>
-          <p className="modal-intro">Будут удалены оригинал, индекс, карточки и история чата для «{deleteTarget.filename}».</p>
+          <p id="delete-description" className="modal-intro">Будут удалены оригинал, индекс, карточки и история чата для «{deleteTarget.filename}».</p>
           <div className="confirm-actions"><button className="button button-light" onClick={() => setDeleteTarget(null)}>Отмена</button><button className="button button-dark" onClick={() => void confirmDelete()}>Удалить документ</button></div>
         </section>
       </div>}
 
-      {toast && <div className="toast-message" role="status">{toast}</div>}
+      {toast && <div className="toast-message" role="status" aria-live="polite">{toast}</div>}
     </div>
   )
 }
@@ -1025,7 +1053,7 @@ function EmptyWorkspace({
       </div>
       <div className="empty-chat-compose-area">
         <div className="empty-chat-composer">
-          <textarea rows={1} placeholder="Задайте вопрос по документу…" aria-label="Вопрос по документу" disabled />
+          <textarea rows={1} name="chat-message" autoComplete="off" placeholder="Задайте вопрос по документу…" aria-label="Вопрос по документу" disabled />
           <div className="empty-chat-footer">
             <span>Чат станет доступен после загрузки документа</span>
             <div className="empty-chat-actions">
