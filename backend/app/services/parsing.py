@@ -54,15 +54,25 @@ def safe_filename(filename: str) -> str:
     return leaf[:255]
 
 
-def _decode_text(data: bytes) -> str:
+def _decode_text_with_encoding(data: bytes) -> tuple[str, str]:
     if b"\x00" in data[:4096]:
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be"):
+            try:
+                return data.decode(encoding), encoding
+            except UnicodeDecodeError:
+                continue
         raise DocumentParsingError("Файл содержит неподдерживаемую двоичную кодировку.")
-    for encoding in ("utf-8-sig", "utf-16", "cp1251", "latin-1"):
+    encodings = ("utf-8-sig", "cp1251", "latin-1")
+    for encoding in encodings:
         try:
-            return data.decode(encoding)
+            return data.decode(encoding), encoding
         except UnicodeDecodeError:
             continue
     raise DocumentParsingError("Не удалось определить кодировку текста.")
+
+
+def _decode_text(data: bytes) -> str:
+    return _decode_text_with_encoding(data)[0]
 
 
 def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TARGET_CHARS) -> list[SourceBlock]:
@@ -75,10 +85,17 @@ def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TAR
     result: list[SourceBlock] = []
     buffer = ""
     part_index = 1
+
+    def part_locator(start: int, end: int, part: int) -> dict[str, Any]:
+        current = {**locator, "part": part}
+        current.setdefault("char_start", start)
+        current.setdefault("char_end", end)
+        return current
+
     for paragraph in paragraphs:
         if len(paragraph) > target:
             if buffer:
-                result.append(SourceBlock(buffer, {**locator, "part": part_index}))
+                result.append(SourceBlock(buffer, part_locator(0, len(buffer), part_index)))
                 buffer = ""
                 part_index += 1
             start = 0
@@ -90,19 +107,19 @@ def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TAR
                         end = boundary
                 part = paragraph[start:end].strip()
                 if part:
-                    result.append(SourceBlock(part, {**locator, "part": part_index}))
+                    result.append(SourceBlock(part, part_locator(start, end, part_index)))
                     part_index += 1
                 start = max(end - 120, end)
             continue
         candidate = f"{buffer}\n\n{paragraph}" if buffer else paragraph
         if len(candidate) > target and buffer:
-            result.append(SourceBlock(buffer, {**locator, "part": part_index}))
+            result.append(SourceBlock(buffer, part_locator(0, len(buffer), part_index)))
             part_index += 1
             buffer = paragraph
         else:
             buffer = candidate
     if buffer:
-        result.append(SourceBlock(buffer, {**locator, "part": part_index}))
+        result.append(SourceBlock(buffer, part_locator(0, len(buffer), part_index)))
     return result
 
 
@@ -119,7 +136,10 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         for page_number, page in enumerate(pages, start=1):
             page_text = "" if "/Contents" not in page else page.extract_text(extraction_mode="layout") or page.extract_text() or ""
             extracted_chars += len(page_text.strip())
-            blocks.extend(_split_long_text(page_text, {"kind": "pdf", "page": page_number, "label": f"Страница {page_number}"}))
+            blocks.extend(_split_long_text(page_text, {
+                "kind": "pdf", "page": page_number, "label": f"Страница {page_number}",
+                "char_start": 0, "char_end": len(page_text),
+            }))
     except DocumentParsingError:
         raise
     except (PdfReadError, ValueError, OSError, KeyError) as exc:
@@ -185,6 +205,8 @@ def _parse_docx(data: bytes) -> ParsedDocument:
                     "kind": "docx",
                     "label": f"Абзац {paragraph_number}",
                     "paragraph": paragraph_number,
+                    "char_start": 0,
+                    "char_end": len(text),
                     "heading": item.style.name if item.style and item.style.name.startswith("Heading") else None,
                 }))
             continue
@@ -198,6 +220,8 @@ def _parse_docx(data: bytes) -> ParsedDocument:
                     "label": f"Таблица {table_number}, строка {row_number}",
                     "table": table_number,
                     "row": row_number,
+                    "char_start": 0,
+                    "char_end": len(row_text),
                 }))
     if not blocks:
         raise DocumentParsingError("В DOCX не найден текст или заполненные строки таблиц.")
@@ -213,24 +237,33 @@ def _parse_docx(data: bytes) -> ParsedDocument:
 
 
 def _parse_plain_text(data: bytes, file_type: str) -> ParsedDocument:
-    text = _decode_text(data)
+    text, encoding = _decode_text_with_encoding(data)
     lines = text.splitlines()
+    line_offsets: list[int] = []
+    cursor = 0
+    for line in lines:
+        line_offsets.append(cursor)
+        cursor += len(line) + 1
     blocks: list[SourceBlock] = []
     start_line = 1
     while start_line <= len(lines):
         end_line = min(start_line + 34, len(lines))
         section = "\n".join(lines[start_line - 1:end_line]).strip()
         if section:
+            section_start = line_offsets[start_line - 1]
+            section_end = section_start + len(section)
             blocks.extend(_split_long_text(section, {
                 "kind": file_type,
                 "label": f"Строки {start_line}–{end_line}",
                 "line_start": start_line,
                 "line_end": end_line,
+                "char_start": section_start,
+                "char_end": section_end,
             }))
         start_line = end_line + 1
     if not blocks:
         raise DocumentParsingError("Файл пустой — извлекать нечего.")
-    return ParsedDocument(file_type, blocks, {"line_count": len(lines)})
+    return ParsedDocument(file_type, blocks, {"line_count": len(lines), "encoding": encoding})
 
 
 def _number(value: str) -> Decimal | None:
@@ -252,7 +285,7 @@ def _number(value: str) -> Decimal | None:
 
 
 def _parse_csv(data: bytes) -> ParsedDocument:
-    text = _decode_text(data)
+    text, encoding = _decode_text_with_encoding(data)
     try:
         dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
         delimiter = dialect.delimiter
@@ -278,6 +311,8 @@ def _parse_csv(data: bytes) -> ParsedDocument:
         "label": "Заголовки столбцов",
         "row_start": 1,
         "row_end": 1,
+        "char_start": 0,
+        "char_end": len(header_text),
     }))
 
     group: list[str] = []
@@ -294,6 +329,8 @@ def _parse_csv(data: bytes) -> ParsedDocument:
                 "label": f"Строки {group_start}–{row_number - 1}",
                 "row_start": group_start,
                 "row_end": row_number - 1,
+                "char_start": 0,
+                "char_end": group_chars,
             }))
             group = []
             group_chars = 0
@@ -305,6 +342,8 @@ def _parse_csv(data: bytes) -> ParsedDocument:
                     "label": f"Строки {group_start}–{row_number - 1}",
                     "row_start": group_start,
                     "row_end": row_number - 1,
+                    "char_start": 0,
+                    "char_end": group_chars,
                 }))
                 group = []
                 group_chars = 0
@@ -313,6 +352,8 @@ def _parse_csv(data: bytes) -> ParsedDocument:
                 "label": f"Строка {row_number}",
                 "row_start": row_number,
                 "row_end": row_number,
+                "char_start": 0,
+                "char_end": len(line),
             }, target=CSV_GROUP_CHARS))
             group_start = row_number + 1
             continue
@@ -324,6 +365,8 @@ def _parse_csv(data: bytes) -> ParsedDocument:
             "label": f"Строки {group_start}–{len(data_rows) + 1}",
             "row_start": group_start,
             "row_end": len(data_rows) + 1,
+            "char_start": 0,
+            "char_end": group_chars,
         }))
 
     numeric_columns: list[dict[str, Any]] = []
@@ -347,6 +390,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
         "column_count": len(headers),
         "columns": headers,
         "delimiter": delimiter,
+        "encoding": encoding,
         "numeric_columns": numeric_columns,
     }
     return ParsedDocument("csv", blocks, metadata)
@@ -397,7 +441,19 @@ def _parse_xml(data: bytes) -> ParsedDocument:
         stack.extend(reversed(indexed_children))
     if not blocks:
         raise DocumentParsingError("В XML не найдено текстовых значений или атрибутов.")
-    return ParsedDocument("xml", blocks, {"root": _local_name(root.tag), "element_count": node_count})
+    try:
+        data.decode("utf-8-sig")
+        encoding = "utf-8-sig"
+    except UnicodeDecodeError:
+        try:
+            data.decode("cp1251")
+            encoding = "cp1251"
+        except UnicodeDecodeError:
+            encoding = None
+    metadata: dict[str, Any] = {"root": _local_name(root.tag), "element_count": node_count}
+    if encoding:
+        metadata["encoding"] = encoding
+    return ParsedDocument("xml", blocks, metadata)
 
 
 def parse_document(filename: str, data: bytes) -> ParsedDocument:

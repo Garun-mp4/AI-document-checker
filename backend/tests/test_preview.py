@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.services.preview import build_preview
+from app.services.preview import build_preview, read_csv_table
 
 
 def chunk(text: str, locator: dict, ordinal: int = 0, *, derived: bool = False) -> SimpleNamespace:
@@ -53,6 +53,8 @@ def test_preview_keeps_source_anchor_for_every_supported_format(
     assert preview["total_blocks"] == 1
     assert preview["truncated"] is False
     assert preview["original_url"] == "/api/v1/documents/document-1/file"
+    assert preview["renderer"] == {"pdf": "pdf", "docx": "docx", "txt": "text", "md": "text", "csv": "csv", "xml": "xml"}[file_type]
+    assert preview["source_count"] == 1
 
 
 def test_csv_preview_recovers_cells_without_delegating_table_shape_to_model() -> None:
@@ -143,3 +145,28 @@ def test_preview_uses_index_count_when_api_fetches_only_a_safe_prefix() -> None:
 
     assert preview["total_blocks"] == 4_500
     assert preview["truncated"] is True
+
+
+@pytest.mark.parametrize(
+    ("delimiter", "payload"),
+    [
+        (",", "Name,Value\nAlpha,10\nBeta,20\n"),
+        (";", "Name;Value\nAlpha;10\nBeta;20\n"),
+        ("\t", "Name\tValue\nAlpha\t10\nBeta\t20\n"),
+    ],
+)
+def test_original_csv_table_preserves_delimiters_and_source_row_numbers(delimiter: str, payload: str) -> None:
+    table = read_csv_table(payload.encode("utf-8"), offset=1, limit=1)
+
+    assert table["columns"] == ["Name", "Value"]
+    assert table["rows"] == [{"number": 3, "cells": ["Beta", "20"]}]
+    assert table["total_rows"] == 2
+    assert table["delimiter"] == delimiter
+
+
+def test_original_csv_table_decodes_cp1251_and_caps_page_size() -> None:
+    table = read_csv_table("Название;Значение\nТест;готово\n".encode("cp1251"), limit=9999)
+
+    assert table["columns"] == ["Название", "Значение"]
+    assert table["rows"][0]["cells"] == ["Тест", "готово"]
+    assert table["limit"] == 500

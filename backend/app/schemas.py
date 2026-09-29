@@ -42,13 +42,29 @@ class PreviewBlockOut(BaseModel):
 class DocumentPreviewOut(BaseModel):
     document_id: str
     file_type: str
+    renderer: Literal["pdf", "docx", "text", "csv", "xml"]
     layout: Literal["pdf", "paper", "table", "tree"]
     aspect_ratio: float
     page_count: int | None = None
     original_url: str | None = None
+    encoding: str | None = None
+    source_count: int
     blocks: list[PreviewBlockOut]
     total_blocks: int
     truncated: bool = False
+
+
+class TablePreviewRowOut(BaseModel):
+    number: int
+    cells: list[str]
+
+
+class TablePreviewOut(BaseModel):
+    columns: list[str]
+    rows: list[TablePreviewRowOut]
+    offset: int
+    limit: int
+    total_rows: int
 
 
 class InsightOut(BaseModel):

@@ -28,14 +28,16 @@ import {
   Send,
   ShieldCheck,
   Trash2,
+  TriangleAlert,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, PreviewBlock, SourceRef, StreamCitation } from './types'
+import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, SourceRef, StreamCitation } from './types'
+import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 
 const API = '/api/v1'
-const PAGE_SIZE = 40
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml'
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
 const DEFAULT_CODEX_REASONING = 'medium'
 
@@ -137,61 +139,21 @@ function summaryToDocument(summary: ChatSummary): DocumentRecord {
   }
 }
 
-function previewLocatorText(block: PreviewBlock): string {
-  const label = block.locator.label
-  if (typeof label === 'string' && label) return label
-  if (typeof block.locator.page === 'number') return `Страница ${block.locator.page}`
-  if (typeof block.locator.path === 'string') return block.locator.path
-  if (typeof block.locator.row_start === 'number') {
-    const end = typeof block.locator.row_end === 'number' ? block.locator.row_end : block.locator.row_start
-    return `Строки ${block.locator.row_start}–${end}`
-  }
-  if (typeof block.locator.line_start === 'number') {
-    const end = typeof block.locator.line_end === 'number' ? block.locator.line_end : block.locator.line_start
-    return `Строки ${block.locator.line_start}–${end}`
-  }
-  return 'Фрагмент документа'
-}
-
-function previewKindLabel(kind: PreviewBlock['kind']): string {
-  return {
-    page: 'Страница',
-    paragraph: 'Абзац',
-    table: 'Строка таблицы',
-    row: 'Строка',
-    node: 'Элемент XML',
-    text: 'Текст',
-    calculation: 'Расчёт приложения',
-  }[kind]
-}
-
-function PreviewSourceCallout({ source }: { source: SourceRef | StreamCitation | PreviewBlock | undefined }) {
-  if (!source) return null
-  return (
-    <div className="preview-source-callout" role="status">
-      <div className="preview-source-callout-heading"><BookOpen size={14} /><span>Текст источника · {locatorText(source)}</span></div>
-      <p>{source.text}</p>
-    </div>
-  )
-}
-
 function App() {
   const [chats, setChats] = useState<ChatSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
   const [document, setDocument] = useState<DocumentRecord | null>(null)
   const [insights, setInsights] = useState<Insight[]>([])
-  const [chunks, setChunks] = useState<SourceRef[]>([])
   const [chat, setChat] = useState<ChatRecord | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [codex, setCodex] = useState<CodexStatus | null>(null)
-  const [loadingChunks, setLoadingChunks] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadActive, setUploadActive] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(true)
   const [chatOpen, setChatOpen] = useState(true)
   const [chatFull, setChatFull] = useState(false)
   const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('document-checker-chat-width')) || 360)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true')
   const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false)
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
@@ -275,18 +237,6 @@ function App() {
     }
   }, [])
 
-  const loadChunks = useCallback(async (documentId: string, offset: number) => {
-    setLoadingChunks(true)
-    try {
-      const result = await api<SourceRef[]>(`${API}/documents/${documentId}/chunks?offset=${offset}&limit=${PAGE_SIZE}`)
-      setChunks(result)
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Не удалось открыть текст документа.')
-    } finally {
-      setLoadingChunks(false)
-    }
-  }, [showToast])
-
   const loadReadyData = useCallback(async (documentId: string) => {
     try {
       const [cardData, chatData, previewData] = await Promise.all([
@@ -309,7 +259,6 @@ function App() {
     if (!selectedId) {
       setDocument(null)
       setInsights([])
-      setChunks([])
       setDocumentPreview(null)
       setChat(null)
       setMessages([])
@@ -319,7 +268,6 @@ function App() {
     let loaded = false
     setDocument(null)
     setInsights([])
-    setChunks([])
     setDocumentPreview(null)
     setChat(null)
     setMessages([])
@@ -333,7 +281,7 @@ function App() {
         updateDocumentInLibrary(result)
         if (result.status === 'ready' && !loaded) {
           loaded = true
-          await Promise.all([loadChunks(selectedId, 0), loadReadyData(selectedId)])
+          await loadReadyData(selectedId)
         }
       } catch (error) {
         if (active) showToast(error instanceof Error ? error.message : 'Не удалось открыть документ.')
@@ -345,7 +293,7 @@ function App() {
       active = false
       window.clearInterval(timer)
     }
-  }, [selectedId, loadChunks, loadReadyData, showToast, updateDocumentInLibrary])
+  }, [selectedId, loadReadyData, showToast, updateDocumentInLibrary])
 
   useEffect(() => {
     conversation.current?.scrollTo({ top: conversation.current.scrollHeight, behavior: isSending ? 'auto' : 'smooth' })
@@ -369,6 +317,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('document-checker-chat-width', String(chatWidth))
   }, [chatWidth])
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(sidebarCollapsed))
+  }, [sidebarCollapsed])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -464,17 +416,11 @@ function App() {
     setSelectedSource(source)
     const page = source.locator.page
     if (typeof page === 'number' && page > 0) setPreviewPage(page)
-    const hasPreviewBlock = documentPreview?.blocks.some((block) => block.source_id === source.id)
-    if (!hasPreviewBlock) {
-      const offset = Math.floor(source.ordinal / PAGE_SIZE) * PAGE_SIZE
-      await loadChunks(document.id, offset)
-    }
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => window.document.getElementById(`source-${source.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
-      window.requestAnimationFrame(() => window.document.getElementById(`preview-${source.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+      window.document.getElementById('document-original-viewer')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
     setMobileChatOpen(false)
-  }, [document, documentPreview, loadChunks])
+  }, [document])
 
   const beginLogin = useCallback(async () => {
     try {
@@ -751,15 +697,15 @@ function App() {
         </div>
       </header>
 
-      <aside className={`library ${sidebarCollapsed ? 'library-manual-collapsed' : ''}`} aria-label="История чатов">
+      <aside id="chat-library" className={`library ${sidebarCollapsed ? 'library-manual-collapsed' : ''}`} aria-label="История чатов" aria-expanded={!sidebarCollapsed}>
         <div className="library-heading">
           <div className="library-title">Чаты</div>
-          <button className="icon-button collapse-library" aria-label={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} onClick={() => setSidebarCollapsed((value) => !value)}>
+          <button className="icon-button collapse-library" aria-label={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} aria-controls="chat-library" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} onClick={() => setSidebarCollapsed((value) => !value)}>
             {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
           </button>
           <button className="icon-button close-mobile-panel" aria-label="Закрыть библиотеку" onClick={() => setMobileLibraryOpen(false)}><X size={18} /></button>
         </div>
-        <button className="library-add" onClick={() => fileInput.current?.click()} disabled={isUploading}>
+        <button className="library-add" title="Новый чат" aria-label="Новый чат" onClick={() => fileInput.current?.click()} disabled={isUploading}>
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
           <span>Новый чат</span>
         </button>
@@ -771,7 +717,7 @@ function App() {
             <div className="library-empty">Чаты с документами появятся здесь</div>
           ) : chats.map((item) => (
             <div key={item.id} className={`document-row ${selectedId === item.document_id ? 'selected' : ''}`}>
-              <button className="document-select" onClick={() => { setSelectedId(item.document_id); setMobileLibraryOpen(false) }} title={item.filename}>
+              <button className="document-select" onClick={() => { setSelectedId(item.document_id); setMobileLibraryOpen(false) }} title={item.filename} aria-label={`Открыть чат ${item.title}`}>
                 <span className="document-type-icon">{fileIcon(item.file_type, 17)}</span>
                 <span className="document-row-text">
                   <span className="document-row-name">{item.title}</span>
@@ -848,11 +794,12 @@ function App() {
                   <div className="fact-item"><Clock3 size={15} /><span>Добавлен {relativeDate(document.created_at)}</span></div>
                 </div>
 
-                <section className={`source-viewer ${previewOpen ? 'viewer-open' : 'viewer-closed'}`} aria-label="Оригинал и предпросмотр документа">
+                <div className={`document-analysis-layout ${documentPreview?.renderer === 'csv' ? 'is-table-layout' : ''}`}>
+                <section id="document-original-viewer" className={`source-viewer ${previewOpen ? 'viewer-open' : 'viewer-closed'}`} aria-label="Оригинал документа">
                   <div className="viewer-heading">
-                    <div className="viewer-heading-label"><BookOpen size={16} /><strong>Оригинал документа</strong><span>{documentPreview ? `${documentPreview.total_blocks} ${pluralLabel(documentPreview.total_blocks, 'фрагмент', 'фрагмента', 'фрагментов')}` : `${document.chunk_count} ${pluralLabel(document.chunk_count, 'фрагмент', 'фрагмента', 'фрагментов')}`}</span></div>
+                    <div className="viewer-heading-label"><BookOpen size={16} /><strong>Оригинал документа</strong><span>{documentPreview ? `${documentPreview.source_count} ${pluralLabel(documentPreview.source_count, 'источник', 'источника', 'источников')}` : `${document.chunk_count} ${pluralLabel(document.chunk_count, 'источник', 'источника', 'источников')}`}</span></div>
                     <div className="viewer-controls">
-                      {documentPreview?.layout === 'pdf' && <>
+                      {documentPreview?.renderer === 'pdf' && <>
                         <span className="preview-page-label">{previewPage} / {documentPreview.page_count ?? '—'}</span>
                         <button className="icon-button" disabled={previewPage <= 1} aria-label="Предыдущая страница" onClick={() => setPreviewPage((value) => Math.max(1, value - 1))}><ChevronLeft size={17} /></button>
                         <button className="icon-button" disabled={previewPage >= (documentPreview.page_count ?? 1)} aria-label="Следующая страница" onClick={() => setPreviewPage((value) => Math.min(documentPreview.page_count ?? value + 1, value + 1))}><ChevronRight size={17} /></button>
@@ -861,50 +808,10 @@ function App() {
                     </div>
                   </div>
                   {previewOpen && (
-                    <div className="document-preview" aria-busy={!documentPreview || loadingChunks}>
-                      {documentPreview?.original_url && <div className="preview-toolbar"><span>Фрагменты связаны с источниками</span><a href={documentPreview.original_url} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>}
-                      {!documentPreview && chunks.length === 0 ? (
+                    <div className="document-preview" aria-busy={!documentPreview}>
+                      {!documentPreview ? (
                         <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю предпросмотр…</div>
-                      ) : !documentPreview ? (
-                        <div className="source-list" aria-busy={loadingChunks}>
-                          {chunks.map((chunk) => (
-                            <article id={`source-${chunk.id}`} key={chunk.id} className={`source-chunk ${selectedSourceId === chunk.id ? 'source-highlight' : ''}`}>
-                              <div className="source-location"><span className="source-locator-dot" /><span>{locatorText(chunk)}</span>{chunk.is_derived && <span className="derived-tag"><Calculator size={12} /> Расчёт приложения</span>}</div>
-                              <p>{chunk.text}</p>
-                            </article>
-                          ))}
-                        </div>
-                      ) : documentPreview.layout === 'pdf' && documentPreview.original_url ? (
-                        <div className="pdf-preview-stack">
-                          <PreviewSourceCallout source={selectedSource ?? documentPreview.blocks[0]} />
-                          <div className="preview-paper-frame pdf-paper-frame" style={{ aspectRatio: documentPreview.aspect_ratio }}>
-                            <iframe key={`${document.id}-${previewPage}`} className="document-pdf-frame" title={`Оригинал ${document.filename}`} src={`${documentPreview.original_url}#page=${previewPage}`} />
-                          </div>
-                        </div>
-                      ) : documentPreview.layout === 'table' ? (
-                        <div className="preview-paper-frame table-paper-frame" style={{ aspectRatio: documentPreview.aspect_ratio }}>
-                          <div className="preview-block-stack preview-table-stack">
-                            {documentPreview.blocks.map((block) => (
-                              <article id={`preview-${block.source_id}`} key={block.id} className={`preview-block preview-block-${block.kind} ${selectedSourceId === block.source_id ? 'preview-block-highlight' : ''}`}>
-                                <div className="preview-block-meta"><span className="preview-block-kind">{previewKindLabel(block.kind)}</span><span>{previewLocatorText(block)}</span></div>
-                                {block.rows ? <table className="preview-data-table"><tbody>{block.rows.map((row, rowIndex) => <tr key={`${block.id}-${rowIndex}`}>{row.map((cell, cellIndex) => <td key={`${block.id}-${rowIndex}-${cellIndex}`}>{cell || '—'}</td>)}</tr>)}</tbody></table> : <p>{block.text}</p>}
-                              </article>
-                            ))}
-                          </div>
-                        </div>
-                      ) : (
-                        <div className={`preview-paper-frame ${documentPreview.layout === 'tree' ? 'tree-paper-frame' : 'paper-paper-frame'}`} style={{ aspectRatio: documentPreview.aspect_ratio }}>
-                          <div className="preview-block-stack">
-                            {documentPreview.blocks.map((block) => (
-                              <article id={`preview-${block.source_id}`} key={block.id} className={`preview-block preview-block-${block.kind} ${selectedSourceId === block.source_id ? 'preview-block-highlight' : ''}`}>
-                                <div className="preview-block-meta"><span className="preview-block-kind">{previewKindLabel(block.kind)}</span><span>{previewLocatorText(block)}</span></div>
-                                <p>{block.text}</p>
-                              </article>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {documentPreview?.truncated && <p className="preview-truncated">Показаны первые {documentPreview.blocks.length.toLocaleString('ru-RU')} фрагментов. Остальные доступны через поиск и цитаты.</p>}
+                      ) : documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>}
                     </div>
                   )}
                 </section>
@@ -933,6 +840,7 @@ function App() {
                   </div>
                   <div className="citation-note"><ShieldCheck size={14} /><span>Ответы основаны на фрагментах документа. Нажмите на источник, чтобы открыть его место.</span></div>
                 </section>
+                </div>
               </div>
             )}
           </div>
@@ -1004,7 +912,8 @@ function App() {
           <span className="modal-eyebrow">ПОДКЛЮЧЕНИЕ МОДЕЛИ</span>
           <h2 id="auth-title">Вход в Codex</h2>
           <p id="auth-description" className="modal-intro">Для анализа используется {codexModelLabel(codex)} с уровнем reasoning {codexReasoningLabel(codex?.reasoning_effort).toLowerCase()} через ваш аккаунт Codex. API-ключ не нужен.</p>
-          <div className="auth-details" ref={authDetailsRef} aria-label="Настройки модели Codex">
+          <div className="auth-preferences" ref={authDetailsRef}>
+            <div className="auth-details" aria-label="Настройки модели Codex">
             <div className="auth-detail-choice">
               <button
                 ref={modelTriggerRef}
@@ -1028,24 +937,6 @@ function App() {
                 <strong>{codexModelLabel(codex)}</strong>
                 <ChevronDown className="auth-detail-arrow" size={15} aria-hidden="true" />
               </button>
-              {openPreferenceMenu === 'model' && <div id="codex-model-options" className="auth-detail-option-list" role="listbox" aria-label="Доступные модели">
-                {codexModelOptions.map((option) => {
-                  const unavailable = option.id === codex?.model && !codex?.model_available
-                  return <button
-                    key={option.id}
-                    className={`auth-detail-option ${option.id === codex?.model ? 'is-selected' : ''}`}
-                    type="button"
-                    role="option"
-                    aria-selected={option.id === codex?.model}
-                    disabled={unavailable || codexSaving}
-                    onClick={() => void selectCodexModel(option.id)}
-                    onKeyDown={(event) => movePreferenceFocus('model', event)}
-                  >
-                    <span className="auth-detail-option-copy"><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
-                    {option.id === codex?.model && <Check size={14} aria-hidden="true" />}
-                  </button>
-                })}
-              </div>}
             </div>
             <div className="auth-detail-choice">
               <button
@@ -1070,23 +961,42 @@ function App() {
                 <strong>{codexReasoningLabel(codex?.reasoning_effort)}</strong>
                 <ChevronDown className="auth-detail-arrow" size={15} aria-hidden="true" />
               </button>
-              {openPreferenceMenu === 'reasoning' && <div id="codex-reasoning-options" className="auth-detail-option-list" role="listbox" aria-label="Уровни анализа">
-                {codexReasoningOptions.map((option) => <button
-                  key={option.value}
-                  className={`auth-detail-option ${option.value === codex?.reasoning_effort ? 'is-selected' : ''}`}
-                  type="button"
-                  role="option"
-                  aria-selected={option.value === codex?.reasoning_effort}
-                  disabled={codexSaving}
-                  onClick={() => void selectCodexReasoning(option.value)}
-                  onKeyDown={(event) => movePreferenceFocus('reasoning', event)}
-                >
-                  <span className="auth-detail-option-copy"><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
-                  {option.value === codex?.reasoning_effort && <Check size={14} aria-hidden="true" />}
-                </button>)}
-              </div>}
             </div>
             <div className="auth-detail-static"><span className="auth-detail-label">Состояние</span><strong>{authReady ? 'Подключено' : codex?.login_state === 'pending' ? 'Ожидание подтверждения' : 'Не подключено'}</strong></div>
+            </div>
+            {openPreferenceMenu === 'model' && <div id="codex-model-options" className="auth-detail-option-list auth-preference-list auth-preference-list-model" role="listbox" aria-label="Доступные модели">
+              {codexModelOptions.map((option) => {
+                const unavailable = option.id === codex?.model && !codex?.model_available
+                return <button
+                  key={option.id}
+                  className={`auth-detail-option ${option.id === codex?.model ? 'is-selected' : ''}`}
+                  type="button"
+                  role="option"
+                  aria-selected={option.id === codex?.model}
+                  disabled={unavailable || codexSaving}
+                  onClick={() => void selectCodexModel(option.id)}
+                  onKeyDown={(event) => movePreferenceFocus('model', event)}
+                >
+                  <span className="auth-detail-option-copy"><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+                  {option.id === codex?.model && <Check size={14} aria-hidden="true" />}
+                </button>
+              })}
+            </div>}
+            {openPreferenceMenu === 'reasoning' && <div id="codex-reasoning-options" className="auth-detail-option-list auth-preference-list auth-preference-list-reasoning" role="listbox" aria-label="Уровни анализа">
+              {codexReasoningOptions.map((option) => <button
+                key={option.value}
+                className={`auth-detail-option ${option.value === codex?.reasoning_effort ? 'is-selected' : ''}`}
+                type="button"
+                role="option"
+                aria-selected={option.value === codex?.reasoning_effort}
+                disabled={codexSaving}
+                onClick={() => void selectCodexReasoning(option.value)}
+                onKeyDown={(event) => movePreferenceFocus('reasoning', event)}
+              >
+                <span className="auth-detail-option-copy"><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+                {option.value === codex?.reasoning_effort && <Check size={14} aria-hidden="true" />}
+              </button>)}
+            </div>}
           </div>
           <p className="auth-settings-note">{codexSaving ? 'Сохраняю настройки…' : codex?.authenticated && codex?.models?.length ? 'Доступны модели и уровни из вашего аккаунта Codex.' : 'Подключите аккаунт, чтобы выбрать доступные варианты.'}</p>
           {codexPreferenceMessage && <p className="auth-settings-message" role="status">{codexPreferenceMessage}</p>}

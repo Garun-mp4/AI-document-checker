@@ -49,6 +49,7 @@ export interface SourceRef {
 
 export type PreviewLayout = 'pdf' | 'paper' | 'table' | 'tree'
 export type PreviewBlockKind = 'page' | 'paragraph' | 'table' | 'row' | 'node' | 'text' | 'calculation'
+export type PreviewRenderer = 'pdf' | 'docx' | 'text' | 'csv' | 'xml'
 
 export interface PreviewBlock {
   id: string
@@ -63,13 +64,29 @@ export interface PreviewBlock {
 export interface DocumentPreview {
   document_id: string
   file_type: string
+  renderer: PreviewRenderer
   layout: PreviewLayout
   aspect_ratio: number
   page_count: number | null
   original_url: string | null
+  encoding: string | null
+  source_count: number
   blocks: PreviewBlock[]
   total_blocks: number
   truncated: boolean
+}
+
+export interface TablePreviewRow {
+  number: number
+  cells: string[]
+}
+
+export interface TablePreview {
+  columns: string[]
+  rows: TablePreviewRow[]
+  offset: number
+  limit: number
+  total_rows: number
 }
 
 export interface Insight {

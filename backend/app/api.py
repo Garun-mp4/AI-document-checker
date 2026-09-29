@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 
@@ -26,6 +26,7 @@ from app.schemas import (
     MessageOut,
     SendMessageIn,
     SourceOut,
+    TablePreviewOut,
 )
 from app.services.chat_library import build_chat_summary
 from app.services.citations import format_source_markers
@@ -40,7 +41,7 @@ from app.services.parsing import (
     DocumentParsingError,
     safe_filename,
 )
-from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview
+from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview, read_csv_table_file
 from app.services.retrieval import search_chunks
 
 logger = logging.getLogger(__name__)
@@ -311,6 +312,35 @@ async def document_file(document_id: uuid.UUID) -> FileResponse:
             media_type=media_type,
             headers={"Content-Disposition": "inline"},
         )
+
+
+@router.get("/documents/{document_id}/preview/table", response_model=TablePreviewOut)
+async def document_preview_table(
+    document_id: uuid.UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> TablePreviewOut:
+    """Return a paginated view of the original CSV table.
+
+    The storage path is resolved and checked against the upload root before it
+    is read. The endpoint never accepts a filesystem path from the client.
+    """
+
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.file_type != "csv":
+            raise HTTPException(status_code=400, detail="Табличный просмотр доступен только для CSV.")
+        path = Path(document.storage_path).resolve()
+        upload_root = Path(settings.upload_dir).resolve()
+        if not path.is_relative_to(upload_root) or not path.is_file():
+            raise HTTPException(status_code=404, detail="Исходный файл документа недоступен.")
+    try:
+        payload = await asyncio.to_thread(read_csv_table_file, path, offset=offset, limit=limit)
+    except DocumentParsingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return TablePreviewOut.model_validate(payload)
 
 
 @router.get("/documents/{document_id}/insights", response_model=list[InsightOut])
