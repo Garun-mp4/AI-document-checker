@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import time
 import zipfile
 from io import BytesIO
@@ -80,6 +81,18 @@ def test_compose_serves_frontend_assets_with_browser_mime_types(compose_client: 
     assert page.status_code == 200, page.text
     assert page.headers.get("content-type", "").startswith("text/html"), page.headers
     assert page.text.lstrip().lower().startswith("<!doctype html>")
+
+    bundle_match = re.search(r'<script[^>]+src="([^"]+\.js)"', page.text)
+    assert bundle_match, page.text
+    bundle = compose_client.get(bundle_match.group(1))
+    assert bundle.status_code == 200, bundle.text[:500]
+    assert bundle.headers.get("content-type", "").startswith("application/javascript"), bundle.headers
+
+    worker_match = re.search(r'(/assets/[^"`]+\.mjs)', bundle.text)
+    assert worker_match, "PDF.js worker is not present in the production bundle"
+    worker = compose_client.get(f"{worker_match.group(1)}?v=pdfjs-4")
+    assert worker.status_code == 200, worker.text[:500]
+    assert worker.headers.get("content-type", "").startswith("application/javascript"), worker.headers
 
 
 @pytest.mark.integration

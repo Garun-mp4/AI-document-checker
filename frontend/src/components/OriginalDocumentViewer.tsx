@@ -137,48 +137,98 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
 
 interface PdfTextItem { str: string; left: number; top: number; width: number; height: number }
 
-function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch, onError }: { originalUrl: string; pageNumber: number; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void; onError: (message: string) => void }) {
+function isPdfCancellation(reason: unknown): boolean {
+  return reason instanceof Error && (reason.name === 'RenderingCancelledException' || reason.name === 'AbortException')
+}
+
+function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }: { originalUrl: string; pageNumber: number; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sheetRef = useRef<HTMLDivElement>(null)
+  const viewerRef = useRef<HTMLDivElement>(null)
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
   const [items, setItems] = useState<PdfTextItem[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [nativeFallback, setNativeFallback] = useState(false)
   const [rendering, setRendering] = useState(true)
+  const [viewerWidth, setViewerWidth] = useState(0)
+  useEffect(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const updateWidth = () => setViewerWidth(viewer.clientWidth)
+    updateWidth()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(viewer)
+    return () => observer.disconnect()
+  }, [])
   useEffect(() => {
     let active = true
-    setPdf(null); setError(null); setRendering(true)
-    void pdfjsLib.getDocument(originalUrl).promise.then((loaded) => { if (active) setPdf(loaded) }).catch((reason: unknown) => { if (active) { const message = reason instanceof Error ? reason.message : 'PDF повреждён'; setError(message); onError(message); setRendering(false) } })
-    return () => { active = false }
+    setPdf(null); setError(null); setNativeFallback(false); setRendering(true)
+    const loadingTask = pdfjsLib.getDocument({ url: originalUrl })
+    void loadingTask.promise.then((loaded) => { if (active) setPdf(loaded) }).catch((reason: unknown) => {
+      if (!active || isPdfCancellation(reason)) return
+      const message = reason instanceof Error ? reason.message : 'PDF повреждён'
+      setError(message); setNativeFallback(true); setRendering(false)
+    })
+    return () => { active = false; void loadingTask.destroy().catch(() => undefined) }
   }, [originalUrl])
   useEffect(() => {
     if (!pdf || !canvasRef.current || !sheetRef.current) return
     let active = true
+    let renderTask: pdfjsLib.RenderTask | null = null
+    let page: pdfjsLib.PDFPageProxy | null = null
     setRendering(true)
-    void pdf.getPage(Math.max(1, Math.min(pageNumber, pdf.numPages))).then(async (page) => {
-      const baseViewport = page.getViewport({ scale: 1 })
-      const availableWidth = sheetRef.current?.parentElement?.clientWidth
-      const scale = Math.min(1.55, Math.max(0.35, ((availableWidth || 720) - 28) / baseViewport.width))
-      const viewport = page.getViewport({ scale })
-      const canvas = canvasRef.current
-      if (!canvas || !active) return
-      const ratio = window.devicePixelRatio || 1
-      canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio)
-      canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`
-      sheetRef.current!.style.width = `${viewport.width}px`; sheetRef.current!.style.height = `${viewport.height}px`
-      const context = canvas.getContext('2d')
-      if (!context) throw new Error('Canvas недоступен')
-      await page.render({ canvasContext: context, viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined }).promise
-      const content = await page.getTextContent()
-      const mapped = content.items.flatMap((item) => {
-        if (!('str' in item) || !item.str) return []
-        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform)
-        const height = Math.max(5, Math.hypot(tx[2], tx[3]))
-        return [{ str: item.str, left: tx[4], top: tx[5] - height, width: Math.max(1, item.width * viewport.scale), height }]
-      })
-      if (active) { setItems(mapped); setRendering(false) }
-    }).catch((reason: unknown) => { if (active) { const message = reason instanceof Error ? reason.message : 'Не удалось отобразить страницу'; setError(message); onError(message); setRendering(false) } })
-    return () => { active = false }
-  }, [pdf, pageNumber])
+
+    const renderPage = async () => {
+      try {
+        page = await pdf.getPage(Math.max(1, Math.min(pageNumber, pdf.numPages)))
+        const baseViewport = page.getViewport({ scale: 1 })
+        const availableWidth = viewerWidth || viewerRef.current?.clientWidth || sheetRef.current?.parentElement?.clientWidth || 720
+        // Fit every page to the visible viewer width. The previous minimum
+        // scale could make a page wider than a narrow left column, which
+        // forced horizontal scrolling and clipped the document on tablets.
+        const targetWidth = Math.max(160, availableWidth - 4)
+        const scale = Math.min(1.35, Math.max(0.1, targetWidth / baseViewport.width))
+        const viewport = page.getViewport({ scale })
+        const canvas = canvasRef.current
+        if (!canvas || !active) return
+        const ratio = window.devicePixelRatio || 1
+        canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio)
+        canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`
+        sheetRef.current!.style.width = `${viewport.width}px`; sheetRef.current!.style.height = `${viewport.height}px`
+        const context = canvas.getContext('2d')
+        if (!context) throw new Error('Canvas недоступен')
+        setItems([])
+        renderTask = page.render({ canvasContext: context, viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined })
+        await renderTask.promise
+        if (!active) return
+
+        // The canvas is the source of truth. A malformed or unusual text item
+        // must not hide a page that has already rendered successfully.
+        setRendering(false)
+        try {
+          const content = await page.getTextContent()
+          const mapped = content.items.flatMap((item) => {
+            if (!('str' in item) || typeof item.str !== 'string' || !item.str) return []
+            if (!('transform' in item) || !Array.isArray(item.transform) || item.transform.length < 6) return []
+            const tx = pdfjsLib.Util.transform(viewport.transform, item.transform as number[])
+            const height = Math.max(5, Math.hypot(tx[2], tx[3]))
+            const rawWidth = 'width' in item && typeof item.width === 'number' ? item.width : 0
+            return [{ str: item.str, left: tx[4], top: tx[5] - height, width: Math.max(1, rawWidth * viewport.scale), height }]
+          })
+          if (active) setItems(mapped)
+        } catch (reason: unknown) {
+          if (active && !isPdfCancellation(reason)) setItems([])
+        }
+      } catch (reason: unknown) {
+        if (!active || isPdfCancellation(reason)) return
+        const message = reason instanceof Error ? reason.message : 'Не удалось отобразить страницу'
+        setError(message); setNativeFallback(true); setRendering(false)
+      }
+    }
+    void renderPage()
+    return () => { active = false; renderTask?.cancel(); page?.cleanup() }
+  }, [pdf, pageNumber, viewerWidth])
   useEffect(() => {
     if (!items.length || !selectedSource) return
     const query = sourceQuery(selectedSource)
@@ -186,9 +236,16 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch, o
     onMatch(exact)
     if (exact) sheetRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [items, selectedSource, onMatch])
+  if (nativeFallback) return <div className="pdf-native-fallback">
+    <div className="pdf-native-fallback-note">
+      <strong>Встроенный просмотр PDF.js недоступен</strong>
+      <span>Показываю оригинал через просмотрщик браузера{error ? ` · ${error}` : ''}.</span>
+    </div>
+    <iframe title="Оригинальный PDF-документ" src={`${originalUrl}#page=${Math.max(1, pageNumber)}`} />
+  </div>
   if (error) return <div className="preview-inline-error">{error}</div>
   const query = sourceQuery(selectedSource)
-  return <div className="pdf-original-page-wrap">
+  return <div className="pdf-original-page-wrap" ref={viewerRef}>
     {rendering && <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Рендерю страницу {pageNumber}…</div>}
     <div className="pdf-page-sheet" ref={sheetRef}>
       <canvas ref={canvasRef} />
@@ -310,7 +367,7 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   const renderer = preview.renderer || (record.file_type === 'docx' ? 'docx' : record.file_type === 'pdf' ? 'pdf' : ['csv', 'xlsx', 'xls'].includes(record.file_type) ? record.file_type : record.file_type === 'xml' ? 'xml' : record.file_type === 'pptx' || record.file_type === 'epub' ? record.file_type : 'text')
   const content = useMemo(() => {
     const onError = (message: string) => setRenderError(message)
-    if (renderer === 'pdf') return <PdfOriginalViewer key={retryKey} originalUrl={originalUrl} pageNumber={pageNumber} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
+    if (renderer === 'pdf') return <PdfOriginalViewer key={retryKey} originalUrl={originalUrl} pageNumber={pageNumber} selectedSource={selectedSource} onMatch={handleMatch} />
     if (renderer === 'docx') return <DocxOriginalViewer key={retryKey} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
     if (renderer === 'csv' || renderer === 'xlsx' || renderer === 'xls') return <CsvOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
     if (renderer === 'pptx' || renderer === 'epub') return <SourceMapOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} />

@@ -332,12 +332,17 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .source-text-line code { color: #303030; white-space: pre; }
 .source-text-line mark { padding: 1px 2px; border-radius: 3px; background: #dedede; color: inherit; }
 .source-line-range { background: #f0f0f0; }
-.pdf-original-page-wrap { min-height: 100%; }
-.pdf-page-sheet { position: relative; width: fit-content; margin: 0 auto; border: 1px solid #d6d6d6; background: #fff; box-shadow: 0 8px 24px rgb(0 0 0 / 8%); }
+.pdf-original-page-wrap { min-width: 0; min-height: 100%; width: 100%; overflow: hidden; }
+.pdf-page-sheet { position: relative; width: fit-content; max-width: 100%; margin: 0 auto; border: 1px solid #d6d6d6; background: #fff; box-shadow: 0 8px 24px rgb(0 0 0 / 8%); }
 .pdf-page-sheet canvas { display: block; }
 .pdf-text-layer { position: absolute; inset: 0; overflow: hidden; user-select: text; }
 .pdf-text-layer span { position: absolute; display: block; overflow: hidden; color: transparent; font-family: sans-serif; line-height: 1; white-space: pre; transform-origin: left top; }
 .pdf-text-layer .pdf-text-match { border-radius: 2px; background: rgb(190 190 190 / 72%); }
+.pdf-native-fallback { display: flex; min-height: 100%; flex-direction: column; gap: 8px; background: #525252; }
+.pdf-native-fallback-note { display: flex; align-items: baseline; gap: 8px; padding: 9px 12px; background: #fff; color: var(--ink-secondary); font-size: 11px; line-height: 1.4; }
+.pdf-native-fallback-note strong { color: var(--ink); font-size: 12px; }
+.pdf-native-fallback-note span { overflow-wrap: anywhere; }
+.pdf-native-fallback iframe { display: block; width: 100%; min-height: 0; height: 100%; flex: 1; border: 0; background: #525252; }
 .docx-original-viewer { min-height: 100%; padding: 2px; background: #fff; }
 .docx-render-host { min-height: 100%; }
 .docx-original-viewer .docx-wrapper { min-height: 100%; padding: 18px !important; background: #eeeeee !important; }
