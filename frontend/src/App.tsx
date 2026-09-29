@@ -661,6 +661,7 @@ function App() {
   const activeStatus = visibleStatus ? ['queued', 'extracting', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
   const mainClasses = [
     'app-shell',
+    sidebarCollapsed ? 'library-manual-collapsed' : '',
     !selectedId ? 'empty-state' : '',
     !chatOpen ? 'chat-hidden' : '',
     chatFull ? 'chat-full' : '',
@@ -724,7 +725,7 @@ function App() {
                   <span className="document-row-meta"><span className={`status-dot status-${item.status}`} />{item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status)}<span className="row-meta-divider">·</span>{relativeDate(item.last_activity_at)}</span>
                 </span>
               </button>
-              <button className="row-delete icon-button" aria-label={`Удалить ${item.filename}`} onClick={() => setDeleteTarget(summaryToDocument(item))}><Trash2 size={15} /></button>
+              <button className="row-delete icon-button" aria-label={`Удалить ${item.filename}`} title={`Удалить ${item.filename}`} onClick={() => setDeleteTarget(summaryToDocument(item))}><Trash2 size={15} /></button>
             </div>
           ))}
         </div>
