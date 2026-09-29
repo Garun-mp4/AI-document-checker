@@ -39,6 +39,7 @@ import { ChatMarkdown } from './components/ChatMarkdown'
 const API = '/api/v1'
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
+const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
 const DEFAULT_CODEX_REASONING = 'medium'
@@ -162,7 +163,8 @@ function summaryToDocument(summary: ChatSummary): DocumentRecord {
 
 function App() {
   const [chats, setChats] = useState<ChatSummary[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
+  const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
+  const [newChatOpen, setNewChatOpen] = useState(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true')
   const [document, setDocument] = useState<DocumentRecord | null>(null)
   const [insights, setInsights] = useState<Insight[]>([])
   const [chat, setChat] = useState<ChatRecord | null>(null)
@@ -223,15 +225,15 @@ function App() {
     } : item))
   }, [])
 
-  const refreshLibrary = useCallback(async () => {
+  const refreshLibrary = useCallback(async (preferredDocumentId?: string) => {
     try {
       const result = await api<ChatSummary[]>(`${API}/chats`)
       setChats(result)
-      setSelectedId((current) => current && result.some((item) => item.document_id === current) ? current : result[0]?.document_id ?? null)
+      setSelectedId((current) => preferredDocumentId ?? (newChatOpen ? null : current && result.some((item) => item.document_id === current) ? current : result[0]?.document_id ?? null))
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось загрузить библиотеку документов.')
     }
-  }, [showToast])
+  }, [newChatOpen, showToast])
 
   useEffect(() => {
     void refreshLibrary()
@@ -243,6 +245,10 @@ function App() {
     if (selectedId) localStorage.setItem(SELECTED_CHAT_STORAGE_KEY, selectedId)
     else localStorage.removeItem(SELECTED_CHAT_STORAGE_KEY)
   }, [selectedId])
+
+  useEffect(() => {
+    localStorage.setItem(NEW_CHAT_STORAGE_KEY, String(newChatOpen))
+  }, [newChatOpen])
 
   useEffect(() => {
     let active = true
@@ -429,8 +435,9 @@ function App() {
     body.append('file', file)
     try {
       const created = await api<DocumentRecord>(`${API}/documents`, { method: 'POST', body })
+      setNewChatOpen(false)
       setSelectedId(created.id)
-      void refreshLibrary()
+      void refreshLibrary(created.id)
       setPreviewOpen(true)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось загрузить документ.')
@@ -439,6 +446,28 @@ function App() {
       if (fileInput.current) fileInput.current.value = ''
     }
   }, [refreshLibrary, showToast])
+
+  const startNewChat = useCallback(() => {
+    setNewChatOpen(true)
+    setSelectedId(null)
+    setDocument(null)
+    setInsights([])
+    setDocumentPreview(null)
+    setMarkdownDocument(null)
+    setPreviewTab('original')
+    setPreviewPage(1)
+    setChat(null)
+    setMessages([])
+    setChatInput('')
+    setStreamText('')
+    setStreamSources([])
+    setSelectedSourceId(null)
+    setSelectedSource(null)
+    setChatOpen(true)
+    setChatFull(false)
+    setMobileLibraryOpen(false)
+    setMobileChatOpen(false)
+  }, [])
 
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
     if (!document) return
@@ -787,7 +816,7 @@ function App() {
           </button>
           <button className="icon-button close-mobile-panel" aria-label="Закрыть библиотеку" onClick={() => setMobileLibraryOpen(false)}><X size={18} /></button>
         </div>
-        <button className="library-add" title="Новый чат" aria-label="Новый чат" onClick={() => fileInput.current?.click()} disabled={isUploading}>
+        <button className="library-add" title="Новый чат" aria-label="Новый чат" onClick={startNewChat} disabled={isUploading}>
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
           <span>Новый чат</span>
         </button>
@@ -799,7 +828,7 @@ function App() {
             <div className="library-empty">Чаты с документами появятся здесь</div>
           ) : chats.map((item) => (
             <div key={item.id} className={`document-row ${selectedId === item.document_id ? 'selected' : ''}`}>
-              <button className="document-select" onClick={() => { setSelectedId(item.document_id); setMobileLibraryOpen(false) }} title={item.filename} aria-label={`Открыть чат ${item.title}`}>
+              <button className="document-select" onClick={() => { setNewChatOpen(false); setSelectedId(item.document_id); setMobileLibraryOpen(false) }} title={item.filename} aria-label={`Открыть чат ${item.title}`}>
                 <span className="document-type-icon">{fileIcon(item.file_type, 17)}</span>
                 <span className="document-row-text">
                   <span className="document-row-name">{item.title}</span>

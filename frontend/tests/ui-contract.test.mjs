@@ -21,6 +21,18 @@ test('sidebar collapse has persistent state and an accessible control contract',
   assert.match(styles, /\.app-shell\.library-manual-collapsed\s*\{[^}]*72px/)
 })
 
+test('new chat opens the empty workspace instead of the file picker', () => {
+  assert.match(app, /NEW_CHAT_STORAGE_KEY\s*=\s*'document-checker-new-chat'/)
+  assert.match(app, /useState\(\(\) => localStorage\.getItem\(NEW_CHAT_STORAGE_KEY\) === 'true'/)
+  assert.match(app, /const startNewChat = useCallback\(\(\) => \{[\s\S]*setNewChatOpen\(true\)[\s\S]*setSelectedId\(null\)[\s\S]*setChatOpen\(true\)/)
+  const newChatButton = app.match(/<button className="library-add"[\s\S]*?<\/button>/)?.[0]
+  assert.ok(newChatButton, 'New chat button should be present')
+  assert.match(newChatButton, /onClick=\{startNewChat\}/)
+  assert.doesNotMatch(newChatButton, /fileInput\.current\?\.click\(\)/)
+  assert.match(app, /<div className="empty-workspace">/)
+  assert.match(app, /Загрузите документ\.<br \/>/)
+})
+
 test('chat markdown renders GFM safely and keeps citation actions interactive', () => {
   assert.match(chatMarkdown, /remarkPlugins=\{\[remarkGfm, remarkCitations\]\}/)
   assert.match(chatMarkdown, /rehypePlugins=\{\[rehypeSanitize\]\}/)
