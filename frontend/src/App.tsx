@@ -34,6 +34,7 @@ import {
 import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, MarkdownDocument, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
+import { ChatMarkdown } from './components/ChatMarkdown'
 
 const API = '/api/v1'
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
@@ -1198,7 +1199,7 @@ function ChatBubble({ message, onOpenSource }: { message: ChatMessage; onOpenSou
       {message.role === 'assistant' && <span className="assistant-avatar"><span /><span /><span /><span /></span>}
       <div className="message-body">
         <div className="message-author">{message.role === 'user' ? 'Вы' : 'Document Checker'}</div>
-        <div className="message-text"><CitationText text={message.content} citations={message.citations} onOpenSource={onOpenSource} /></div>
+        <div className="message-text">{message.role === 'assistant' ? <ChatMarkdown text={message.content} citations={message.citations} onOpenSource={onOpenSource} /> : <CitationText text={message.content} citations={message.citations} onOpenSource={onOpenSource} />}</div>
         {message.role === 'assistant' && message.citations.length > 0 && <div className="message-sources"><span>ИСТОЧНИКИ</span>{message.citations.map((source, index) => <button key={source.id} onClick={() => void onOpenSource(source)} title={source.text}><BookOpen size={12} /> {index + 1} · {locatorText(source)}</button>)}</div>}
       </div>
     </article>

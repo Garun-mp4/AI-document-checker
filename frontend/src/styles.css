@@ -511,12 +511,42 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .message-body { min-width: 0; flex: 1; }
 .message-author { margin-bottom: 5px; color: var(--ink-tertiary); font-size: 11px; font-weight: 500; }
 .message-text { color: var(--ink-soft); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-message .message-text { white-space: normal; }
+.message-markdown { min-width: 0; }
+.message-markdown > :first-child { margin-top: 0; }
+.message-markdown > :last-child { margin-bottom: 0; }
+.message-markdown p { margin: 0 0 11px; }
+.message-markdown h1, .message-markdown h2, .message-markdown h3, .message-markdown h4 { margin: 16px 0 8px; color: var(--ink); font-weight: 600; line-height: 1.3; letter-spacing: -.01em; }
+.message-markdown h1 { font-size: 18px; }
+.message-markdown h2 { font-size: 16px; }
+.message-markdown h3, .message-markdown h4 { font-size: 14px; }
+.message-markdown ul, .message-markdown ol { margin: 0 0 11px; padding-left: 23px; }
+.message-markdown li { padding-left: 2px; }
+.message-markdown li + li { margin-top: 4px; }
+.message-markdown blockquote { margin: 11px 0; padding: 6px 10px 6px 12px; border-radius: 0 7px 7px 0; background: var(--surface-soft); box-shadow: inset 2px 0 0 var(--line-strong); color: var(--ink-secondary); }
+.message-markdown blockquote > :last-child { margin-bottom: 0; }
+.message-markdown strong { color: var(--ink); font-weight: 600; }
+.message-markdown em { color: var(--ink-secondary); }
+.message-markdown del { color: var(--ink-tertiary); }
+.message-markdown code { padding: 2px 5px; border: 1px solid var(--line-soft); border-radius: 5px; background: var(--surface-soft); color: var(--ink); font: 0.9em/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.message-markdown pre { max-width: 100%; margin: 11px 0; overflow: auto; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-soft); color: var(--ink); font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+.message-markdown pre code { padding: 0; border: 0; background: transparent; font: inherit; white-space: inherit; }
+.message-markdown a:not(.inline-citation) { color: var(--ink); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.message-markdown a:not(.inline-citation):hover { color: var(--ink-secondary); }
+.message-markdown hr { margin: 14px 0; border: 0; border-top: 1px solid var(--line-soft); }
+.message-markdown-table { max-width: 100%; margin: 11px 0; overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
+.message-markdown-table table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.45; }
+.message-markdown-table th, .message-markdown-table td { padding: 7px 9px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
+.message-markdown-table th { background: var(--surface-soft); color: var(--ink); font-weight: 600; }
+.message-markdown-table tr:last-child td { border-bottom: 0; }
+.message-markdown-table th:last-child, .message-markdown-table td:last-child { border-right: 0; }
 .user-message { justify-content: flex-end; }
 .user-message .message-body { flex: initial; max-width: 90%; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 14px 14px 4px 14px; background: var(--surface-soft); }
 .user-message .message-author { display: none; }
 .assistant-message .message-body { padding-top: 3px; }
 .inline-citation { display: inline; margin: 0 2px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-soft); color: var(--ink); font-size: 11px; cursor: pointer; }
 .inline-citation:hover { border-color: var(--ink); }
+.inline-citation-missing { color: var(--ink-tertiary); cursor: default; }
 .message-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
 .message-sources > span { width: 100%; margin-bottom: 1px; color: var(--ink-tertiary); font-size: 10px; font-weight: 600; letter-spacing: .1em; }
 .message-sources button { display: inline-flex; align-items: center; gap: 4px; min-height: 27px; max-width: 100%; padding: 0 7px; border: 1px solid var(--line-soft); border-radius: 999px; background: var(--paper); color: var(--ink-secondary); font-size: 10px; cursor: pointer; }
