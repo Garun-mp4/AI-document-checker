@@ -195,6 +195,7 @@ function App() {
   const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false)
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
+  const [openPreferenceMenu, setOpenPreferenceMenu] = useState<'model' | 'reasoning' | null>(null)
   const [codexSaving, setCodexSaving] = useState(false)
   const [codexPreferenceMessage, setCodexPreferenceMessage] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
@@ -211,6 +212,9 @@ function App() {
   const chatInputRef = useRef<HTMLTextAreaElement>(null)
   const workArea = useRef<HTMLElement>(null)
   const conversation = useRef<HTMLDivElement>(null)
+  const authDetailsRef = useRef<HTMLDivElement>(null)
+  const modelTriggerRef = useRef<HTMLButtonElement>(null)
+  const reasoningTriggerRef = useRef<HTMLButtonElement>(null)
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null)
 
   const showToast = useCallback((message: string) => {
@@ -369,6 +373,15 @@ function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        if (openPreferenceMenu) {
+          event.preventDefault()
+          setOpenPreferenceMenu(null)
+          window.requestAnimationFrame(() => {
+            const trigger = openPreferenceMenu === 'model' ? modelTriggerRef.current : reasoningTriggerRef.current
+            trigger?.focus()
+          })
+          return
+        }
         setAuthOpen(false)
         setDeleteTarget(null)
         setMobileLibraryOpen(false)
@@ -377,16 +390,30 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [openPreferenceMenu])
+
+  useEffect(() => {
+    if (!openPreferenceMenu) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!authDetailsRef.current?.contains(event.target as Node)) setOpenPreferenceMenu(null)
+    }
+    window.document.addEventListener('pointerdown', onPointerDown)
+    return () => window.document.removeEventListener('pointerdown', onPointerDown)
+  }, [openPreferenceMenu])
+
+  useEffect(() => {
+    if (!authOpen) setOpenPreferenceMenu(null)
+  }, [authOpen])
 
   useEffect(() => {
     if (!authOpen && !deleteTarget) return
     const dialog = window.document.querySelector<HTMLElement>('.modal-card')
     if (!dialog) return
     const focusableSelector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
-    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => element.offsetParent !== null)
-    focusable[0]?.focus()
+    const getFocusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => element.offsetParent !== null)
+    getFocusable()[0]?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
+      const focusable = getFocusable()
       if (event.key !== 'Tab' || focusable.length < 2) return
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
@@ -462,7 +489,7 @@ function App() {
     }
   }, [showToast])
 
-  const saveCodexPreferences = useCallback(async (model: string, reasoningEffort: string) => {
+  const saveCodexPreferences = useCallback(async (model: string, reasoningEffort: string): Promise<boolean> => {
     setCodexSaving(true)
     setCodexPreferenceMessage('')
     try {
@@ -473,8 +500,10 @@ function App() {
       })
       setCodex(updated)
       setCodexPreferenceMessage('Настройки модели сохранены.')
+      return true
     } catch (error) {
       setCodexPreferenceMessage(error instanceof Error ? error.message : 'Не удалось сохранить настройки модели.')
+      return false
     } finally {
       setCodexSaving(false)
     }
@@ -486,11 +515,11 @@ function App() {
     const nextEffort = option?.reasoning_efforts.some((item) => item.value === currentEffort)
       ? currentEffort
       : option?.reasoning_efforts[0]?.value || currentEffort
-    void saveCodexPreferences(model, nextEffort)
+    return saveCodexPreferences(model, nextEffort)
   }, [codex, saveCodexPreferences])
 
   const changeCodexReasoning = useCallback((reasoningEffort: string) => {
-    void saveCodexPreferences(codex?.model || DEFAULT_CODEX_MODEL, reasoningEffort)
+    return saveCodexPreferences(codex?.model || DEFAULT_CODEX_MODEL, reasoningEffort)
   }, [codex, saveCodexPreferences])
 
   const retryDocument = useCallback(async () => {
@@ -629,7 +658,49 @@ function App() {
   }]
   const selectedCodexModel = codexModelOptions.find((item) => item.id === (codex?.model || DEFAULT_CODEX_MODEL)) || codexModelOptions[0]
   const codexReasoningOptions = selectedCodexModel?.reasoning_efforts ?? []
-  const selectedCodexReasoning = codexReasoningOptions.find((option) => option.value === codex?.reasoning_effort)
+  const modelMenuDisabled = !codex?.authenticated || !codex?.models?.length || codexSaving
+  const reasoningMenuDisabled = !codex?.authenticated || !codex?.model_available || !codexReasoningOptions.length || codexSaving
+  const togglePreferenceMenu = (menu: 'model' | 'reasoning') => {
+    if ((menu === 'model' && modelMenuDisabled) || (menu === 'reasoning' && reasoningMenuDisabled)) return
+    if (openPreferenceMenu === menu) {
+      setOpenPreferenceMenu(null)
+      return
+    }
+    setOpenPreferenceMenu(menu)
+    window.requestAnimationFrame(() => {
+      const list = window.document.getElementById(`codex-${menu}-options`)
+      const selected = list?.querySelector<HTMLElement>('[aria-selected="true"]')
+      const first = list?.querySelector<HTMLElement>('[role="option"]')
+      ;(selected || first)?.focus()
+    })
+  }
+  const movePreferenceFocus = (menu: 'model' | 'reasoning', event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End']
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      setOpenPreferenceMenu(null)
+      window.requestAnimationFrame(() => (menu === 'model' ? modelTriggerRef.current : reasoningTriggerRef.current)?.focus())
+      return
+    }
+    if (!keys.includes(event.key)) return
+    event.preventDefault()
+    const options = Array.from(window.document.querySelectorAll<HTMLElement>(`#codex-${menu}-options [role="option"]`)).filter((option) => !option.hasAttribute('disabled'))
+    if (!options.length) return
+    const currentIndex = options.indexOf(event.currentTarget)
+    const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (currentIndex + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length
+    options[nextIndex]?.focus()
+  }
+  const selectCodexModel = async (model: string) => {
+    setOpenPreferenceMenu(null)
+    const saved = await changeCodexModel(model)
+    if (!saved) setOpenPreferenceMenu('model')
+  }
+  const selectCodexReasoning = async (reasoningEffort: string) => {
+    setOpenPreferenceMenu(null)
+    const saved = await changeCodexReasoning(reasoningEffort)
+    if (!saved) setOpenPreferenceMenu('reasoning')
+  }
   const streamedLabels = Array.from(new Set(Array.from(streamText.matchAll(/\[(S\d{2})\]/g), (match) => match[1])))
   const streamingCitations = streamedLabels.flatMap((label) => {
     const source = streamSources.find((item) => item.label === label)
@@ -933,34 +1004,89 @@ function App() {
           <span className="modal-eyebrow">ПОДКЛЮЧЕНИЕ МОДЕЛИ</span>
           <h2 id="auth-title">Вход в Codex</h2>
           <p id="auth-description" className="modal-intro">Для анализа используется {codexModelLabel(codex)} с уровнем reasoning {codexReasoningLabel(codex?.reasoning_effort).toLowerCase()} через ваш аккаунт Codex. API-ключ не нужен.</p>
-          <div className="auth-details">
-            <div><span className="auth-detail-label">Модель</span><strong>{codexModelLabel(codex)}</strong></div>
-            <div><span className="auth-detail-label">Уровень анализа</span><strong>{codexReasoningLabel(codex?.reasoning_effort)}</strong></div>
-            <div><span className="auth-detail-label">Состояние</span><strong>{authReady ? 'Подключено' : codex?.login_state === 'pending' ? 'Ожидание подтверждения' : 'Не подключено'}</strong></div>
-          </div>
-          <div className="auth-settings" aria-label="Настройки модели Codex">
-            <label className="auth-setting">
-              <span className="auth-setting-label">Модель</span>
-              <select
-                value={codex?.model || DEFAULT_CODEX_MODEL}
-                onChange={(event) => changeCodexModel(event.target.value)}
-                disabled={!codex?.authenticated || !codex?.models?.length || codexSaving}
+          <div className="auth-details" ref={authDetailsRef} aria-label="Настройки модели Codex">
+            <div className="auth-detail-choice">
+              <button
+                ref={modelTriggerRef}
+                className={`auth-detail-trigger ${openPreferenceMenu === 'model' ? 'is-open' : ''}`}
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={openPreferenceMenu === 'model'}
+                aria-controls="codex-model-options"
+                aria-label={`Модель: ${codexModelLabel(codex)}`}
+                title={modelMenuDisabled ? 'Подключите аккаунт Codex, чтобы выбрать модель' : 'Выбрать модель'}
+                disabled={modelMenuDisabled}
+                onClick={() => togglePreferenceMenu('model')}
+                onKeyDown={(event) => {
+                  if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && openPreferenceMenu !== 'model') {
+                    event.preventDefault()
+                    togglePreferenceMenu('model')
+                  }
+                }}
               >
-                {codexModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-              </select>
-              {selectedCodexModel?.description && <small>{selectedCodexModel.description}</small>}
-            </label>
-            <label className="auth-setting">
-              <span className="auth-setting-label">Уровень размышления</span>
-              <select
-                value={codex?.reasoning_effort || DEFAULT_CODEX_REASONING}
-                onChange={(event) => changeCodexReasoning(event.target.value)}
-                disabled={!codex?.authenticated || !codex?.model_available || !codexReasoningOptions.length || codexSaving}
+                <span className="auth-detail-label">Модель</span>
+                <strong>{codexModelLabel(codex)}</strong>
+                <ChevronDown className="auth-detail-arrow" size={15} aria-hidden="true" />
+              </button>
+              {openPreferenceMenu === 'model' && <div id="codex-model-options" className="auth-detail-option-list" role="listbox" aria-label="Доступные модели">
+                {codexModelOptions.map((option) => {
+                  const unavailable = option.id === codex?.model && !codex?.model_available
+                  return <button
+                    key={option.id}
+                    className={`auth-detail-option ${option.id === codex?.model ? 'is-selected' : ''}`}
+                    type="button"
+                    role="option"
+                    aria-selected={option.id === codex?.model}
+                    disabled={unavailable || codexSaving}
+                    onClick={() => void selectCodexModel(option.id)}
+                    onKeyDown={(event) => movePreferenceFocus('model', event)}
+                  >
+                    <span className="auth-detail-option-copy"><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+                    {option.id === codex?.model && <Check size={14} aria-hidden="true" />}
+                  </button>
+                })}
+              </div>}
+            </div>
+            <div className="auth-detail-choice">
+              <button
+                ref={reasoningTriggerRef}
+                className={`auth-detail-trigger ${openPreferenceMenu === 'reasoning' ? 'is-open' : ''}`}
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={openPreferenceMenu === 'reasoning'}
+                aria-controls="codex-reasoning-options"
+                aria-label={`Уровень анализа: ${codexReasoningLabel(codex?.reasoning_effort)}`}
+                title={reasoningMenuDisabled ? 'Выбор доступен после подключения модели' : 'Выбрать уровень анализа'}
+                disabled={reasoningMenuDisabled}
+                onClick={() => togglePreferenceMenu('reasoning')}
+                onKeyDown={(event) => {
+                  if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && openPreferenceMenu !== 'reasoning') {
+                    event.preventDefault()
+                    togglePreferenceMenu('reasoning')
+                  }
+                }}
               >
-                {codexReasoningOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-              {selectedCodexReasoning?.description && <small>{selectedCodexReasoning.description}</small>}
-            </label>
+                <span className="auth-detail-label">Уровень анализа</span>
+                <strong>{codexReasoningLabel(codex?.reasoning_effort)}</strong>
+                <ChevronDown className="auth-detail-arrow" size={15} aria-hidden="true" />
+              </button>
+              {openPreferenceMenu === 'reasoning' && <div id="codex-reasoning-options" className="auth-detail-option-list" role="listbox" aria-label="Уровни анализа">
+                {codexReasoningOptions.map((option) => <button
+                  key={option.value}
+                  className={`auth-detail-option ${option.value === codex?.reasoning_effort ? 'is-selected' : ''}`}
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === codex?.reasoning_effort}
+                  disabled={codexSaving}
+                  onClick={() => void selectCodexReasoning(option.value)}
+                  onKeyDown={(event) => movePreferenceFocus('reasoning', event)}
+                >
+                  <span className="auth-detail-option-copy"><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+                  {option.value === codex?.reasoning_effort && <Check size={14} aria-hidden="true" />}
+                </button>)}
+              </div>}
+            </div>
+            <div className="auth-detail-static"><span className="auth-detail-label">Состояние</span><strong>{authReady ? 'Подключено' : codex?.login_state === 'pending' ? 'Ожидание подтверждения' : 'Не подключено'}</strong></div>
           </div>
           <p className="auth-settings-note">{codexSaving ? 'Сохраняю настройки…' : codex?.authenticated && codex?.models?.length ? 'Доступны модели и уровни из вашего аккаунта Codex.' : 'Подключите аккаунт, чтобы выбрать доступные варианты.'}</p>
           {codexPreferenceMessage && <p className="auth-settings-message" role="status">{codexPreferenceMessage}</p>}
