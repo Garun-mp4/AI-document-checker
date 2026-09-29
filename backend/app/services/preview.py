@@ -29,6 +29,13 @@ def _renderer_for(file_type: str) -> str:
         "md": "text",
         "csv": "csv",
         "xml": "xml",
+        "xlsx": "xlsx",
+        "xls": "xls",
+        "pptx": "pptx",
+        "html": "html",
+        "htm": "html",
+        "json": "json",
+        "epub": "epub",
     }.get(file_type, "text")
 
 
@@ -43,8 +50,14 @@ def _layout_for(file_type: str, metadata: dict[str, Any]) -> tuple[str, float]:
         return "pdf", 210 / 297
     if file_type == "csv":
         return "table", 2.1
+    if file_type in {"xlsx", "xls"}:
+        return "table", 2.1
+    if file_type == "pptx":
+        return "slides", 16 / 9
     if file_type == "xml":
         return "tree", 1.25
+    if file_type in {"json", "epub"}:
+        return "tree" if file_type == "json" else "paper", 1.25 if file_type == "json" else 210 / 297
     width = metadata.get("page_width")
     height = metadata.get("page_height")
     if file_type == "docx" and isinstance(width, (int, float)) and isinstance(height, (int, float)) and width > 0 and height > 0:
@@ -53,17 +66,21 @@ def _layout_for(file_type: str, metadata: dict[str, Any]) -> tuple[str, float]:
 
 
 def _kind_for(file_type: str, locator: dict[str, Any], is_derived: bool) -> str:
-    if is_derived or locator.get("kind") == "csv_derived":
+    if is_derived or locator.get("kind") in {"csv_derived", "xlsx_derived", "xls_derived"}:
         return "calculation"
     if file_type == "pdf":
         return "page"
     if file_type == "csv":
         return "row"
+    if file_type in {"xlsx", "xls"}:
+        return "row"
+    if file_type == "pptx":
+        return "paragraph"
     if file_type == "xml":
         return "node"
     if locator.get("kind") == "docx_table":
         return "table"
-    if file_type in {"txt", "md"}:
+    if file_type in {"txt", "md", "html", "htm", "json", "epub"}:
         return "text"
     return "paragraph"
 
@@ -151,6 +168,61 @@ def read_csv_table_file(path: Path, *, offset: int = 0, limit: int = 100) -> dic
         raise DocumentParsingError("Не удалось прочитать исходный CSV-файл.") from exc
 
 
+def read_spreadsheet_table(data: bytes, file_type: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    if offset < 0:
+        raise DocumentParsingError("offset не может быть отрицательным.")
+    limit = max(1, min(limit, MAX_TABLE_ROWS))
+    try:
+        if file_type == "xlsx":
+            from openpyxl import load_workbook
+            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+            sheet = workbook.worksheets[0]
+            rows = [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]
+            sheet_name = sheet.title
+            workbook.close()
+        else:
+            import xlrd
+            workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
+            sheet = workbook.sheet_by_index(0)
+            rows = [["" if value is None else str(value) for value in sheet.row_values(index)] for index in range(sheet.nrows)]
+            sheet_name = sheet.name
+    except ImportError as exc:
+        raise DocumentParsingError(f"Для {file_type.upper()} не установлен модуль чтения таблиц.") from exc
+    except Exception as exc:
+        raise DocumentParsingError(f"{file_type.upper()} повреждён или имеет неверную структуру.") from exc
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if not rows:
+        raise DocumentParsingError("Таблица пустая — строк не найдено.")
+    columns = [cell.strip() or f"Столбец {index + 1}" for index, cell in enumerate(rows[0])]
+    if len(columns) > 500:
+        raise DocumentParsingError("В таблице слишком много столбцов (максимум 500).")
+    data_rows = rows[1:]
+    page = data_rows[offset:offset + limit]
+    return {
+        "columns": columns,
+        "rows": [
+            {"number": offset + index + 2, "cells": row[:len(columns)] + [""] * max(0, len(columns) - len(row))}
+            for index, row in enumerate(page)
+        ],
+        "offset": offset,
+        "limit": limit,
+        "total_rows": len(data_rows),
+        "sheet": sheet_name,
+    }
+
+
+def read_table_file(path: Path, file_type: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise DocumentParsingError("Исходный файл документа недоступен.") from exc
+    except OSError as exc:
+        raise DocumentParsingError("Не удалось прочитать исходный файл таблицы.") from exc
+    if file_type == "csv":
+        return read_csv_table(data, offset=offset, limit=limit)
+    return read_spreadsheet_table(data, file_type, offset=offset, limit=limit)
+
+
 def build_preview(
     *,
     document_id: str,
@@ -175,11 +247,11 @@ def build_preview(
             "source_id": str(chunk.id),
             "ordinal": int(chunk.ordinal),
             "kind": _kind_for(file_type, locator, is_derived),
-            "text": str(chunk.text),
+            "text": str(locator.get("source_text") or chunk.text),
             "locator": locator,
             "rows": None,
         }
-        if file_type == "csv" and not is_derived:
+        if file_type in {"csv", "xlsx", "xls"} and not is_derived:
             block["rows"] = _csv_rows(str(chunk.text), columns)
         blocks.append(block)
 

@@ -18,6 +18,8 @@ from app.services.codex import (
     CodexUnavailable,
 )
 from app.services.embeddings import EmbeddingConfigurationError, embed_passages
+from app.services.markdown_mapping import map_markdown, serialize_map
+from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
 from app.services.parsing import (
     DocumentParsingError,
     ParsedDocument,
@@ -31,13 +33,13 @@ PROCESSING_STATES = {"extracting", "indexing", "analyzing"}
 
 
 def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
-    if parsed.file_type != "csv":
+    if parsed.file_type not in {"csv", "xlsx", "xls"}:
         return []
     metadata = parsed.metadata
     row_end = int(metadata.get("row_count", 0)) + 1
     blocks = [SourceBlock(
         f"Локальная структура таблицы: {metadata.get('row_count', 0)} строк данных, {metadata.get('column_count', 0)} столбцов.",
-        {"kind": "csv_derived", "label": "Сводка таблицы", "row_start": 1, "row_end": row_end, "derived": True},
+        {"kind": f"{parsed.file_type}_derived", "label": "Сводка таблицы", "row_start": 1, "row_end": row_end, "derived": True},
         derived=True,
     )]
     for item in metadata.get("numeric_columns", []):
@@ -46,7 +48,7 @@ def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
             f"числовых значений {item['count']}; сумма {item['sum']}; среднее {item['average']}; "
             f"минимум {item['minimum']}; максимум {item['maximum']}.",
             {
-                "kind": "csv_derived",
+                "kind": f"{parsed.file_type}_derived",
                 "label": f"Показатели столбца «{item['name']}» · строки 2–{row_end}",
                 "column": item["name"],
                 "row_start": 2,
@@ -61,6 +63,7 @@ def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
 class DocumentProcessor:
     def __init__(self, codex: CodexService) -> None:
         self.codex = codex
+        self.markitdown = MarkItDownService(settings.upload_dir)
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
 
     async def start(self) -> None:
@@ -151,41 +154,100 @@ class DocumentProcessor:
             if not parsed.blocks:
                 raise DocumentParsingError("Не удалось извлечь текст из файла.")
 
+            analysis_blocks: list[tuple[str, dict[str, object], str, int | None, int | None, int | None, int | None, str | None]] = []
+            markdown_status = "fallback"
+            analysis_source = "native_fallback"
+            markdown_error: str | None = None
+            markdown_mapping: dict[str, object] = {}
+            markdown_path = Path(settings.upload_dir).resolve() / f"{document_id}.md"
+            markdown_map_path = Path(settings.upload_dir).resolve() / f"{document_id}.map.json"
+            try:
+                markdown_result = await self.markitdown.convert(path)
+                mapped_blocks, markdown_mapping = map_markdown(markdown_result.markdown, parsed.blocks)
+                if not mapped_blocks:
+                    raise MarkdownConversionError("MarkItDown не создал индексируемые блоки.")
+                await asyncio.to_thread(markdown_path.write_text, markdown_result.markdown, "utf-8")
+                await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
+                analysis_blocks = [(
+                    block.text,
+                    block.locator,
+                    "markitdown",
+                    block.line_start,
+                    block.line_end,
+                    block.char_start,
+                    block.char_end,
+                    block.confidence,
+                ) for block in mapped_blocks]
+                markdown_status = "ready"
+                analysis_source = "markitdown"
+            except MarkdownConversionError as exc:
+                markdown_error = str(exc)
+                markdown_path.unlink(missing_ok=True)
+                markdown_map_path.unlink(missing_ok=True)
+                analysis_blocks = [(
+                    block.text,
+                    {**block.locator, "source_text": block.text},
+                    "native_fallback",
+                    None,
+                    None,
+                    None,
+                    None,
+                    "exact",
+                ) for block in parsed.blocks]
+
             async with SessionLocal() as session:
                 document = await session.get(Document, document_id)
                 if document is None:
                     return
                 await session.execute(delete(Chunk).where(Chunk.document_id == document_id))
                 document.file_type = parsed.file_type
-                document.metadata_json = parsed.metadata
+                document.metadata_json = {
+                    **parsed.metadata,
+                    "markdown_status": markdown_status,
+                    "analysis_source": analysis_source,
+                }
+                document.markdown_status = markdown_status
+                document.analysis_source = analysis_source
+                document.markdown_path = str(markdown_path) if markdown_status == "ready" else None
+                document.markdown_map_path = str(markdown_map_path) if markdown_status == "ready" else None
+                document.markdown_error = markdown_error
+                document.markdown_converter_version = "0.1.8" if markdown_status == "ready" else None
+                document.markdown_char_count = sum(len(item[0]) for item in analysis_blocks) if markdown_status != "ready" else len(markdown_result.markdown)
+                document.markdown_line_count = len(markdown_result.markdown.splitlines()) if markdown_status == "ready" else 0
+                document.markdown_mapping_json = markdown_mapping.get("quality", {}) if markdown_status == "ready" else {}
                 document.status = "indexing"
                 document.chunk_count = 0
                 await session.commit()
 
-            original_blocks = parsed.blocks
             derived_blocks = _computed_blocks(parsed)
-            for start in range(0, len(original_blocks), 48):
-                batch = original_blocks[start:start + 48]
-                vectors = await asyncio.to_thread(embed_passages, [block.text for block in batch], settings.embedding_cache_dir)
+            for start in range(0, len(analysis_blocks), 48):
+                batch = analysis_blocks[start:start + 48]
+                vectors = await asyncio.to_thread(embed_passages, [block[0] for block in batch], settings.embedding_cache_dir)
                 async with SessionLocal() as session:
                     session.add_all([
                         Chunk(
                             document_id=document_id,
                             ordinal=start + index,
-                            text=block.text,
-                            locator=block.locator,
+                            text=block[0],
+                            locator=block[1],
                             embedding=vector,
                             is_derived=False,
+                            content_source=block[2],
+                            markdown_line_start=block[3],
+                            markdown_line_end=block[4],
+                            markdown_char_start=block[5],
+                            markdown_char_end=block[6],
+                            mapping_confidence=block[7],
                         )
                         for index, (block, vector) in enumerate(zip(batch, vectors, strict=True))
                     ])
                     document = await session.get(Document, document_id)
                     if document:
-                        document.chunk_count = min(start + len(batch), len(original_blocks))
+                        document.chunk_count = min(start + len(batch), len(analysis_blocks))
                     await session.commit()
 
             async with SessionLocal() as session:
-                for index, block in enumerate(derived_blocks, start=len(original_blocks)):
+                for index, block in enumerate(derived_blocks, start=len(analysis_blocks)):
                     session.add(Chunk(
                         document_id=document_id,
                         ordinal=index,
@@ -196,7 +258,7 @@ class DocumentProcessor:
                     ))
                 document = await session.get(Document, document_id)
                 if document:
-                    document.chunk_count = len(original_blocks) + len(derived_blocks)
+                    document.chunk_count = len(analysis_blocks) + len(derived_blocks)
                     existing_chat = (await session.execute(select(Chat.id).where(Chat.document_id == document_id))).scalar_one_or_none()
                     if existing_chat is None:
                         session.add(Chat(document_id=document_id))

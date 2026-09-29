@@ -65,7 +65,7 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
 
 
 def questions_for(file_type: str) -> list[dict[str, str]]:
-    return CSV_QUESTIONS if file_type == "csv" else GENERAL_QUESTIONS
+    return CSV_QUESTIONS if file_type in {"csv", "xlsx", "xls"} else GENERAL_QUESTIONS
 
 
 def _format_number(raw: str) -> str:
@@ -129,7 +129,7 @@ async def analyze_document(document_id: uuid.UUID, codex: CodexService) -> None:
         for chunk in chunks:
             unique_chunks.setdefault(chunk.id, chunk)
 
-    if file_type == "csv":
+    if file_type in {"csv", "xlsx", "xls"}:
         async with SessionLocal() as session:
             derived_rows = (await session.execute(
                 select(Chunk).where(Chunk.document_id == document_id, Chunk.is_derived.is_(True))
@@ -196,7 +196,7 @@ async def analyze_document(document_id: uuid.UUID, codex: CodexService) -> None:
     insights: list[Insight] = []
     for question in questions:
         key = question["key"]
-        if key == "metrics" and file_type == "csv":
+        if key == "metrics" and file_type in {"csv", "xlsx", "xls"}:
             answer, citations = metric_answer, metric_citations
         else:
             generated = model_rows.get(key, {})

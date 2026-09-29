@@ -27,6 +27,8 @@ services:
       UPLOAD_DIR: /data/uploads
       MAX_UPLOAD_BYTES: 26214400
       MODEL_CONTEXT_CHARS: 42000
+      MARKDOWN_MAX_CHARS: 5000000
+      MARKDOWN_TIMEOUT_SECONDS: 120
       PYTHONUNBUFFERED: "1"
     volumes:
       - document_uploads:/data/uploads

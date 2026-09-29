@@ -17,6 +17,12 @@ EXPECTED_TEXT = {
     "sample.md": "Тестовый проект",
     "sample.csv": "Проект: Альфа",
     "sample.xml": "Тестовый проект",
+    "sample.xlsx": "Альфа",
+    "sample.xls": "Альфа",
+    "sample.pptx": "Тестовый проект",
+    "sample.html": "Тестовый проект",
+    "sample.json": "Тестовый проект",
+    "sample.epub": "Тестовый проект",
 }
 EXPECTED_LOCATOR_KIND = {
     "sample.pdf": "pdf",
@@ -25,6 +31,12 @@ EXPECTED_LOCATOR_KIND = {
     "sample.md": "md",
     "sample.csv": "csv",
     "sample.xml": "xml",
+    "sample.xlsx": "xlsx",
+    "sample.xls": "xls",
+    "sample.pptx": "pptx",
+    "sample.html": "html",
+    "sample.json": "json",
+    "sample.epub": "epub",
 }
 
 

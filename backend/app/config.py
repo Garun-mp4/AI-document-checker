@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     codex_reasoning_effort: str = "medium"
     max_upload_bytes: int = 25 * 1024 * 1024
     model_context_chars: int = 42_000
+    markdown_max_chars: int = 5_000_000
+    markdown_timeout_seconds: int = 120
 
 
 settings = Settings()

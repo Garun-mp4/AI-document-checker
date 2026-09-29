@@ -23,6 +23,7 @@ from app.schemas import (
     DocumentOut,
     DocumentPreviewOut,
     InsightOut,
+    MarkdownOut,
     MessageOut,
     SendMessageIn,
     SourceOut,
@@ -41,7 +42,7 @@ from app.services.parsing import (
     DocumentParsingError,
     safe_filename,
 )
-from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview, read_csv_table_file
+from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview, read_table_file
 from app.services.retrieval import search_chunks
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,13 @@ def _document_out(document: Document) -> DocumentOut:
         error_message=document.error_message,
         chunk_count=document.chunk_count,
         metadata=document.metadata_json or {},
+        markdown_status=document.markdown_status,
+        analysis_source=document.analysis_source,
+        markdown_error=document.markdown_error,
+        markdown_converter_version=document.markdown_converter_version,
+        markdown_char_count=document.markdown_char_count,
+        markdown_line_count=document.markdown_line_count,
+        markdown_mapping=document.markdown_mapping_json or {},
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
@@ -77,7 +85,7 @@ async def _sources_for_ids(session, document_id: uuid.UUID, ids: list[str]) -> l
     )).scalars().all()
     by_id = {str(chunk.id): chunk for chunk in rows}
     return [
-        SourceOut(id=value, text=by_id[value].text[:2_500], locator=by_id[value].locator,
+        SourceOut(id=value, text=str((by_id[value].locator or {}).get("source_text") or by_id[value].text)[:2_500], locator=by_id[value].locator,
                   ordinal=by_id[value].ordinal, is_derived=by_id[value].is_derived)
         for value in ids if value in by_id
     ]
@@ -246,6 +254,11 @@ async def delete_document(document_id: uuid.UUID, request: Request) -> None:
         await session.commit()
     if path.is_relative_to(upload_root):
         path.unlink(missing_ok=True)
+        for artifact in (document.markdown_path, document.markdown_map_path):
+            if artifact:
+                artifact_path = Path(artifact).resolve()
+                if artifact_path.is_relative_to(upload_root):
+                    artifact_path.unlink(missing_ok=True)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[SourceOut])
@@ -260,7 +273,7 @@ async def list_chunks(document_id: uuid.UUID, offset: int = 0, limit: int = 50) 
             select(Chunk).where(Chunk.document_id == document_id).order_by(Chunk.ordinal).offset(offset).limit(limit)
         )).scalars().all()
         return [SourceOut(
-            id=str(chunk.id), text=chunk.text[:2_500], locator=chunk.locator,
+            id=str(chunk.id), text=str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500], locator=chunk.locator,
             ordinal=chunk.ordinal, is_derived=chunk.is_derived,
         ) for chunk in chunks]
 
@@ -330,17 +343,85 @@ async def document_preview_table(
         document = await session.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
-        if document.file_type != "csv":
-            raise HTTPException(status_code=400, detail="Табличный просмотр доступен только для CSV.")
+        if document.file_type not in {"csv", "xlsx", "xls"}:
+            raise HTTPException(status_code=400, detail="Табличный просмотр доступен только для CSV, XLSX и XLS.")
         path = Path(document.storage_path).resolve()
         upload_root = Path(settings.upload_dir).resolve()
         if not path.is_relative_to(upload_root) or not path.is_file():
             raise HTTPException(status_code=404, detail="Исходный файл документа недоступен.")
     try:
-        payload = await asyncio.to_thread(read_csv_table_file, path, offset=offset, limit=limit)
+        payload = await asyncio.to_thread(read_table_file, path, document.file_type, offset=offset, limit=limit)
     except DocumentParsingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return TablePreviewOut.model_validate(payload)
+
+
+@router.get("/documents/{document_id}/markdown", response_model=MarkdownOut)
+async def document_markdown(
+    document_id: uuid.UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100_000, ge=1, le=250_000),
+) -> MarkdownOut:
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        text = ""
+        if document.markdown_path:
+            path = Path(document.markdown_path).resolve()
+            root = Path(settings.upload_dir).resolve()
+            if path.is_relative_to(root) and path.is_file():
+                try:
+                    text = await asyncio.to_thread(path.read_text, "utf-8")
+                except (OSError, UnicodeError):
+                    text = ""
+        total_chars = len(text)
+        total_lines = len(text.splitlines())
+        return MarkdownOut(
+            document_id=str(document.id),
+            status=document.markdown_status,
+            source=document.analysis_source,
+            converter_version=document.markdown_converter_version,
+            markdown=text[offset:offset + limit],
+            offset=offset,
+            limit=limit,
+            total_chars=total_chars,
+            total_lines=total_lines,
+            mapping_quality={str(key): int(value) for key, value in (document.markdown_mapping_json or {}).items() if isinstance(value, (int, float))},
+            error=document.markdown_error,
+        )
+
+
+@router.get("/documents/{document_id}/markdown/download")
+async def download_document_markdown(document_id: uuid.UUID) -> FileResponse:
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if not document.markdown_path:
+            raise HTTPException(status_code=404, detail="Markdown для этого документа ещё не создан.")
+        path = Path(document.markdown_path).resolve()
+        root = Path(settings.upload_dir).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise HTTPException(status_code=404, detail="Markdown-файл недоступен.")
+        safe_name = f"{Path(document.filename).stem[:180] or 'document'}.md"
+        return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=safe_name)
+
+
+@router.post("/documents/{document_id}/markdown/rebuild", response_model=DocumentOut, status_code=202)
+async def rebuild_document_markdown(document_id: uuid.UUID, request: Request) -> DocumentOut:
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        document.status = "queued"
+        document.error_message = None
+        document.markdown_status = "pending"
+        document.markdown_error = None
+        await session.commit()
+        await session.refresh(document)
+    request.app.state.processor.schedule(document_id)
+    return _document_out(document)
 
 
 @router.get("/documents/{document_id}/insights", response_model=list[InsightOut])

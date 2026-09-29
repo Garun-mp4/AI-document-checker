@@ -15,6 +15,13 @@ class DocumentOut(BaseModel):
     error_message: str | None
     chunk_count: int
     metadata: dict[str, Any]
+    markdown_status: Literal["pending", "ready", "fallback", "failed", "legacy"]
+    analysis_source: Literal["markitdown", "native_fallback"]
+    markdown_error: str | None
+    markdown_converter_version: str | None
+    markdown_char_count: int
+    markdown_line_count: int
+    markdown_mapping: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
@@ -42,8 +49,8 @@ class PreviewBlockOut(BaseModel):
 class DocumentPreviewOut(BaseModel):
     document_id: str
     file_type: str
-    renderer: Literal["pdf", "docx", "text", "csv", "xml"]
-    layout: Literal["pdf", "paper", "table", "tree"]
+    renderer: Literal["pdf", "docx", "text", "csv", "xml", "xlsx", "xls", "pptx", "html", "json", "epub"]
+    layout: Literal["pdf", "paper", "table", "tree", "slides"]
     aspect_ratio: float
     page_count: int | None = None
     original_url: str | None = None
@@ -52,6 +59,20 @@ class DocumentPreviewOut(BaseModel):
     blocks: list[PreviewBlockOut]
     total_blocks: int
     truncated: bool = False
+
+
+class MarkdownOut(BaseModel):
+    document_id: str
+    status: Literal["pending", "ready", "fallback", "failed", "legacy"]
+    source: Literal["markitdown", "native_fallback"]
+    converter_version: str | None
+    markdown: str
+    offset: int
+    limit: int
+    total_chars: int
+    total_lines: int
+    mapping_quality: dict[str, int]
+    error: str | None
 
 
 class TablePreviewRowOut(BaseModel):

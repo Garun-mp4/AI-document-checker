@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import csv
+import json
 from io import BytesIO, StringIO
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
+from openpyxl import Workbook
+from pptx import Presentation
+from pptx.util import Inches
 
 FIXTURE_DIR = Path(__file__).parent
 
@@ -87,6 +92,54 @@ def _make_csv() -> bytes:
     return ("\ufeff" + stream.getvalue()).encode("utf-8")
 
 
+def _make_xlsx() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Данные"
+    sheet.append(["Проект", "Часы", "Статус"])
+    sheet.append(["Альфа", 10, "Готово"])
+    sheet.append(["Бета", 20, "В работе"])
+    stream = BytesIO()
+    workbook.save(stream)
+    return stream.getvalue()
+
+
+def _make_xls() -> bytes:
+    import xlwt
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet("Данные")
+    for column, value in enumerate(["Проект", "Часы", "Статус"]):
+        sheet.write(0, column, value)
+    for row, values in enumerate([["Альфа", 10, "Готово"], ["Бета", 20, "В работе"]], start=1):
+        for column, value in enumerate(values):
+            sheet.write(row, column, value)
+    stream = BytesIO()
+    workbook.save(stream)
+    return stream.getvalue()
+
+
+def _make_pptx() -> bytes:
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    title = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(7), Inches(1))
+    title.text = "Тестовый проект"
+    body = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(7), Inches(2))
+    body.text = "Цель: проверить обработку презентации.\nСрок: 30 ноября 2026 года."
+    stream = BytesIO()
+    presentation.save(stream)
+    return stream.getvalue()
+
+
+def _make_epub() -> bytes:
+    stream = BytesIO()
+    with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=0)
+        archive.writestr("META-INF/container.xml", "<?xml version=\"1.0\"?><container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles><rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>")
+        archive.writestr("OEBPS/content.opf", "<?xml version=\"1.0\"?><package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>Тестовый проект</dc:title><dc:language>ru</dc:language></metadata><manifest><item id=\"chapter\" href=\"chapter1.xhtml\" media-type=\"application/xhtml+xml\"/></manifest><spine><itemref idref=\"chapter\"/></spine></package>")
+        archive.writestr("OEBPS/chapter1.xhtml", "<html><body><h1>Тестовый проект</h1><p>Цель: проверить EPUB и ссылки на главу.</p></body></html>")
+    return stream.getvalue()
+
+
 FIXTURE_CONTENTS = {
     "sample.pdf": _make_text_pdf(),
     "sample.docx": _make_docx(),
@@ -104,6 +157,12 @@ FIXTURE_CONTENTS = {
         "## Срок\n30 ноября 2026 года.\n"
     ).encode(),
     "sample.csv": _make_csv(),
+    "sample.xlsx": _make_xlsx(),
+    "sample.xls": _make_xls(),
+    "sample.pptx": _make_pptx(),
+    "sample.html": "<html><body><h1>Тестовый проект</h1><p>Цель: проверить HTML.</p></body></html>".encode(),
+    "sample.json": json.dumps({"project": "Тестовый проект", "owner": "Алексей Пример", "due": "2026-11-30"}, ensure_ascii=False).encode(),
+    "sample.epub": _make_epub(),
     "sample.xml": (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<project id="DEMO-001">\n'

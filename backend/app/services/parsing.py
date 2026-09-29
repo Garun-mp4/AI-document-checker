@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from typing import Any
 from xml.etree.ElementTree import Element
@@ -21,11 +23,18 @@ from docx.text.paragraph import Paragraph as DocxParagraph
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv", ".xml"}
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".txt", ".md", ".csv", ".xml",
+    ".xlsx", ".xls", ".pptx", ".html", ".htm", ".json", ".epub",
+}
 MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_DOCX_ENTRIES = 5_000
 CHUNK_TARGET_CHARS = 1_100
 CSV_GROUP_CHARS = 900
+SPREADSHEET_MAX_ROWS = 100_000
+SPREADSHEET_MAX_COLUMNS = 500
+EPUB_MAX_ENTRIES = 5_000
+EPUB_MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 
 
 class DocumentParsingError(ValueError):
@@ -456,6 +465,276 @@ def _parse_xml(data: bytes) -> ParsedDocument:
     return ParsedDocument("xml", blocks, metadata)
 
 
+def _parse_json(data: bytes) -> ParsedDocument:
+    text, encoding = _decode_text_with_encoding(data)
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DocumentParsingError("JSON повреждён или имеет неверный синтаксис.") from exc
+    pretty = json.dumps(value, ensure_ascii=False, indent=2)
+    if not pretty.strip():
+        raise DocumentParsingError("JSON пустой — извлекать нечего.")
+    blocks: list[SourceBlock] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                walk(child, f"{path}.{key}")
+            return
+        if isinstance(node, list):
+            for index, child in enumerate(node):
+                walk(child, f"{path}[{index}]")
+            return
+        value_text = json.dumps(node, ensure_ascii=False) if node is not None else "null"
+        blocks.append(SourceBlock(str(value_text), {
+            "kind": "json",
+            "label": path,
+            "path": path,
+        }))
+
+    walk(value, "$" )
+    if not blocks:
+        blocks.append(SourceBlock(pretty, {"kind": "json", "label": "JSON-документ", "path": "$"}))
+    return ParsedDocument("json", blocks, {
+        "encoding": encoding,
+        "line_count": len(pretty.splitlines()),
+        "root_type": type(value).__name__,
+    })
+
+
+class _HtmlBlockParser(HTMLParser):
+    _BLOCK_TAGS: frozenset[str] = frozenset({
+        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+        "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+        "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table",
+        "td", "th", "tr", "ul",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[tuple[str, str, int]] = []
+        self._parts: list[str] = []
+        self._tag = "body"
+        self._start_line = 1
+
+    def _flush(self) -> None:
+        text = re.sub(r"\s+", " ", " ".join(self._parts)).strip()
+        if text:
+            self.blocks.append((text, self._tag, self._start_line))
+        self._parts = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in self._BLOCK_TAGS and self._parts:
+            self._flush()
+        if tag.lower() in self._BLOCK_TAGS:
+            self._tag = tag.lower()
+            self._start_line = self.getpos()[0]
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._BLOCK_TAGS:
+            self._flush()
+
+    def handle_data(self, data: str) -> None:
+        if data.strip():
+            self._parts.append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._flush()
+
+
+def _parse_html(data: bytes, file_type: str = "html") -> ParsedDocument:
+    text, encoding = _decode_text_with_encoding(data)
+    parser = _HtmlBlockParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception as exc:
+        raise DocumentParsingError("HTML повреждён или имеет неподдерживаемую структуру.") from exc
+    blocks = [SourceBlock(value, {
+        "kind": "html",
+        "label": f"{tag.upper()} · строка {line}",
+        "element": tag,
+        "line_start": line,
+        "line_end": line,
+    }) for value, tag, line in parser.blocks]
+    if not blocks:
+        raise DocumentParsingError("В HTML не найден текст.")
+    return ParsedDocument(file_type, blocks, {
+        "encoding": encoding,
+        "line_count": len(text.splitlines()),
+    })
+
+
+def _spreadsheet_blocks(rows_by_sheet: Iterable[tuple[str, list[list[str]]]], file_type: str) -> ParsedDocument:
+    blocks: list[SourceBlock] = []
+    sheet_count = 0
+    total_rows = 0
+    max_columns = 0
+    columns_by_sheet: dict[str, list[str]] = {}
+    numeric_columns: list[dict[str, Any]] = []
+    for sheet_name, rows in rows_by_sheet:
+        sheet_count += 1
+        if sheet_count > 200:
+            raise DocumentParsingError("В таблице слишком много листов (максимум 200).")
+        rows = [row for row in rows if any(str(cell).strip() for cell in row)]
+        if not rows:
+            continue
+        if len(rows) > SPREADSHEET_MAX_ROWS:
+            raise DocumentParsingError("В таблице слишком много строк (максимум 100 000 на лист).")
+        headers = [str(cell).strip() or f"Столбец {index + 1}" for index, cell in enumerate(rows[0])]
+        headers = headers[:SPREADSHEET_MAX_COLUMNS]
+        columns_by_sheet[sheet_name] = headers
+        max_columns = max(max_columns, len(headers))
+        data_rows = rows[1:]
+        total_rows += len(data_rows)
+        if not numeric_columns:
+            for column_index, header in enumerate(headers):
+                values = [_number(row[column_index]) for row in data_rows if column_index < len(row)]
+                numbers = [value for value in values if value is not None]
+                if numbers and len(numbers) >= max(2, int(max(1, len(data_rows)) * 0.75)):
+                    total = sum(numbers, Decimal(0))
+                    numeric_columns.append({
+                        "name": header,
+                        "count": len(numbers),
+                        "sum": str(total),
+                        "average": str(total / Decimal(len(numbers))),
+                        "minimum": str(min(numbers)),
+                        "maximum": str(max(numbers)),
+                    })
+        blocks.append(SourceBlock(
+            f"Лист «{sheet_name}»: " + " | ".join(headers),
+            {"kind": file_type, "label": f"Лист «{sheet_name}»", "sheet": sheet_name, "row": 1, "row_start": 1, "row_end": 1},
+        ))
+        for row_number, row in enumerate(data_rows, start=2):
+            normalized = [str(value).strip() for value in row[:len(headers)]]
+            normalized.extend([""] * max(0, len(headers) - len(normalized)))
+            line = " | ".join(f"{headers[index]}: {normalized[index]}" for index in range(len(headers)) if normalized[index])
+            if line:
+                blocks.append(SourceBlock(line, {
+                    "kind": file_type,
+                    "label": f"Лист «{sheet_name}», строка {row_number}",
+                    "sheet": sheet_name,
+                    "row": row_number,
+                    "row_start": row_number,
+                    "row_end": row_number,
+                    "columns": headers,
+                }))
+    if not blocks:
+        raise DocumentParsingError("В таблице не найдено заполненных листов.")
+    return ParsedDocument(file_type, blocks, {
+        "sheet_count": sheet_count,
+        "row_count": total_rows,
+        "column_count": max_columns,
+        "columns_by_sheet": columns_by_sheet,
+        "columns": next(iter(columns_by_sheet.values()), []),
+        "numeric_columns": numeric_columns,
+    })
+
+
+def _parse_xlsx(data: bytes) -> ParsedDocument:
+    try:
+        from openpyxl import load_workbook
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except ImportError as exc:
+        raise DocumentParsingError("Для XLSX не установлен модуль openpyxl.") from exc
+    except Exception as exc:
+        raise DocumentParsingError("XLSX повреждён или имеет неверную структуру.") from exc
+    try:
+        rows = ((sheet.title, [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]) for sheet in workbook.worksheets)
+        return _spreadsheet_blocks(rows, "xlsx")
+    finally:
+        workbook.close()
+
+
+def _parse_xls(data: bytes) -> ParsedDocument:
+    try:
+        import xlrd
+        workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
+    except ImportError as exc:
+        raise DocumentParsingError("Для XLS не установлен модуль xlrd.") from exc
+    except Exception as exc:
+        raise DocumentParsingError("XLS повреждён или имеет неверную структуру.") from exc
+    rows = []
+    for sheet in workbook.sheets():
+        rows.append((sheet.name, [["" if value is None else str(value) for value in sheet.row_values(index)] for index in range(sheet.nrows)]))
+    return _spreadsheet_blocks(rows, "xls")
+
+
+def _parse_pptx(data: bytes) -> ParsedDocument:
+    try:
+        from pptx import Presentation
+    except ImportError as exc:
+        raise DocumentParsingError("Для PPTX не установлен модуль python-pptx.") from exc
+    try:
+        presentation = Presentation(io.BytesIO(data))
+    except Exception as exc:
+        raise DocumentParsingError("PPTX повреждён или имеет неверную структуру.") from exc
+    blocks: list[SourceBlock] = []
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        for shape_number, shape in enumerate(slide.shapes, start=1):
+            text = ""
+            if getattr(shape, "has_text_frame", False):
+                text = shape.text.strip()
+            elif getattr(shape, "has_table", False):
+                text = " | ".join(cell.text.strip() for row in shape.table.rows for cell in row.cells if cell.text.strip())
+            if text:
+                blocks.append(SourceBlock(text, {
+                    "kind": "pptx",
+                    "label": f"Слайд {slide_number}, блок {shape_number}",
+                    "slide": slide_number,
+                    "shape": shape_number,
+                }))
+    if not blocks:
+        raise DocumentParsingError("В PPTX не найден текст.")
+    return ParsedDocument("pptx", blocks, {
+        "slide_count": len(presentation.slides),
+        "page_width": round(presentation.slide_width / 914400 * 25.4, 2),
+        "page_height": round(presentation.slide_height / 914400 * 25.4, 2),
+    })
+
+
+def _safe_epub_member(name: str) -> str:
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise DocumentParsingError("EPUB содержит небезопасный путь.")
+    return str(path)
+
+
+def _parse_epub(data: bytes) -> ParsedDocument:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise DocumentParsingError("EPUB повреждён или имеет неверную структуру.") from exc
+    with archive:
+        entries = archive.infolist()
+        if len(entries) > EPUB_MAX_ENTRIES or sum(item.file_size for item in entries) > EPUB_MAX_UNCOMPRESSED_BYTES:
+            raise DocumentParsingError("Размер внутреннего содержимого EPUB превышает безопасный предел.")
+        html_entries = [item for item in entries if item.filename.lower().endswith((".xhtml", ".html", ".htm"))]
+        if not html_entries:
+            raise DocumentParsingError("В EPUB не найдено содержимое глав.")
+        blocks: list[SourceBlock] = []
+        for chapter, item in enumerate(html_entries, start=1):
+            member = _safe_epub_member(item.filename)
+            blocks.extend(SourceBlock(value, {
+                "kind": "epub",
+                "label": f"Глава {chapter}",
+                "chapter": chapter,
+                "path": member,
+            }) for value, _, _ in _html_parser_blocks(archive.read(item.filename)))
+    if not blocks:
+        raise DocumentParsingError("В EPUB не найден текст глав.")
+    return ParsedDocument("epub", blocks, {"chapter_count": len(html_entries)})
+
+
+def _html_parser_blocks(data: bytes) -> list[tuple[str, str, int]]:
+    text = _decode_text(data)
+    parser = _HtmlBlockParser()
+    parser.feed(text)
+    parser.close()
+    return parser.blocks
+
+
 def parse_document(filename: str, data: bytes) -> ParsedDocument:
     filename = safe_filename(filename)
     extension = PurePosixPath(filename.replace("\\", "/")).suffix.lower()
@@ -474,4 +753,16 @@ def parse_document(filename: str, data: bytes) -> ParsedDocument:
         return _parse_plain_text(data, "md")
     if extension == ".csv":
         return _parse_csv(data)
-    return _parse_xml(data)
+    if extension == ".xml":
+        return _parse_xml(data)
+    if extension == ".json":
+        return _parse_json(data)
+    if extension in {".html", ".htm"}:
+        return _parse_html(data, extension.removeprefix("."))
+    if extension == ".xlsx":
+        return _parse_xlsx(data)
+    if extension == ".xls":
+        return _parse_xls(data)
+    if extension == ".pptx":
+        return _parse_pptx(data)
+    return _parse_epub(data)
