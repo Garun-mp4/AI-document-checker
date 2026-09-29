@@ -556,6 +556,11 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .confirm-card { width: min(100%, 400px); }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .toast-message { position: fixed; z-index: 50; right: 24px; bottom: 22px; max-width: min(420px, calc(100vw - 32px)); padding: 12px 16px; border: 1px solid #313131; border-radius: 12px; background: #151515; color: #fff; font-size: 11px; line-height: 1.5; box-shadow: 0 4px 16px rgb(0 0 0 / 16%); }
+.fatal-error-page { display: grid; min-height: 100dvh; place-items: center; padding: 24px; background: var(--surface-soft); }
+.fatal-error-card { width: min(100%, 480px); padding: 28px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--paper); color: var(--ink-secondary); }
+.fatal-error-card strong { display: block; color: var(--ink); font-size: 18px; }
+.fatal-error-card p { margin: 10px 0; font-size: 14px; line-height: 1.5; }
+.fatal-error-card small { display: block; max-height: 80px; margin-bottom: 18px; overflow: auto; color: var(--ink-tertiary); font-size: 11px; line-height: 1.4; }
 .mobile-scrim { display: none; width: 100%; padding: 0; border: 0; }
 
 @media (max-width: 719px) {
