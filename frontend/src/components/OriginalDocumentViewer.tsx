@@ -38,6 +38,12 @@ function normalizedIncludes(value: string, query: string): boolean {
   return value.replace(/\s+/g, ' ').toLocaleLowerCase().includes(query.replace(/\s+/g, ' ').toLocaleLowerCase())
 }
 
+function scrollIntoViewRespectingMotion(target: Element | null | undefined, block: ScrollLogicalPosition = 'center') {
+  if (!target) return
+  const reduceMotion = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block })
+}
+
 function locatorLabel(source: ViewerSource): string {
   const label = source.locator.label
   if (typeof label === 'string' && label) return label
@@ -111,7 +117,7 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
       if (!target && inRange) target = node
     }
     onMatch(exact)
-    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    scrollIntoViewRespectingMotion(target)
   }, [text, selectedSource, onMatch])
 
   if (error) return <div className="preview-inline-error">{error}</div>
@@ -234,7 +240,7 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
     const query = sourceQuery(selectedSource)
     const exact = items.some((item) => normalizedIncludes(item.str, query) || query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(item.str, word)))
     onMatch(exact)
-    if (exact) sheetRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (exact) scrollIntoViewRespectingMotion(sheetRef.current)
   }, [items, selectedSource, onMatch])
   if (nativeFallback) return <div className="pdf-native-fallback">
     <div className="pdf-native-fallback-note">
@@ -288,7 +294,7 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
     const target = elements.find((element) => normalizedIncludes(element.textContent || '', query)) || elements.find((element) => query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(element.textContent || '', word)))
     onMatch(Boolean(target))
     target?.classList.add('source-match')
-    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    scrollIntoViewRespectingMotion(target)
   }, [loading, selectedSource, onMatch])
   if (error) return <div className="preview-inline-error">{error}</div>
   return <div className="docx-original-viewer">
@@ -322,7 +328,7 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
     const target = table.rows.find((row) => row.number >= start && row.number <= end)
     const exact = Boolean(target)
     onMatch(exact)
-    target && document.getElementById(`csv-row-${target.number}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (target) scrollIntoViewRespectingMotion(document.getElementById(`csv-row-${target.number}`))
   }, [table, selectedSource, onMatch])
   if (error) return <div className="preview-inline-error">{error}</div>
   if (!table) return <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю оригинальную таблицу…</div>
@@ -346,7 +352,7 @@ function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview
     const target = Array.from(document.querySelectorAll<HTMLElement>('[data-source-id]')).find((element) => element.dataset.sourceId === selectedSource.id)
     const exact = Boolean(preview.blocks.find((block) => block.source_id === selectedId || normalizedIncludes(block.text, query)))
     onMatch(exact)
-    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    scrollIntoViewRespectingMotion(target)
   }, [preview.blocks, query, selectedId, selectedSource, onMatch])
   return <div className="source-map-original-viewer">
     {preview.blocks.map((block) => {

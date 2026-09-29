@@ -131,6 +131,12 @@ function relativeDate(value: string): string {
   return days === 1 ? 'вчера' : `${days} дн. назад`
 }
 
+function scrollIntoViewRespectingMotion(target: Element | null, block: ScrollLogicalPosition = 'start') {
+  if (!target) return
+  const reduceMotion = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block })
+}
+
 function summaryToDocument(summary: ChatSummary): DocumentRecord {
   return {
     id: summary.document_id,
@@ -443,7 +449,7 @@ function App() {
     const page = source.locator.page
     if (typeof page === 'number' && page > 0) setPreviewPage(page)
     window.requestAnimationFrame(() => {
-      window.document.getElementById('document-original-viewer')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      scrollIntoViewRespectingMotion(window.document.getElementById('document-original-viewer'))
     })
     setMobileChatOpen(false)
   }, [document])
