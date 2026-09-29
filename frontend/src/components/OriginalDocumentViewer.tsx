@@ -198,6 +198,9 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch, o
 }
 
 function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: { originalUrl: string; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void; onError: (message: string) => void }) {
+  // docx-preview owns the contents of this host and mutates it imperatively.
+  // Keep it separate from React children so replaceChildren() cannot remove
+  // React-managed loading or error nodes.
   const containerRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -226,7 +229,10 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [loading, selectedSource, onMatch])
   if (error) return <div className="preview-inline-error">{error}</div>
-  return <div className="docx-original-viewer" ref={containerRef}>{loading && <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Рендерю оригинал DOCX…</div>}</div>
+  return <div className="docx-original-viewer">
+    <div className="docx-render-host" ref={containerRef} />
+    {loading && <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Рендерю оригинал DOCX…</div>}
+  </div>
 }
 
 function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void; onError: (message: string) => void }) {

@@ -330,6 +330,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .pdf-text-layer span { position: absolute; display: block; overflow: hidden; color: transparent; font-family: sans-serif; line-height: 1; white-space: pre; transform-origin: left top; }
 .pdf-text-layer .pdf-text-match { border-radius: 2px; background: rgb(190 190 190 / 72%); }
 .docx-original-viewer { min-height: 100%; padding: 2px; background: #fff; }
+.docx-render-host { min-height: 100%; }
 .docx-original-viewer .docx-wrapper { min-height: 100%; padding: 18px !important; background: #eeeeee !important; }
 .docx-original-viewer .docx-wrapper > section { margin: 0 auto 18px; box-shadow: 0 7px 20px rgb(0 0 0 / 8%); }
 .docx-original-viewer .source-match { outline: 3px solid #bdbdbd; outline-offset: 2px; background: #f0f0f0 !important; scroll-margin: 24px; }
