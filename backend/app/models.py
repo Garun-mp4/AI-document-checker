@@ -48,6 +48,7 @@ class Document(Base):
     markdown_converter_version: Mapped[str | None] = mapped_column(String(32))
     markdown_char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     markdown_line_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    markdown_checksum: Mapped[str | None] = mapped_column(String(64))
     markdown_mapping_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=func.now())

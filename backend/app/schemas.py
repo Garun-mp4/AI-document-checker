@@ -21,6 +21,7 @@ class DocumentOut(BaseModel):
     markdown_converter_version: str | None
     markdown_char_count: int
     markdown_line_count: int
+    markdown_checksum: str | None
     markdown_mapping: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -71,6 +72,7 @@ class MarkdownOut(BaseModel):
     limit: int
     total_chars: int
     total_lines: int
+    checksum: str | None
     mapping_quality: dict[str, int]
     error: str | None
 

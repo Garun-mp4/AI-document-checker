@@ -18,6 +18,12 @@ EXPECTED_SOURCES = {
     "sample.txt": ("Проект: Проверка документов", "txt"),
     "sample.md": ("Тестовый проект", "md"),
     "sample.csv": ("Стоимость: 125.25", "csv"),
+    "sample.xlsx": ("Альфа", "xlsx"),
+    "sample.xls": ("Альфа", "xls"),
+    "sample.pptx": ("Тестовый проект", "pptx"),
+    "sample.html": ("Тестовый проект", "html"),
+    "sample.json": ("Тестовый проект", "json"),
+    "sample.epub": ("Тестовый проект", "epub"),
     "sample.xml": ("Алексей Пример", "xml"),
 }
 EXPECTED_PREVIEW_LAYOUTS = {
@@ -26,6 +32,12 @@ EXPECTED_PREVIEW_LAYOUTS = {
     "txt": "paper",
     "md": "paper",
     "csv": "table",
+    "xlsx": "table",
+    "xls": "table",
+    "pptx": "slides",
+    "html": "paper",
+    "json": "tree",
+    "epub": "paper",
     "xml": "tree",
 }
 
@@ -60,6 +72,14 @@ def _require_disconnected_codex(client: httpx.Client) -> None:
     status = response.json()
     if status.get("authenticated"):
         pytest.skip("Integration tests avoid sending even synthetic fixture text to a connected cloud model")
+
+
+@pytest.mark.integration
+def test_compose_serves_frontend_assets_with_browser_mime_types(compose_client: httpx.Client) -> None:
+    page = compose_client.get("/")
+    assert page.status_code == 200, page.text
+    assert page.headers.get("content-type", "").startswith("text/html"), page.headers
+    assert page.text.lstrip().lower().startswith("<!doctype html>")
 
 
 @pytest.mark.integration
@@ -170,6 +190,28 @@ def _upload_and_assert_indexed(
         assert preview["blocks"]
         assert preview["blocks"][0]["source_id"] == preview["blocks"][0]["id"]
         assert preview["original_url"].endswith(f"/documents/{document_id}/file")
+
+        markdown_response = client.get(f"/api/v1/documents/{document_id}/markdown")
+        assert markdown_response.status_code == 200, markdown_response.text
+        markdown = markdown_response.json()
+        assert markdown["status"] == "ready"
+        assert markdown["source"] == "markitdown"
+        assert markdown["total_chars"] > 0
+        assert markdown["total_lines"] > 0
+        assert markdown["markdown"]
+        assert len(markdown["checksum"]) == 64
+        download_response = client.get(f"/api/v1/documents/{document_id}/markdown/download")
+        assert download_response.status_code == 200, download_response.text
+        assert download_response.content
+        assert "attachment" in download_response.headers.get("content-disposition", "")
+
+        if document["file_type"] in {"csv", "xlsx", "xls"}:
+            table_response = client.get(f"/api/v1/documents/{document_id}/preview/table?offset=0&limit=1")
+            assert table_response.status_code == 200, table_response.text
+            table = table_response.json()
+            assert table["columns"]
+            assert len(table["rows"]) == 1
+            assert table["total_rows"] >= 1
 
         original_response = client.get(f"/api/v1/documents/{document_id}/file")
         assert original_response.status_code == 200, original_response.text

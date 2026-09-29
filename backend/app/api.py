@@ -65,6 +65,7 @@ def _document_out(document: Document) -> DocumentOut:
         markdown_converter_version=document.markdown_converter_version,
         markdown_char_count=document.markdown_char_count,
         markdown_line_count=document.markdown_line_count,
+        markdown_checksum=document.markdown_checksum,
         markdown_mapping=document.markdown_mapping_json or {},
         created_at=document.created_at,
         updated_at=document.updated_at,
@@ -387,6 +388,7 @@ async def document_markdown(
             limit=limit,
             total_chars=total_chars,
             total_lines=total_lines,
+            checksum=document.markdown_checksum,
             mapping_quality={str(key): int(value) for key, value in (document.markdown_mapping_json or {}).items() if isinstance(value, (int, float))},
             error=document.markdown_error,
         )

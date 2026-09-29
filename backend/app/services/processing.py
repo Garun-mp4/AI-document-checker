@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from pathlib import Path
@@ -159,15 +160,17 @@ class DocumentProcessor:
             analysis_source = "native_fallback"
             markdown_error: str | None = None
             markdown_mapping: dict[str, object] = {}
+            markdown_checksum: str | None = None
             markdown_path = Path(settings.upload_dir).resolve() / f"{document_id}.md"
             markdown_map_path = Path(settings.upload_dir).resolve() / f"{document_id}.map.json"
             try:
                 markdown_result = await self.markitdown.convert(path)
                 mapped_blocks, markdown_mapping = map_markdown(markdown_result.markdown, parsed.blocks)
-                if not mapped_blocks:
-                    raise MarkdownConversionError("MarkItDown не создал индексируемые блоки.")
+                if not mapped_blocks or not any(block.locator.get("source_locators") for block in mapped_blocks):
+                    raise MarkdownConversionError("MarkItDown не смог связать Markdown с исходными местами документа.")
                 await asyncio.to_thread(markdown_path.write_text, markdown_result.markdown, "utf-8")
                 await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
+                markdown_checksum = hashlib.sha256(markdown_result.markdown.encode("utf-8")).hexdigest()
                 analysis_blocks = [(
                     block.text,
                     block.locator,
@@ -180,10 +183,13 @@ class DocumentProcessor:
                 ) for block in mapped_blocks]
                 markdown_status = "ready"
                 analysis_source = "markitdown"
-            except MarkdownConversionError as exc:
-                markdown_error = str(exc)
-                markdown_path.unlink(missing_ok=True)
-                markdown_map_path.unlink(missing_ok=True)
+            except (MarkdownConversionError, OSError) as exc:
+                markdown_error = str(exc) or "MarkItDown не смог сохранить результат преобразования."
+                for artifact in (markdown_path, markdown_map_path):
+                    try:
+                        artifact.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("Could not remove failed Markdown artifact %s", artifact, exc_info=True)
                 analysis_blocks = [(
                     block.text,
                     {**block.locator, "source_text": block.text},
@@ -214,6 +220,7 @@ class DocumentProcessor:
                 document.markdown_converter_version = "0.1.8" if markdown_status == "ready" else None
                 document.markdown_char_count = sum(len(item[0]) for item in analysis_blocks) if markdown_status != "ready" else len(markdown_result.markdown)
                 document.markdown_line_count = len(markdown_result.markdown.splitlines()) if markdown_status == "ready" else 0
+                document.markdown_checksum = markdown_checksum
                 document.markdown_mapping_json = markdown_mapping.get("quality", {}) if markdown_status == "ready" else {}
                 document.status = "indexing"
                 document.chunk_count = 0

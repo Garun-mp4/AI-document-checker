@@ -31,11 +31,12 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, SourceRef, StreamCitation } from './types'
+import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, MarkdownDocument, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
+import { MarkdownViewer } from './components/MarkdownViewer'
 
 const API = '/api/v1'
-const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml'
+const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
@@ -78,12 +79,17 @@ function locatorText(source: { locator: SourceRef['locator'] }): string {
   const lineStart = source.locator.line_start
   const lineEnd = source.locator.line_end
   if (typeof lineStart === 'number') return `Строки ${lineStart}–${typeof lineEnd === 'number' ? lineEnd : lineStart}`
+  const slide = source.locator.slide
+  if (typeof slide === 'number') return `Слайд ${slide}`
+  const sheet = source.locator.sheet
+  const row = source.locator.row
+  if (typeof sheet === 'string' && typeof row === 'number') return `Лист «${sheet}», строка ${row}`
   return 'Фрагмент документа'
 }
 
 function fileIcon(fileType: string, size = 18) {
-  if (fileType === 'csv') return <FileSpreadsheet size={size} strokeWidth={1.7} />
-  if (fileType === 'xml') return <FileCode2 size={size} strokeWidth={1.7} />
+  if (['csv', 'xlsx', 'xls'].includes(fileType)) return <FileSpreadsheet size={size} strokeWidth={1.7} />
+  if (['xml', 'json', 'html', 'htm'].includes(fileType)) return <FileCode2 size={size} strokeWidth={1.7} />
   return <FileText size={size} strokeWidth={1.7} />
 }
 
@@ -134,6 +140,14 @@ function summaryToDocument(summary: ChatSummary): DocumentRecord {
     error_message: summary.error_message,
     chunk_count: summary.chunk_count,
     metadata: summary.metadata,
+    markdown_status: 'legacy',
+    analysis_source: 'native_fallback',
+    markdown_error: null,
+    markdown_converter_version: null,
+    markdown_char_count: 0,
+    markdown_line_count: 0,
+    markdown_checksum: null,
+    markdown_mapping: {},
     created_at: summary.created_at,
     updated_at: summary.last_activity_at,
   }
@@ -169,6 +183,10 @@ function App() {
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
   const [selectedSource, setSelectedSource] = useState<SourceRef | StreamCitation | null>(null)
   const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null)
+  const [markdownDocument, setMarkdownDocument] = useState<MarkdownDocument | null>(null)
+  const [previewTab, setPreviewTab] = useState<'original' | 'markdown'>('original')
+  const [markdownRebuilding, setMarkdownRebuilding] = useState(false)
+  const [markdownLoadingMore, setMarkdownLoadingMore] = useState(false)
   const [previewPage, setPreviewPage] = useState(1)
   const fileInput = useRef<HTMLInputElement>(null)
   const chatInputRef = useRef<HTMLTextAreaElement>(null)
@@ -239,14 +257,17 @@ function App() {
 
   const loadReadyData = useCallback(async (documentId: string) => {
     try {
-      const [cardData, chatData, previewData] = await Promise.all([
+      const [cardData, chatData, previewData, markdownData] = await Promise.all([
         api<Insight[]>(`${API}/documents/${documentId}/insights`),
         api<ChatRecord>(`${API}/documents/${documentId}/chat`),
         api<DocumentPreview>(`${API}/documents/${documentId}/preview`),
+        api<MarkdownDocument>(`${API}/documents/${documentId}/markdown`),
       ])
       setInsights(cardData)
       setChat(chatData)
       setDocumentPreview(previewData)
+      setMarkdownDocument(markdownData)
+      setPreviewTab('original')
       setPreviewPage(1)
       const savedMessages = await api<ChatMessage[]>(`${API}/chats/${chatData.id}/messages`)
       setMessages(savedMessages)
@@ -260,6 +281,7 @@ function App() {
       setDocument(null)
       setInsights([])
       setDocumentPreview(null)
+      setMarkdownDocument(null)
       setChat(null)
       setMessages([])
       return
@@ -269,6 +291,8 @@ function App() {
     setDocument(null)
     setInsights([])
     setDocumentPreview(null)
+    setMarkdownDocument(null)
+    setPreviewTab('original')
     setChat(null)
     setMessages([])
     setSelectedSourceId(null)
@@ -384,8 +408,8 @@ function App() {
   const uploadFile = useCallback(async (file?: File) => {
     if (!file) return
     const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
-    if (!['.pdf', '.docx', '.txt', '.md', '.csv', '.xml'].includes(extension)) {
-      showToast('Поддерживаются PDF, DOCX, TXT, MD, CSV и XML.')
+    if (!['.pdf', '.docx', '.txt', '.md', '.csv', '.xml', '.xlsx', '.xls', '.pptx', '.html', '.htm', '.json', '.epub'].includes(extension)) {
+      showToast('Поддерживаются PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON и EPUB.')
       return
     }
     if (file.size > 25 * 1024 * 1024) {
@@ -412,6 +436,7 @@ function App() {
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
     if (!document) return
     setPreviewOpen(true)
+    setPreviewTab('original')
     setSelectedSourceId(source.id)
     setSelectedSource(source)
     const page = source.locator.page
@@ -478,6 +503,55 @@ function App() {
       showToast(error instanceof Error ? error.message : 'Не удалось повторить обработку.')
     }
   }, [document, showToast, updateDocumentInLibrary])
+
+  const rebuildMarkdown = useCallback(async () => {
+    if (!document || markdownRebuilding) return
+    setMarkdownRebuilding(true)
+    try {
+      const updated = await api<DocumentRecord>(`${API}/documents/${document.id}/markdown/rebuild`, { method: 'POST' })
+      setDocument(updated)
+      setMarkdownDocument({
+        document_id: updated.id,
+        status: updated.markdown_status,
+        source: updated.analysis_source,
+        converter_version: updated.markdown_converter_version,
+        markdown: '',
+        offset: 0,
+        limit: 0,
+        total_chars: updated.markdown_char_count,
+        total_lines: updated.markdown_line_count,
+        checksum: updated.markdown_checksum,
+        mapping_quality: updated.markdown_mapping,
+        error: updated.markdown_error,
+      })
+      updateDocumentInLibrary(updated)
+      showToast('Markdown поставлен в очередь на создание.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось создать Markdown.')
+    } finally {
+      setMarkdownRebuilding(false)
+    }
+  }, [document, markdownRebuilding, showToast, updateDocumentInLibrary])
+
+  const loadMoreMarkdown = useCallback(async () => {
+    if (!document || !markdownDocument || markdownLoadingMore || markdownDocument.status !== 'ready') return
+    const offset = markdownDocument.offset + Array.from(markdownDocument.markdown).length
+    if (offset >= markdownDocument.total_chars) return
+    setMarkdownLoadingMore(true)
+    try {
+      const next = await api<MarkdownDocument>(`${API}/documents/${document.id}/markdown?offset=${offset}&limit=250000`)
+      setMarkdownDocument((current) => current ? {
+        ...next,
+        markdown: current.markdown + next.markdown,
+        offset: 0,
+        limit: current.limit + next.limit,
+      } : next)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось загрузить продолжение Markdown.')
+    } finally {
+      setMarkdownLoadingMore(false)
+    }
+  }, [document, markdownDocument, markdownLoadingMore, showToast])
 
   const confirmDelete = useCallback(async () => {
     if (!deleteTarget) return
@@ -737,7 +811,7 @@ function App() {
 
       <main id="main-content" tabIndex={-1} className={`workspace ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
         <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} aria-label="Выберите документ" onChange={(event) => void uploadFile(event.target.files?.[0])} />
-        {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV или XML</span></div>}
+        {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
 
         {!selectedId || !visibleStatus ? (
           <EmptyWorkspace
@@ -795,7 +869,7 @@ function App() {
                   <div className="fact-item"><Clock3 size={15} /><span>Добавлен {relativeDate(document.created_at)}</span></div>
                 </div>
 
-                <div className={`document-analysis-layout ${documentPreview?.renderer === 'csv' ? 'is-table-layout' : ''}`}>
+                <div className={`document-analysis-layout ${['csv', 'xlsx', 'xls'].includes(documentPreview?.renderer || '') ? 'is-table-layout' : ''}`}>
                 <section id="document-original-viewer" className={`source-viewer ${previewOpen ? 'viewer-open' : 'viewer-closed'}`} aria-label="Оригинал документа">
                   <div className="viewer-heading">
                     <div className="viewer-heading-label"><BookOpen size={16} /><strong>Оригинал документа</strong><span>{documentPreview ? `${documentPreview.source_count} ${pluralLabel(documentPreview.source_count, 'источник', 'источника', 'источников')}` : `${document.chunk_count} ${pluralLabel(document.chunk_count, 'источник', 'источника', 'источников')}`}</span></div>
@@ -812,7 +886,20 @@ function App() {
                     <div className="document-preview" aria-busy={!documentPreview}>
                       {!documentPreview ? (
                         <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю предпросмотр…</div>
-                      ) : documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>}
+                      ) : (
+                        <>
+                          <div className="preview-tabs" role="tablist" aria-label="Представление документа">
+                            <button type="button" role="tab" aria-selected={previewTab === 'original'} className={`preview-tab ${previewTab === 'original' ? 'is-active' : ''}`} onClick={() => setPreviewTab('original')}>Оригинал</button>
+                            <button type="button" role="tab" aria-selected={previewTab === 'markdown'} className={`preview-tab ${previewTab === 'markdown' ? 'is-active' : ''}`} onClick={() => setPreviewTab('markdown')}>Markdown</button>
+                            {markdownDocument?.status === 'ready' && <a className="preview-download" href={`${API}/documents/${document.id}/markdown/download`} download>Скачать .md</a>}
+                          </div>
+                          {previewTab === 'original' ? (
+                            documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>
+                          ) : markdownDocument ? (
+                            <MarkdownViewer data={markdownDocument} selectedSource={selectedSource} onRebuild={() => void rebuildMarkdown()} rebuilding={markdownRebuilding} onLoadMore={() => void loadMoreMarkdown()} loadingMore={markdownLoadingMore} />
+                          ) : <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю Markdown…</div>}
+                        </>
+                      )}
                     </div>
                   )}
                 </section>
@@ -1083,7 +1170,7 @@ function EmptyWorkspace({
           <span className="dropzone-icon">{isUploading ? <LoaderCircle className="spin" size={22} /> : <FileUp size={22} />}</span>
           <strong>{isUploading ? 'Сохраняю файл…' : 'Перетащите файл сюда'}</strong>
           <span>или нажмите, чтобы выбрать на компьютере</span>
-          <small>PDF · DOCX · TXT · MD · CSV · XML <i /> до 25 МБ</small>
+          <small>PDF · DOCX · TXT · MD · CSV · XML · XLSX · XLS · PPTX · HTML · JSON · EPUB <i /> до 25 МБ</small>
         </button>
         <div className="empty-footnote"><ShieldCheck size={15} /><span>Оригиналы и индексы остаются на вашем компьютере</span></div>
         {documentsCount > 0 && <p className="empty-library-note">Выберите сохранённый чат слева, чтобы продолжить работу.</p>}

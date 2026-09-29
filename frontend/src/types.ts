@@ -17,6 +17,14 @@ export interface DocumentRecord {
   error_message: string | null
   chunk_count: number
   metadata: Record<string, unknown>
+  markdown_status: 'pending' | 'ready' | 'fallback' | 'failed' | 'legacy'
+  analysis_source: 'markitdown' | 'native_fallback'
+  markdown_error: string | null
+  markdown_converter_version: string | null
+  markdown_char_count: number
+  markdown_line_count: number
+  markdown_checksum: string | null
+  markdown_mapping: Record<string, number>
   created_at: string
   updated_at: string
 }
@@ -42,14 +50,14 @@ export interface ChatSummary {
 export interface SourceRef {
   id: string
   text: string
-  locator: Record<string, string | number | boolean | null>
+  locator: Record<string, unknown>
   ordinal: number
   is_derived: boolean
 }
 
-export type PreviewLayout = 'pdf' | 'paper' | 'table' | 'tree'
+export type PreviewLayout = 'pdf' | 'paper' | 'table' | 'tree' | 'slides'
 export type PreviewBlockKind = 'page' | 'paragraph' | 'table' | 'row' | 'node' | 'text' | 'calculation'
-export type PreviewRenderer = 'pdf' | 'docx' | 'text' | 'csv' | 'xml'
+export type PreviewRenderer = 'pdf' | 'docx' | 'text' | 'csv' | 'xml' | 'xlsx' | 'xls' | 'pptx' | 'html' | 'json' | 'epub'
 
 export interface PreviewBlock {
   id: string
@@ -74,6 +82,21 @@ export interface DocumentPreview {
   blocks: PreviewBlock[]
   total_blocks: number
   truncated: boolean
+}
+
+export interface MarkdownDocument {
+  document_id: string
+  status: 'pending' | 'ready' | 'fallback' | 'failed' | 'legacy'
+  source: 'markitdown' | 'native_fallback'
+  converter_version: string | null
+  markdown: string
+  offset: number
+  limit: number
+  total_chars: number
+  total_lines: number
+  checksum: string | null
+  mapping_quality: Record<string, number>
+  error: string | null
 }
 
 export interface TablePreviewRow {

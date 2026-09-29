@@ -9,7 +9,11 @@ const CSV_PAGE_SIZE = 100
 
 // Vite copies the worker as a separate asset. Keeping it out of the main
 // bundle avoids a blank PDF viewer when the browser blocks an inline worker.
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
+// The version query also invalidates a cached response if nginx's MIME map
+// was changed after an earlier build.
+const pdfWorkerUrl = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url)
+pdfWorkerUrl.searchParams.set('v', 'pdfjs-4')
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl.toString()
 
 type ViewerSource = SourceRef | StreamCitation | PreviewBlock
 
@@ -61,11 +65,11 @@ function SourceCallout({ source, exact }: { source: ViewerSource | null; exact: 
   )
 }
 
-function RenderError({ preview, originalUrl, onRetry }: { preview: DocumentPreview; originalUrl: string; onRetry: () => void }) {
+function RenderError({ preview, originalUrl, message, onRetry }: { preview: DocumentPreview; originalUrl: string; message?: string | null; onRetry: () => void }) {
   return (
     <div className="preview-render-error" role="alert">
       <TriangleAlert size={18} />
-      <div><strong>Не удалось отобразить оригинал</strong><span>Документ готов, но браузер не смог построить просмотр.</span></div>
+      <div><strong>Не удалось отобразить оригинал</strong><span>Документ готов, но браузер не смог построить просмотр.</span>{message && <small>{message}</small>}</div>
       <div className="preview-render-actions"><button type="button" className="button button-light" onClick={onRetry}>Повторить</button><a href={originalUrl} target="_blank" rel="noreferrer">Открыть файл</a></div>
       {preview.blocks[0] && <div className="preview-fallback"><span>Текстовый контекст источников</span><p>{preview.blocks[0].text}</p></div>}
     </div>
@@ -152,7 +156,8 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch, o
     setRendering(true)
     void pdf.getPage(Math.max(1, Math.min(pageNumber, pdf.numPages))).then(async (page) => {
       const baseViewport = page.getViewport({ scale: 1 })
-      const scale = Math.min(1.55, 720 / baseViewport.width)
+      const availableWidth = sheetRef.current?.parentElement?.clientWidth
+      const scale = Math.min(1.55, Math.max(0.35, ((availableWidth || 720) - 28) / baseViewport.width))
       const viewport = page.getViewport({ scale })
       const canvas = canvasRef.current
       if (!canvas || !active) return
@@ -276,23 +281,45 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   </div>
 }
 
+function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void }) {
+  const query = sourceQuery(selectedSource)
+  const selectedId = selectedSource?.id
+  useEffect(() => {
+    if (!selectedSource) return
+    const target = Array.from(document.querySelectorAll<HTMLElement>('[data-source-id]')).find((element) => element.dataset.sourceId === selectedSource.id)
+    const exact = Boolean(preview.blocks.find((block) => block.source_id === selectedId || normalizedIncludes(block.text, query)))
+    onMatch(exact)
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [preview.blocks, query, selectedId, selectedSource, onMatch])
+  return <div className="source-map-original-viewer">
+    {preview.blocks.map((block) => {
+      const active = block.source_id === selectedId || Boolean(query && normalizedIncludes(block.text, query))
+      return <article className={`preview-block ${active ? 'source-match' : ''}`} data-source-id={block.source_id} key={block.id}>
+        <div className="preview-block-meta"><span>{locatorLabel(block)}</span></div>
+        <p>{block.text}</p>
+      </article>
+    })}
+  </div>
+}
+
 export function OriginalDocumentViewer({ document: record, preview, selectedSource, selectedSourceId, originalUrl, pageNumber }: OriginalDocumentViewerProps) {
   const [renderError, setRenderError] = useState<string | null>(null)
   const [exactMatch, setExactMatch] = useState(true)
   const [retryKey, setRetryKey] = useState(0)
   const handleMatch = (value: boolean) => setExactMatch(value)
-  const renderer = preview.renderer || (record.file_type === 'docx' ? 'docx' : record.file_type === 'pdf' ? 'pdf' : record.file_type === 'csv' ? 'csv' : record.file_type === 'xml' ? 'xml' : 'text')
+  const renderer = preview.renderer || (record.file_type === 'docx' ? 'docx' : record.file_type === 'pdf' ? 'pdf' : ['csv', 'xlsx', 'xls'].includes(record.file_type) ? record.file_type : record.file_type === 'xml' ? 'xml' : record.file_type === 'pptx' || record.file_type === 'epub' ? record.file_type : 'text')
   const content = useMemo(() => {
     const onError = (message: string) => setRenderError(message)
     if (renderer === 'pdf') return <PdfOriginalViewer key={retryKey} originalUrl={originalUrl} pageNumber={pageNumber} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
     if (renderer === 'docx') return <DocxOriginalViewer key={retryKey} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
-    if (renderer === 'csv') return <CsvOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
+    if (renderer === 'csv' || renderer === 'xlsx' || renderer === 'xls') return <CsvOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
+    if (renderer === 'pptx' || renderer === 'epub') return <SourceMapOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} />
     return <TextOriginalViewer key={retryKey} preview={preview} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
   }, [originalUrl, pageNumber, preview, record.file_type, renderer, retryKey, selectedSource])
   useEffect(() => { setRenderError(null); setExactMatch(true) }, [preview.document_id, renderer, retryKey])
   return <div className={`original-viewer-body renderer-${renderer}`} data-renderer={renderer} data-selected-source={selectedSourceId || undefined}>
     <div className="preview-toolbar"><span>Оригинал файла{preview.encoding ? ` · ${preview.encoding}` : ''}</span><a href={originalUrl} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>
     <SourceCallout source={selectedSource} exact={exactMatch} />
-    {renderError ? <RenderError preview={preview} originalUrl={originalUrl} onRetry={() => { setRenderError(null); setRetryKey((value) => value + 1) }} /> : <div className="original-render-surface">{content || <RenderError preview={preview} originalUrl={originalUrl} onRetry={() => setRetryKey((value) => value + 1)} />}</div>}
+    {renderError ? <RenderError preview={preview} originalUrl={originalUrl} message={renderError} onRetry={() => { setRenderError(null); setRetryKey((value) => value + 1) }} /> : <div className="original-render-surface">{content || <RenderError preview={preview} originalUrl={originalUrl} onRetry={() => setRetryKey((value) => value + 1)} />}</div>}
   </div>
 }

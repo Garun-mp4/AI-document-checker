@@ -26,6 +26,12 @@ def chunk(text: str, locator: dict, ordinal: int = 0, *, derived: bool = False) 
         ("txt", "paper", "text", {"line_count": 2}),
         ("md", "paper", "text", {"line_count": 2}),
         ("csv", "table", "row", {"columns": ["Name", "Value"]}),
+        ("xlsx", "table", "row", {"columns": ["Name", "Value"]}),
+        ("xls", "table", "row", {"columns": ["Name", "Value"]}),
+        ("pptx", "slides", "paragraph", {"slide_count": 1}),
+        ("html", "paper", "text", {"line_count": 2}),
+        ("json", "tree", "text", {"line_count": 2}),
+        ("epub", "paper", "text", {"chapter_count": 1}),
         ("xml", "tree", "node", {"root": "report"}),
     ],
 )
@@ -53,7 +59,10 @@ def test_preview_keeps_source_anchor_for_every_supported_format(
     assert preview["total_blocks"] == 1
     assert preview["truncated"] is False
     assert preview["original_url"] == "/api/v1/documents/document-1/file"
-    assert preview["renderer"] == {"pdf": "pdf", "docx": "docx", "txt": "text", "md": "text", "csv": "csv", "xml": "xml"}[file_type]
+    assert preview["renderer"] == {
+        "pdf": "pdf", "docx": "docx", "txt": "text", "md": "text", "csv": "csv", "xml": "xml",
+        "xlsx": "xlsx", "xls": "xls", "pptx": "pptx", "html": "html", "json": "json", "epub": "epub",
+    }[file_type]
     assert preview["source_count"] == 1
 
 
