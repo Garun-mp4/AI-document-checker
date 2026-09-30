@@ -40,6 +40,17 @@ def test_catalog_options_are_json_safe_and_keep_reasoning_metadata() -> None:
     }]
 
 
+def test_catalog_options_expose_only_product_supported_models() -> None:
+    entries = [
+        SimpleNamespace(model="gpt-6-luna", supported_reasoning_efforts=[]),
+        SimpleNamespace(model="gpt-6.1-sol", supported_reasoning_efforts=[]),
+        SimpleNamespace(model="gpt-6-astra", supported_reasoning_efforts=[]),
+        SimpleNamespace(model="gpt-5.6-sol", supported_reasoning_efforts=[]),
+    ]
+
+    assert [option["id"] for option in catalog_options(entries)] == ["gpt-6-luna", "gpt-6.1-sol"]
+
+
 def test_display_labels_have_stable_fallbacks() -> None:
     assert model_display_name("gpt-6-astra") == "GPT-6 Astra"
     assert model_display_name("gpt-5.6-sol", "GPT-5.6-Sol") == "GPT-5.6 Sol"

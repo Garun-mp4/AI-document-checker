@@ -17,6 +17,11 @@ REASONING_LABELS = {
     "ultra": "Ultra",
 }
 
+# Keep the product model picker intentionally small and predictable. The
+# provider may expose additional models, but they are not part of this app's
+# supported configuration surface.
+ALLOWED_CODEX_MODELS = frozenset({"gpt-6-luna", "gpt-6.1-sol"})
+
 
 def model_display_name(model_id: str, display_name: str | None = None) -> str:
     """Return the short model name used in the Russian UI.
@@ -52,7 +57,7 @@ def catalog_options(entries: Iterable[Any]) -> list[dict[str, Any]]:
     options: list[dict[str, Any]] = []
     for entry in entries:
         model_id = str(getattr(entry, "model", None) or getattr(entry, "id", "")).strip()
-        if not model_id:
+        if not model_id or model_id.lower() not in ALLOWED_CODEX_MODELS:
             continue
         reasoning: list[dict[str, str]] = []
         for item in getattr(entry, "supported_reasoning_efforts", None) or []:

@@ -11,6 +11,7 @@ from openai_codex import ApprovalMode, AsyncCodex, CodexError, ExternalMessage, 
 
 from app.config import settings
 from app.services.codex_preferences import (
+    ALLOWED_CODEX_MODELS,
     catalog_options,
     model_display_name,
     preferences_path,
@@ -131,6 +132,8 @@ class CodexService:
         selected_effort = reasoning_effort.strip().lower()
         if not selected_model or not selected_effort:
             raise CodexPreferenceError("Выберите модель и уровень размышления.")
+        if selected_model not in ALLOWED_CODEX_MODELS:
+            raise CodexPreferenceError("Эта модель не входит в поддерживаемый список приложения.")
 
         state = await self.status(refresh=True)
         if not state["authenticated"]:

@@ -84,7 +84,7 @@ def test_set_preferences_validates_catalog_and_persists_selected_values(monkeypa
     service = CodexService()
     state = {
         "authenticated": True,
-        "models": [{"id": "gpt-6-sol", "reasoning_efforts": [{"value": "high"}]}],
+        "models": [{"id": "gpt-6.1-sol", "reasoning_efforts": [{"value": "high"}]}],
     }
 
     async def fake_status(*, refresh: bool):
@@ -93,10 +93,10 @@ def test_set_preferences_validates_catalog_and_persists_selected_values(monkeypa
 
     monkeypatch.setattr(service, "status", fake_status)
 
-    result = asyncio.run(service.set_preferences("GPT-6-Sol", "HIGH"))
+    result = asyncio.run(service.set_preferences("GPT-6.1-Sol", "HIGH"))
 
     assert result is state
-    assert settings.codex_model == "gpt-6-sol"
+    assert settings.codex_model == "gpt-6.1-sol"
     assert settings.codex_reasoning_effort == "high"
     assert service._preferences_file.read_text(encoding="utf-8")
 
@@ -128,3 +128,11 @@ def test_set_preferences_rejects_unsupported_reasoning(monkeypatch: pytest.Monke
 
     with pytest.raises(CodexPreferenceError, match="не поддерживается"):
         asyncio.run(service.set_preferences("gpt-6-luna", "medium"))
+
+
+def test_set_preferences_rejects_models_outside_product_allowlist(tmp_path) -> None:
+    service = CodexService()
+    service._preferences_file = tmp_path / "preferences.json"
+
+    with pytest.raises(CodexPreferenceError, match="поддерживаемый список"):
+        asyncio.run(service.set_preferences("gpt-6-astra", "medium"))

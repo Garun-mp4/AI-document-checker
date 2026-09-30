@@ -43,6 +43,7 @@ const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
 const DEFAULT_CODEX_REASONING = 'medium'
+const ALLOWED_CODEX_MODELS = new Set(['gpt-6-luna', 'gpt-6.1-sol'])
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -703,8 +704,8 @@ function App() {
   }
 
   const authReady = Boolean(codex?.authenticated && codex.model_available && codex.reasoning_available)
-  const catalogModelOptions = codex?.models ?? []
-  const unavailableCurrentModel = codex?.model && catalogModelOptions.length && !catalogModelOptions.some((item) => item.id === codex.model) ? [{
+  const catalogModelOptions = (codex?.models ?? []).filter((item) => ALLOWED_CODEX_MODELS.has(item.id.toLowerCase()))
+  const unavailableCurrentModel = codex?.model && ALLOWED_CODEX_MODELS.has(codex.model.toLowerCase()) && catalogModelOptions.length && !catalogModelOptions.some((item) => item.id === codex.model) ? [{
     id: codex.model,
     label: `${codexModelLabel(codex)} · недоступна`,
     description: 'Эта модель больше не доступна для текущего аккаунта.',
@@ -722,7 +723,7 @@ function App() {
   }]
   const selectedCodexModel = codexModelOptions.find((item) => item.id === (codex?.model || DEFAULT_CODEX_MODEL)) || codexModelOptions[0]
   const codexReasoningOptions = selectedCodexModel?.reasoning_efforts ?? []
-  const modelMenuDisabled = !codex?.authenticated || !codex?.models?.length || codexSaving
+  const modelMenuDisabled = !codex?.authenticated || !catalogModelOptions.length || codexSaving
   const reasoningMenuDisabled = !codex?.authenticated || !codex?.model_available || !codexReasoningOptions.length || codexSaving
   const togglePreferenceMenu = (menu: 'model' | 'reasoning') => {
     if ((menu === 'model' && modelMenuDisabled) || (menu === 'reasoning' && reasoningMenuDisabled)) return

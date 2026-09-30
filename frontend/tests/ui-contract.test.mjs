@@ -22,6 +22,11 @@ test('sidebar collapse has persistent state and an accessible control contract',
   assert.match(styles, /\.app-shell\.library-manual-collapsed\s*\{[^}]*72px/)
 })
 
+test('model picker exposes only the two supported Codex models', () => {
+  assert.match(app, /ALLOWED_CODEX_MODELS\s*=\s*new Set\(\['gpt-6-luna',\s*'gpt-6\.1-sol'\]\)/)
+  assert.match(app, /filter\(\(item\) => ALLOWED_CODEX_MODELS\.has\(item\.id\.toLowerCase\(\)\)\)/)
+})
+
 test('new chat opens the empty workspace instead of the file picker', () => {
   assert.match(app, /NEW_CHAT_STORAGE_KEY\s*=\s*'document-checker-new-chat'/)
   assert.match(app, /useState\(\(\) => localStorage\.getItem\(NEW_CHAT_STORAGE_KEY\) === 'true'/)
