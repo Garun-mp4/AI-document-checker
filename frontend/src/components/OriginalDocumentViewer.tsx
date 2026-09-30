@@ -274,6 +274,7 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let active = true
+    let resizeObserver: ResizeObserver | null = null
     const controller = new AbortController()
     setLoading(true); setError(null)
     const container = containerRef.current
@@ -290,13 +291,24 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
       await renderAsync(blob, renderHost, undefined, { className: 'docx-preview', breakPages: true, inWrapper: true })
       if (!active) return
       container.replaceChildren(...Array.from(renderHost.childNodes))
+      const fitPages = () => {
+        const pages = Array.from(container.querySelectorAll<HTMLElement>('.docx-preview-wrapper > section.docx-preview'))
+        if (!pages.length || !container.clientWidth) return
+        const pageWidth = Math.max(...pages.map((page) => page.offsetWidth))
+        const availableWidth = Math.max(1, container.clientWidth - 4)
+        const scale = Math.min(1, Math.max(.35, availableWidth / pageWidth))
+        pages.forEach((page) => { page.style.zoom = String(scale) })
+      }
+      resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(fitPages) : null
+      resizeObserver?.observe(container)
+      window.requestAnimationFrame(fitPages)
       setLoading(false)
     }).catch((reason: unknown) => {
       if (!active || (reason instanceof DOMException && reason.name === 'AbortError')) return
       const message = reason instanceof Error ? reason.message : 'DOCX повреждён'
       setError(message); onError(message); setLoading(false)
     })
-    return () => { active = false; controller.abort(); renderHost.replaceChildren() }
+    return () => { active = false; controller.abort(); resizeObserver?.disconnect(); renderHost.replaceChildren() }
   }, [originalUrl])
   useEffect(() => {
     if (!containerRef.current || !selectedSource || loading) return

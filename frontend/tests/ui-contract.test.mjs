@@ -65,6 +65,8 @@ test('DOCX rendering isolates stale imperative renders from React nodes', () => 
   assert.match(originalViewer, /document\.createElement\('div'\)/)
   assert.match(originalViewer, /renderAsync\(blob, renderHost/)
   assert.match(originalViewer, /container\.replaceChildren\(\.\.\.Array\.from\(renderHost\.childNodes\)\)/)
+  assert.match(originalViewer, /new ResizeObserver\(fitPages\)/)
+  assert.match(originalViewer, /page\.style\.zoom = String\(scale\)/)
   assert.match(originalViewer, /controller\.abort\(\)/)
 })
 
