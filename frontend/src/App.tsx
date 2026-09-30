@@ -877,15 +877,7 @@ function App() {
                 </div>
               </div>
               <div className="document-toolbar-actions">
-                <span className={`status-pill status-pill-${visibleStatus.status}`}>
-                  {activeStatus && <LoaderCircle size={13} className="spin" />}
-                  {visibleStatus.status === 'ready' && <Check size={13} />}
-                  {statusLabel(visibleStatus.status)}
-                </span>
                 {visibleStatus.status === 'error' && <button className="icon-button" title="Повторить обработку" aria-label="Повторить обработку" onClick={() => void retryDocument()}><RotateCw size={16} /></button>}
-                <button className="icon-button header-chat-toggle" aria-label={chatOpen ? 'Свернуть чат' : 'Открыть чат'} onClick={() => setChatOpen((value) => !value)}>
-                  {chatOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
-                </button>
               </div>
             </div>
 

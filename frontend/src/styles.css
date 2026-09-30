@@ -266,9 +266,6 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .document-title-text h1 { overflow: hidden; max-width: min(48vw, 720px); margin: 0; color: var(--ink); font-size: 17px; font-weight: 600; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
 .document-title-text > span { color: var(--ink-tertiary); font-size: 12px; font-weight: 500; letter-spacing: .04em; }
 .meta-divider { margin: 0 4px; color: #aaa; }
-.status-pill { display: inline-flex; align-items: center; gap: 6px; min-height: 27px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-secondary); background: var(--paper); font-size: 12px; font-weight: 500; white-space: nowrap; }
-.status-pill-ready { border-color: #d4d4d4; color: var(--ink); }
-.header-chat-toggle { margin-left: 3px; }
 .workspace-scroll { width: 100%; max-width: 1400px; margin: 0 auto; padding: 0 28px 48px; container-type: inline-size; }
 .document-facts { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 20px; min-height: 54px; border-bottom: 1px solid var(--line-soft); color: var(--ink-tertiary); font-size: 12px; }
 .fact-item { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
@@ -690,7 +687,6 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .app-shell.chat-full.library-manual-collapsed .chat-panel { left: 72px; }
   .mobile-chat-toggle, .close-mobile-panel { display: inline-grid; }
   .desktop-chat-size { display: none; }
-  .header-chat-toggle { display: none; }
   .topbar { padding: 0 16px; }
   .workspace-scroll { padding-right: 20px; padding-left: 20px; }
   .document-toolbar { padding-right: 20px; padding-left: 20px; }
@@ -756,7 +752,6 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .file-badge { width: 34px; height: 34px; }
   .document-title-text h1 { max-width: 52vw; font-size: 14px; }
   .document-toolbar-actions { gap: 1px; }
-  .status-pill { min-height: 24px; padding: 0 7px; font-size: 10px; }
   .workspace-scroll { padding: 0 13px 30px; }
   .original-render-surface { height: clamp(300px, 52dvh, 480px); }
   .renderer-text .original-render-surface, .renderer-xml .original-render-surface, .renderer-html .original-render-surface, .renderer-json .original-render-surface { height: clamp(300px, 50dvh, 440px); }
