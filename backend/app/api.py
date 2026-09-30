@@ -49,6 +49,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 
 
+_DOCUMENT_MEDIA_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "csv": "text/csv",
+    "xml": "application/xml",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "html": "text/html",
+    "htm": "text/html",
+    "json": "application/json",
+    "epub": "application/epub+zip",
+}
+
+
+def document_media_type(file_type: str, filename: str) -> str:
+    """Return a stable browser MIME type for every supported upload format."""
+
+    normalized = file_type.casefold().lstrip(".")
+    return _DOCUMENT_MEDIA_TYPES.get(normalized) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
 def _document_out(document: Document) -> DocumentOut:
     return DocumentOut(
         id=str(document.id),
@@ -320,7 +344,7 @@ async def document_file(document_id: uuid.UUID) -> FileResponse:
         upload_root = Path(settings.upload_dir).resolve()
         if not path.is_relative_to(upload_root) or not path.is_file():
             raise HTTPException(status_code=404, detail="Исходный файл документа недоступен.")
-        media_type = mimetypes.guess_type(document.filename)[0] or "application/octet-stream"
+        media_type = document_media_type(document.file_type, document.filename)
         return FileResponse(
             path,
             media_type=media_type,

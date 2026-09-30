@@ -8,6 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const app = await readFile(resolve(root, 'src/App.tsx'), 'utf8')
 const chatMarkdown = await readFile(resolve(root, 'src/components/ChatMarkdown.tsx'), 'utf8')
 const markdownViewer = await readFile(resolve(root, 'src/components/MarkdownViewer.tsx'), 'utf8')
+const originalViewer = await readFile(resolve(root, 'src/components/OriginalDocumentViewer.tsx'), 'utf8')
 const styles = await readFile(resolve(root, 'src/styles.css'), 'utf8')
 
 test('sidebar collapse has persistent state and an accessible control contract', () => {
@@ -50,6 +51,22 @@ test('document viewer exposes bounded original and Markdown modes', () => {
   assert.match(markdownViewer, /aria-label="Markdown-представление документа"/)
   assert.match(styles, /\.markdown-viewer\s*\{[^}]*height:\s*clamp\(/)
   assert.match(styles, /\.markdown-viewer\s*\{[^}]*overflow:\s*auto/)
+})
+
+test('DOCX rendering isolates stale imperative renders from React nodes', () => {
+  assert.match(originalViewer, /new AbortController\(\)/)
+  assert.match(originalViewer, /document\.createElement\('div'\)/)
+  assert.match(originalViewer, /renderAsync\(blob, renderHost/)
+  assert.match(originalViewer, /container\.replaceChildren\(\.\.\.Array\.from\(renderHost\.childNodes\)\)/)
+  assert.match(originalViewer, /controller\.abort\(\)/)
+})
+
+test('table viewer ignores stale pagination and citation requests', () => {
+  assert.match(originalViewer, /const requestRef = useRef\(0\)/)
+  assert.match(originalViewer, /const requestId = \+\+requestRef\.current/)
+  assert.match(originalViewer, /new AbortController\(\)/)
+  assert.match(originalViewer, /signal: controller\.signal/)
+  assert.match(originalViewer, /requestId !== requestRef\.current/)
 })
 
 test('frontend advertises the formats supported by the backend contract', () => {

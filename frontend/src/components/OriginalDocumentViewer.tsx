@@ -274,17 +274,29 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let active = true
+    const controller = new AbortController()
     setLoading(true); setError(null)
     const container = containerRef.current
     if (!container) return
     container.replaceChildren()
-    void fetch(originalUrl).then(async (response) => {
+    // Render into a detached host first. docx-preview mutates its host
+    // imperatively; using the live React node allowed a stale render from a
+    // previous document to race with a new one and call removeChild on nodes
+    // that React had already replaced.
+    const renderHost = document.createElement('div')
+    void fetch(originalUrl, { signal: controller.signal }).then(async (response) => {
       if (!response.ok) throw new Error('DOCX недоступен')
       const blob = await response.blob()
-      await renderAsync(blob, container, undefined, { className: 'docx-preview', breakPages: true, inWrapper: true })
-      if (active) setLoading(false)
-    }).catch((reason: unknown) => { if (active) { const message = reason instanceof Error ? reason.message : 'DOCX повреждён'; setError(message); onError(message); setLoading(false) } })
-    return () => { active = false }
+      await renderAsync(blob, renderHost, undefined, { className: 'docx-preview', breakPages: true, inWrapper: true })
+      if (!active) return
+      container.replaceChildren(...Array.from(renderHost.childNodes))
+      setLoading(false)
+    }).catch((reason: unknown) => {
+      if (!active || (reason instanceof DOMException && reason.name === 'AbortError')) return
+      const message = reason instanceof Error ? reason.message : 'DOCX повреждён'
+      setError(message); onError(message); setLoading(false)
+    })
+    return () => { active = false; controller.abort(); renderHost.replaceChildren() }
   }, [originalUrl])
   useEffect(() => {
     if (!containerRef.current || !selectedSource || loading) return
@@ -308,16 +320,29 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
+  const requestRef = useRef(0)
   const load = async (offset: number, append: boolean) => {
+    const requestId = ++requestRef.current
+    const controller = new AbortController()
     setLoading(true); setError(null)
     try {
-      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table?offset=${offset}&limit=${CSV_PAGE_SIZE}`)
+      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table?offset=${offset}&limit=${CSV_PAGE_SIZE}`, { signal: controller.signal })
       if (!response.ok) throw new Error('Таблица недоступна')
       const next = await response.json() as TablePreview
+      if (requestId !== requestRef.current) return
       setTable((current) => append && current ? { ...next, rows: [...current.rows, ...next.rows], offset: current.offset, limit: next.limit } : next)
-    } catch (reason) { const message = reason instanceof Error ? reason.message : 'Не удалось загрузить таблицу'; setError(message); onError(message) } finally { setLoading(false) }
+    } catch (reason) {
+      if (requestId !== requestRef.current || (reason instanceof DOMException && reason.name === 'AbortError')) return
+      const message = reason instanceof Error ? reason.message : 'Не удалось загрузить таблицу'
+      setError(message); onError(message)
+    } finally {
+      if (requestId === requestRef.current) setLoading(false)
+    }
   }
-  useEffect(() => { void load(0, false) }, [preview.document_id])
+  useEffect(() => {
+    void load(0, false)
+    return () => { requestRef.current += 1 }
+  }, [preview.document_id])
   useEffect(() => {
     if (!table || !selectedSource) return
     const start = typeof selectedSource.locator.row_start === 'number' ? selectedSource.locator.row_start : null

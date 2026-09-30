@@ -75,6 +75,27 @@ def test_document_out_exposes_markdown_processing_metadata() -> None:
     assert result.markdown_mapping == {"exact": 4}
 
 
+def test_document_media_type_is_stable_for_all_supported_formats() -> None:
+    expected = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "txt": "text/plain",
+        "md": "text/markdown",
+        "csv": "text/csv",
+        "xml": "application/xml",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xls": "application/vnd.ms-excel",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "html": "text/html",
+        "htm": "text/html",
+        "json": "application/json",
+        "epub": "application/epub+zip",
+    }
+
+    for extension, media_type in expected.items():
+        assert api.document_media_type(extension, f"sample.{extension}") == media_type
+
+
 def test_codex_error_message_hides_unexpected_internal_details() -> None:
     assert api.codex_error_message(CodexUnavailable("Сервис недоступен")) == "Сервис недоступен"
     assert "Не удалось получить ответ" in api.codex_error_message(RuntimeError("secret stack detail"))
