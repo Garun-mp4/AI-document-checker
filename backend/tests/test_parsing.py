@@ -110,13 +110,15 @@ def test_pdf_text_is_extracted_with_page_locator() -> None:
     assert "Team Alpha" in parsed.blocks[0].text
 
 
-def test_scanned_and_encrypted_pdfs_return_clear_errors() -> None:
+def test_scanned_pdf_is_marked_for_ocr_and_encrypted_pdf_still_fails() -> None:
     writer = PdfWriter()
     writer.add_blank_page(width=300, height=300)
     stream = BytesIO()
     writer.write(stream)
-    with pytest.raises(DocumentParsingError, match="OCR"):
-        parse_document("scan.pdf", stream.getvalue())
+    parsed = parse_document("scan.pdf", stream.getvalue())
+    assert parsed.blocks == []
+    assert parsed.metadata["ocr_required"] is True
+    assert parsed.metadata["page_count"] == 1
 
     writer.encrypt("password")
     encrypted = BytesIO()

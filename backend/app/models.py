@@ -8,6 +8,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -50,6 +51,13 @@ class Document(Base):
     markdown_line_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     markdown_checksum: Mapped[str | None] = mapped_column(String(64))
     markdown_mapping_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    ocr_status: Mapped[str] = mapped_column(String(16), nullable=False, default="not_needed", index=True)
+    ocr_language: Mapped[str | None] = mapped_column(String(32))
+    ocr_page_count: Mapped[int | None] = mapped_column(Integer)
+    ocr_confidence: Mapped[float | None] = mapped_column(Float)
+    ocr_error: Mapped[str | None] = mapped_column(Text)
+    ocr_engine_version: Mapped[str | None] = mapped_column(String(32))
+    ocr_char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=func.now())
 

@@ -1,6 +1,7 @@
 export type DocumentStatus =
   | 'queued'
   | 'extracting'
+  | 'ocr'
   | 'indexing'
   | 'analyzing'
   | 'ready'
@@ -18,13 +19,20 @@ export interface DocumentRecord {
   chunk_count: number
   metadata: Record<string, unknown>
   markdown_status: 'pending' | 'ready' | 'fallback' | 'failed' | 'legacy'
-  analysis_source: 'markitdown' | 'native_fallback'
+  analysis_source: 'markitdown' | 'native_fallback' | 'ocr'
   markdown_error: string | null
   markdown_converter_version: string | null
   markdown_char_count: number
   markdown_line_count: number
   markdown_checksum: string | null
   markdown_mapping: Record<string, number>
+  ocr_status: 'not_needed' | 'processing' | 'ready' | 'failed'
+  ocr_language: string | null
+  ocr_page_count: number | null
+  ocr_confidence: number | null
+  ocr_error: string | null
+  ocr_engine_version: string | null
+  ocr_char_count: number
   created_at: string
   updated_at: string
 }
@@ -87,7 +95,7 @@ export interface DocumentPreview {
 export interface MarkdownDocument {
   document_id: string
   status: 'pending' | 'ready' | 'fallback' | 'failed' | 'legacy'
-  source: 'markitdown' | 'native_fallback'
+  source: 'markitdown' | 'native_fallback' | 'ocr'
   converter_version: string | null
   markdown: string
   offset: number

@@ -435,6 +435,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .processing-banner > div:nth-child(2), .issue-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .processing-banner strong, .issue-copy strong { color: var(--ink); font-size: 14px; font-weight: 600; }
 .processing-banner > div:nth-child(2) span, .issue-copy span { color: var(--ink-tertiary); font-size: 13px; line-height: 1.5; }
+.ocr-notice { display: flex; align-items: flex-start; gap: 9px; margin: 14px 28px 0; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: #f7f7f7; color: var(--ink-secondary); font-size: 12px; line-height: 1.45; }
+.ocr-notice svg { flex: 0 0 auto; margin-top: 1px; color: var(--ink-secondary); }
 .processing-step { color: var(--ink-tertiary); font-size: 9px; font-weight: 600; letter-spacing: .08em; white-space: nowrap; }
 .issue-banner { margin-top: 20px; color: var(--ink-secondary); }
 .issue-banner > svg { flex: 0 0 auto; }

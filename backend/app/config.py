@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     model_context_chars: int = 42_000
     markdown_max_chars: int = 5_000_000
     markdown_timeout_seconds: int = 120
+    ocr_enabled: bool = True
+    ocr_languages: str = "rus+eng"
+    ocr_dpi: int = 200
+    ocr_max_pages: int = 100
+    ocr_timeout_seconds: int = 90
+    ocr_max_chars: int = 5_000_000
 
 
 settings = Settings()

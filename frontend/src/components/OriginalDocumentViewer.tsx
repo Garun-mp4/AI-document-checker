@@ -236,12 +236,21 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
     return () => { active = false; renderTask?.cancel(); page?.cleanup() }
   }, [pdf, pageNumber, viewerWidth])
   useEffect(() => {
+    const sourcePage = typeof selectedSource?.locator.page === 'number' ? selectedSource.locator.page : null
+    if (selectedSource?.locator.ocr === true && sourcePage === pageNumber) {
+      // Scanned PDFs have no native PDF text layer. The OCR locator is still
+      // exact at page level, so a citation can be acknowledged without
+      // pretending that an invisible PDF text span exists.
+      onMatch(true)
+      scrollIntoViewRespectingMotion(sheetRef.current)
+      return
+    }
     if (!items.length || !selectedSource) return
     const query = sourceQuery(selectedSource)
     const exact = items.some((item) => normalizedIncludes(item.str, query) || query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(item.str, word)))
     onMatch(exact)
     if (exact) scrollIntoViewRespectingMotion(sheetRef.current)
-  }, [items, selectedSource, onMatch])
+  }, [items, pageNumber, selectedSource, onMatch])
   if (nativeFallback) return <div className="pdf-native-fallback">
     <div className="pdf-native-fallback-note">
       <strong>Встроенный просмотр PDF.js недоступен</strong>

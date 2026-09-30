@@ -29,6 +29,12 @@ services:
       MODEL_CONTEXT_CHARS: 42000
       MARKDOWN_MAX_CHARS: 5000000
       MARKDOWN_TIMEOUT_SECONDS: 120
+      OCR_ENABLED: ${OCR_ENABLED:-true}
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-rus+eng}
+      OCR_DPI: ${OCR_DPI:-200}
+      OCR_MAX_PAGES: ${OCR_MAX_PAGES:-100}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-90}
+      OCR_MAX_CHARS: ${OCR_MAX_CHARS:-5000000}
       PYTHONUNBUFFERED: "1"
     volumes:
       - document_uploads:/data/uploads

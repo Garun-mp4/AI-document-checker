@@ -13,7 +13,7 @@ from app.services.embeddings import EmbeddingConfigurationError
 from app.services.markdown_mapping import MappedMarkdownBlock
 from app.services.markitdown_service import MarkdownConversionError, MarkdownResult
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
-from app.services.processing import DocumentProcessor, _computed_blocks
+from app.services.processing import DocumentProcessor, _computed_blocks, _ocr_analysis_blocks
 
 
 def test_computed_blocks_adds_table_summary_and_numeric_columns() -> None:
@@ -42,6 +42,18 @@ def test_computed_blocks_adds_table_summary_and_numeric_columns() -> None:
     assert derived[0].locator["row_end"] == 4
     assert "сумма 300.00" in derived[1].text
     assert derived[1].locator["column"] == "Стоимость"
+
+
+def test_ocr_analysis_blocks_keep_page_locator_and_markdown_range() -> None:
+    parsed = ParsedDocument("pdf", [SourceBlock("Распознанная строка", {"kind": "pdf", "page": 3, "label": "Страница 3"})])
+
+    blocks, mapping = _ocr_analysis_blocks(parsed, "## Страница 3\nРаспознанная строка\n")
+
+    assert blocks[0][2] == "ocr"
+    assert blocks[0][1]["page"] == 3
+    assert blocks[0][3] == 2
+    assert blocks[0][5] > 0
+    assert mapping["quality"] == {"exact": 1, "fuzzy": 0, "nearest": 0, "none": 0}
 
 
 @pytest.mark.parametrize("file_type", ["txt", "pdf", "docx", "md", "xml"])

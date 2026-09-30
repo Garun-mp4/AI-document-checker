@@ -64,6 +64,7 @@ function statusLabel(status: DocumentRecord['status']): string {
   return {
     queued: 'В очереди',
     extracting: 'Читаю документ',
+    ocr: 'Распознаю скан',
     indexing: 'Создаю индекс',
     analyzing: 'Готовлю ответы',
     ready: 'Готово',
@@ -156,6 +157,13 @@ function summaryToDocument(summary: ChatSummary): DocumentRecord {
     markdown_line_count: 0,
     markdown_checksum: null,
     markdown_mapping: {},
+    ocr_status: 'not_needed',
+    ocr_language: null,
+    ocr_page_count: null,
+    ocr_confidence: null,
+    ocr_error: null,
+    ocr_engine_version: null,
+    ocr_char_count: 0,
     created_at: summary.created_at,
     updated_at: summary.last_activity_at,
   }
@@ -768,7 +776,7 @@ function App() {
   })
   const currentListItem = chats.find((item) => item.document_id === selectedId)
   const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
-  const activeStatus = visibleStatus ? ['queued', 'extracting', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
+  const activeStatus = visibleStatus ? ['queued', 'extracting', 'ocr', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
   const mainClasses = [
     'app-shell',
     sidebarCollapsed ? 'library-manual-collapsed' : '',
@@ -884,14 +892,18 @@ function App() {
               <div className="processing-banner" role="status" aria-live="polite">
                 <div className="processing-spinner"><LoaderCircle size={19} className="spin" /></div>
                 <div><strong>{statusLabel(visibleStatus.status)}</strong><span>{processingDescription(visibleStatus.status)}</span></div>
-                <span className="processing-step">{visibleStatus.status === 'queued' ? '01' : visibleStatus.status === 'extracting' ? '02' : visibleStatus.status === 'indexing' ? '03' : '04'} / 04</span>
+                <span className="processing-step">{visibleStatus.status === 'queued' ? '01' : visibleStatus.status === 'extracting' ? '02' : visibleStatus.status === 'ocr' ? '03' : visibleStatus.status === 'indexing' ? '04' : '05'} / 05</span>
               </div>
+            )}
+
+            {document?.ocr_status === 'ready' && document.analysis_source === 'ocr' && (
+              <div className="ocr-notice" role="status"><BookOpen size={16} /><span>Это сканированный PDF. Текст распознан локально ({document.ocr_language || 'rus+eng'}), а оригинальные страницы сохранены без изменений.</span></div>
             )}
 
             {(visibleStatus.status === 'needs_auth' || visibleStatus.status === 'model_unavailable' || visibleStatus.status === 'error') && (
               <div className={`issue-banner ${visibleStatus.status === 'error' ? 'issue-error' : ''}`} role="alert">
                 <CircleHelp size={19} />
-                <div className="issue-copy"><strong>{visibleStatus.status === 'needs_auth' ? 'Подключите Codex, чтобы получить ответы' : visibleStatus.status === 'model_unavailable' ? 'Выбранная модель недоступна' : 'Не удалось обработать документ'}</strong><span>{visibleStatus.error_message ?? 'Проверьте настройки и повторите действие.'}</span></div>
+                <div className="issue-copy"><strong>{visibleStatus.status === 'needs_auth' ? 'Подключите Codex, чтобы получить ответы' : visibleStatus.status === 'model_unavailable' ? 'Выбранная модель недоступна' : visibleStatus.ocr_status === 'failed' ? 'Не удалось распознать скан' : 'Не удалось обработать документ'}</strong><span>{visibleStatus.error_message ?? visibleStatus.ocr_error ?? 'Проверьте настройки и повторите действие.'}</span></div>
                 {visibleStatus.status === 'needs_auth' ? <button className="button button-dark" onClick={() => setAuthOpen(true)}>Подключить</button> : <button className="button button-light" onClick={() => void retryDocument()}><RotateCw size={15} /> Повторить</button>}
               </div>
             )}
@@ -1164,6 +1176,7 @@ function processingDescription(status: DocumentRecord['status']): string {
   return {
     queued: 'Файл сохранён. Ожидаю свободный слот для обработки.',
     extracting: 'Извлекаю текст и размечаю исходные места фрагментов.',
+    ocr: 'Распознаю страницы локально. Оригинальный PDF не изменяется.',
     indexing: 'Создаю локальный полнотекстовый и векторный индексы.',
     analyzing: 'Подбираю подтверждения и готовлю семь ответов.',
     ready: 'Документ проиндексирован и готов к вопросам.',

@@ -21,6 +21,7 @@ from app.services.codex import (
 from app.services.embeddings import EmbeddingConfigurationError, embed_passages
 from app.services.markdown_mapping import map_markdown, serialize_map
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
+from app.services.ocr import OCRProcessingError, OCRService
 from app.services.parsing import (
     DocumentParsingError,
     ParsedDocument,
@@ -30,7 +31,7 @@ from app.services.parsing import (
 
 logger = logging.getLogger(__name__)
 
-PROCESSING_STATES = {"extracting", "indexing", "analyzing"}
+PROCESSING_STATES = {"extracting", "ocr", "indexing", "analyzing"}
 
 
 def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
@@ -61,10 +62,41 @@ def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
     return blocks
 
 
+def _ocr_analysis_blocks(
+    parsed: ParsedDocument,
+    markdown: str,
+) -> tuple[list[tuple[str, dict[str, object], str, int | None, int | None, int | None, int | None, str | None]], dict[str, object]]:
+    """Build direct Markdown-to-page anchors for OCR output."""
+    result: list[tuple[str, dict[str, object], str, int | None, int | None, int | None, int | None, str | None]] = []
+    cursor = 0
+    for block in parsed.blocks:
+        position = markdown.find(block.text, cursor)
+        if position < 0:
+            position = markdown.find(block.text)
+        if position < 0:
+            continue
+        end = position + len(block.text)
+        line_start = markdown.count("\n", 0, position) + 1
+        line_end = markdown.count("\n", 0, end) + 1
+        locator = {
+            **block.locator,
+            "source_text": block.text,
+            "source_locators": [block.locator],
+            "markdown_line_start": line_start,
+            "markdown_line_end": line_end,
+            "markdown_char_start": position,
+            "markdown_char_end": end,
+        }
+        result.append((block.text, locator, "ocr", line_start, line_end, position, end, "exact"))
+        cursor = end
+    return result, {"quality": {"exact": len(result), "fuzzy": 0, "nearest": 0, "none": max(0, len(parsed.blocks) - len(result))}}
+
+
 class DocumentProcessor:
     def __init__(self, codex: CodexService) -> None:
         self.codex = codex
         self.markitdown = MarkItDownService(settings.upload_dir)
+        self.ocr = OCRService(settings.upload_dir)
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
 
     async def start(self) -> None:
@@ -152,54 +184,74 @@ class DocumentProcessor:
 
             content = await asyncio.to_thread(path.read_bytes)
             parsed = await asyncio.to_thread(parse_document, filename, content)
-            if not parsed.blocks:
-                raise DocumentParsingError("Не удалось извлечь текст из файла.")
-
+            markdown_path = Path(settings.upload_dir).resolve() / f"{document_id}.md"
+            markdown_map_path = Path(settings.upload_dir).resolve() / f"{document_id}.map.json"
             analysis_blocks: list[tuple[str, dict[str, object], str, int | None, int | None, int | None, int | None, str | None]] = []
             markdown_status = "fallback"
             analysis_source = "native_fallback"
             markdown_error: str | None = None
             markdown_mapping: dict[str, object] = {}
             markdown_checksum: str | None = None
-            markdown_path = Path(settings.upload_dir).resolve() / f"{document_id}.md"
-            markdown_map_path = Path(settings.upload_dir).resolve() / f"{document_id}.map.json"
-            try:
-                markdown_result = await self.markitdown.convert(path)
-                mapped_blocks, markdown_mapping = map_markdown(markdown_result.markdown, parsed.blocks)
-                if not mapped_blocks or not any(block.locator.get("source_locators") for block in mapped_blocks):
-                    raise MarkdownConversionError("MarkItDown не смог связать Markdown с исходными местами документа.")
-                await asyncio.to_thread(markdown_path.write_text, markdown_result.markdown, "utf-8")
-                await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
-                markdown_checksum = hashlib.sha256(markdown_result.markdown.encode("utf-8")).hexdigest()
-                analysis_blocks = [(
-                    block.text,
-                    block.locator,
-                    "markitdown",
-                    block.line_start,
-                    block.line_end,
-                    block.char_start,
-                    block.char_end,
-                    block.confidence,
-                ) for block in mapped_blocks]
+            markdown_text = ""
+            markdown_engine_version: str | None = None
+            ocr_metadata: dict[str, object] = {}
+            if parsed.metadata.get("ocr_required"):
+                await self._set_ocr_state(document_id, "processing", None)
+                ocr_result = await asyncio.to_thread(self.ocr.process, path)
+                parsed = ocr_result.parsed
+                markdown_text = ocr_result.markdown
+                analysis_blocks, markdown_mapping = _ocr_analysis_blocks(parsed, markdown_text)
+                if not analysis_blocks:
+                    raise OCRProcessingError("OCR не смог связать распознанный текст со страницей документа.")
                 markdown_status = "ready"
-                analysis_source = "markitdown"
-            except (MarkdownConversionError, OSError) as exc:
-                markdown_error = str(exc) or "MarkItDown не смог сохранить результат преобразования."
-                for artifact in (markdown_path, markdown_map_path):
-                    try:
-                        artifact.unlink(missing_ok=True)
-                    except OSError:
-                        logger.warning("Could not remove failed Markdown artifact %s", artifact, exc_info=True)
-                analysis_blocks = [(
-                    block.text,
-                    {**block.locator, "source_text": block.text},
-                    "native_fallback",
-                    None,
-                    None,
-                    None,
-                    None,
-                    "exact",
-                ) for block in parsed.blocks]
+                analysis_source = "ocr"
+                markdown_engine_version = ocr_result.engine_version
+                ocr_metadata = parsed.metadata
+                markdown_checksum = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
+                await asyncio.to_thread(markdown_path.write_text, markdown_text, "utf-8")
+                await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
+            else:
+                if not parsed.blocks:
+                    raise DocumentParsingError("Не удалось извлечь текст из файла.")
+                try:
+                    markdown_result = await self.markitdown.convert(path)
+                    markdown_text = markdown_result.markdown
+                    mapped_blocks, markdown_mapping = map_markdown(markdown_result.markdown, parsed.blocks)
+                    if not mapped_blocks or not any(block.locator.get("source_locators") for block in mapped_blocks):
+                        raise MarkdownConversionError("MarkItDown не смог связать Markdown с исходными местами документа.")
+                    await asyncio.to_thread(markdown_path.write_text, markdown_result.markdown, "utf-8")
+                    await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
+                    markdown_checksum = hashlib.sha256(markdown_result.markdown.encode("utf-8")).hexdigest()
+                    analysis_blocks = [(
+                        block.text,
+                        block.locator,
+                        "markitdown",
+                        block.line_start,
+                        block.line_end,
+                        block.char_start,
+                        block.char_end,
+                        block.confidence,
+                    ) for block in mapped_blocks]
+                    markdown_status = "ready"
+                    analysis_source = "markitdown"
+                    markdown_engine_version = "0.1.8"
+                except (MarkdownConversionError, OSError) as exc:
+                    markdown_error = str(exc) or "MarkItDown не смог сохранить результат преобразования."
+                    for artifact in (markdown_path, markdown_map_path):
+                        try:
+                            artifact.unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning("Could not remove failed Markdown artifact %s", artifact, exc_info=True)
+                    analysis_blocks = [(
+                        block.text,
+                        {**block.locator, "source_text": block.text},
+                        "native_fallback",
+                        None,
+                        None,
+                        None,
+                        None,
+                        "exact",
+                    ) for block in parsed.blocks]
 
             async with SessionLocal() as session:
                 document = await session.get(Document, document_id)
@@ -217,11 +269,19 @@ class DocumentProcessor:
                 document.markdown_path = str(markdown_path) if markdown_status == "ready" else None
                 document.markdown_map_path = str(markdown_map_path) if markdown_status == "ready" else None
                 document.markdown_error = markdown_error
-                document.markdown_converter_version = "0.1.8" if markdown_status == "ready" else None
-                document.markdown_char_count = sum(len(item[0]) for item in analysis_blocks) if markdown_status != "ready" else len(markdown_result.markdown)
-                document.markdown_line_count = len(markdown_result.markdown.splitlines()) if markdown_status == "ready" else 0
+                document.markdown_converter_version = markdown_engine_version
+                document.markdown_char_count = len(markdown_text) if markdown_status == "ready" else sum(len(item[0]) for item in analysis_blocks)
+                document.markdown_line_count = len(markdown_text.splitlines()) if markdown_status == "ready" else 0
                 document.markdown_checksum = markdown_checksum
                 document.markdown_mapping_json = markdown_mapping.get("quality", {}) if markdown_status == "ready" else {}
+                if ocr_metadata:
+                    document.ocr_status = "ready"
+                    document.ocr_language = str(ocr_metadata.get("ocr_language") or self.ocr.languages)
+                    document.ocr_page_count = int(ocr_metadata.get("ocr_page_count") or 0)
+                    document.ocr_confidence = ocr_metadata.get("ocr_confidence")
+                    document.ocr_error = None
+                    document.ocr_engine_version = markdown_engine_version
+                    document.ocr_char_count = int(ocr_metadata.get("ocr_char_count") or 0)
                 document.status = "indexing"
                 document.chunk_count = 0
                 await session.commit()
@@ -274,6 +334,9 @@ class DocumentProcessor:
             await self._analyze(document_id)
         except asyncio.CancelledError:
             raise
+        except OCRProcessingError as exc:
+            await self._set_ocr_state(document_id, "failed", str(exc))
+            await self._set_error(document_id, "error", str(exc))
         except DocumentParsingError as exc:
             await self._set_error(document_id, "error", str(exc))
         except CodexNeedsLogin as exc:
@@ -309,6 +372,16 @@ class DocumentProcessor:
             if document:
                 document.status = status
                 document.error_message = message[:1_000]
+                await session.commit()
+
+    async def _set_ocr_state(self, document_id: uuid.UUID, state: str, message: str | None) -> None:
+        async with SessionLocal() as session:
+            document = await session.get(Document, document_id)
+            if document:
+                document.ocr_status = state
+                document.ocr_error = message[:1_000] if message else None
+                if state == "processing":
+                    document.status = "ocr"
                 await session.commit()
 
     @staticmethod

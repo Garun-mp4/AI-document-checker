@@ -64,6 +64,8 @@ def test_document_out_exposes_markdown_processing_metadata() -> None:
         markdown_status="ready", analysis_source="markitdown", markdown_error=None,
         markdown_converter_version="0.1.8", markdown_char_count=1200, markdown_line_count=80,
         markdown_checksum="a" * 64, markdown_mapping_json={"exact": 4},
+        ocr_status="ready", ocr_language="rus+eng", ocr_page_count=2,
+        ocr_confidence=91.5, ocr_error=None, ocr_engine_version="tesseract-5.5.0", ocr_char_count=480,
         created_at=now, updated_at=now,
     )
 
@@ -73,6 +75,8 @@ def test_document_out_exposes_markdown_processing_metadata() -> None:
     assert result.markdown_status == "ready"
     assert result.analysis_source == "markitdown"
     assert result.markdown_mapping == {"exact": 4}
+    assert result.ocr_status == "ready"
+    assert result.ocr_confidence == 91.5
 
 
 def test_document_media_type_is_stable_for_all_supported_formats() -> None:

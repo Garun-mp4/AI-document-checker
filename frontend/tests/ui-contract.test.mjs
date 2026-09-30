@@ -83,3 +83,11 @@ test('frontend advertises the formats supported by the backend contract', () => 
     assert.match(app, new RegExp(`\\${extension}`))
   }
 })
+
+test('OCR has an explicit processing state and user-facing fallback message', () => {
+  assert.match(app, /ocr: 'Распознаю скан'/)
+  assert.match(app, /ocr_status === 'ready'/)
+  assert.match(app, /Не удалось распознать скан/)
+  assert.match(styles, /\.ocr-notice\s*\{[^}]*border/)
+  assert.match(originalViewer, /selectedSource\?\.locator\.ocr === true/)
+})

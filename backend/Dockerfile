@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UPLOAD_DIR=/data/uploads
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --gid app --home-dir /app app \

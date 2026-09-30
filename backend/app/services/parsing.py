@@ -153,8 +153,6 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         raise
     except (PdfReadError, ValueError, OSError, KeyError) as exc:
         raise DocumentParsingError("PDF повреждён или имеет неподдерживаемую структуру.") from exc
-    if extracted_chars < 30 or not blocks:
-        raise DocumentParsingError("В PDF не найден извлекаемый текст. Возможно, это скан; OCR пока не поддерживается.")
     page_width = page_height = None
     if pages:
         try:
@@ -165,6 +163,9 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
     metadata = {"page_count": len(pages)}
     if page_width and page_height:
         metadata.update({"page_width": page_width, "page_height": page_height})
+    if extracted_chars < 30 or not blocks:
+        metadata.update({"ocr_required": True, "ocr_reason": "В PDF не найден извлекаемый текст."})
+        return ParsedDocument("pdf", [], metadata)
     return ParsedDocument("pdf", blocks, metadata)
 
 

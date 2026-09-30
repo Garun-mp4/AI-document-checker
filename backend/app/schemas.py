@@ -16,13 +16,20 @@ class DocumentOut(BaseModel):
     chunk_count: int
     metadata: dict[str, Any]
     markdown_status: Literal["pending", "ready", "fallback", "failed", "legacy"]
-    analysis_source: Literal["markitdown", "native_fallback"]
+    analysis_source: Literal["markitdown", "native_fallback", "ocr"]
     markdown_error: str | None
     markdown_converter_version: str | None
     markdown_char_count: int
     markdown_line_count: int
     markdown_checksum: str | None
     markdown_mapping: dict[str, Any]
+    ocr_status: Literal["not_needed", "processing", "ready", "failed"]
+    ocr_language: str | None
+    ocr_page_count: int | None
+    ocr_confidence: float | None
+    ocr_error: str | None
+    ocr_engine_version: str | None
+    ocr_char_count: int
     created_at: datetime
     updated_at: datetime
 
@@ -65,7 +72,7 @@ class DocumentPreviewOut(BaseModel):
 class MarkdownOut(BaseModel):
     document_id: str
     status: Literal["pending", "ready", "fallback", "failed", "legacy"]
-    source: Literal["markitdown", "native_fallback"]
+    source: Literal["markitdown", "native_fallback", "ocr"]
     converter_version: str | None
     markdown: str
     offset: int

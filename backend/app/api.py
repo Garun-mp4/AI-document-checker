@@ -91,6 +91,13 @@ def _document_out(document: Document) -> DocumentOut:
         markdown_line_count=document.markdown_line_count,
         markdown_checksum=document.markdown_checksum,
         markdown_mapping=document.markdown_mapping_json or {},
+        ocr_status=getattr(document, "ocr_status", "not_needed"),
+        ocr_language=getattr(document, "ocr_language", None),
+        ocr_page_count=getattr(document, "ocr_page_count", None),
+        ocr_confidence=getattr(document, "ocr_confidence", None),
+        ocr_error=getattr(document, "ocr_error", None),
+        ocr_engine_version=getattr(document, "ocr_engine_version", None),
+        ocr_char_count=getattr(document, "ocr_char_count", 0),
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
