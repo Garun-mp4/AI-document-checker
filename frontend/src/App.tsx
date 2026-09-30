@@ -188,6 +188,21 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true')
   const [mobileLibraryOpen, setMobileLibraryOpen] = useState(false)
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
+  const [compactChatLayout, setCompactChatLayout] = useState(() => window.matchMedia('(max-width: 959px)').matches)
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 959px)')
+    const update = () => setCompactChatLayout(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  const chatVisible = chatOpen && (!compactChatLayout || mobileChatOpen || chatFull)
+  const toggleChat = () => {
+    const nextVisible = !chatVisible
+    setChatOpen(nextVisible)
+    setMobileChatOpen(compactChatLayout && nextVisible)
+    setChatFull(false)
+    if (nextVisible) setMobileLibraryOpen(false)
+  }
   const [authOpen, setAuthOpen] = useState(false)
   const [openPreferenceMenu, setOpenPreferenceMenu] = useState<'model' | 'reasoning' | null>(null)
   const [codexSaving, setCodexSaving] = useState(false)
@@ -809,7 +824,7 @@ function App() {
             <span>{authReady ? 'Codex подключён' : 'Подключить Codex'}</span>
             {authReady && <span className="connection-model">{codexModelLabel(codex)} · {codexReasoningLabel(codex?.reasoning_effort)}</span>}
           </button>
-          <button className="icon-button mobile-chat-toggle" aria-label="Открыть чат" aria-expanded={mobileChatOpen} aria-controls="document-chat" onClick={() => { setChatOpen(true); setMobileChatOpen(true) }}><MessageSquareText size={18} /></button>
+          <button className="icon-button chat-visibility-toggle" type="button" aria-label={chatVisible ? 'Свернуть чат' : 'Открыть чат'} title={chatVisible ? 'Свернуть чат' : 'Открыть чат'} aria-expanded={chatVisible} aria-controls="document-chat" onClick={toggleChat}>{chatVisible ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
           <button className="button button-dark header-upload" onClick={() => fileInput.current?.click()} disabled={isUploading}>
             {isUploading ? <LoaderCircle className="spin" size={16} /> : <FileUp size={16} />}
             <span>Загрузить файл</span>
@@ -981,9 +996,7 @@ function App() {
         <div className="chat-panel-header">
           <div className="chat-title"><span className="chat-title-icon"><MessageSquareText size={16} /></span><div><strong>Чат с документом</strong><span>{document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
           <div className="chat-header-actions">
-            <button className="icon-button desktop-chat-size" aria-label={chatFull ? 'Свернуть чат' : 'Развернуть чат'} title={chatFull ? 'Вернуть панель' : 'На всю рабочую область'} onClick={() => setChatFull((value) => !value)}>{chatFull ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
-            <button className="icon-button desktop-chat-size" aria-label="Свернуть чат" title="Свернуть чат" onClick={() => { setChatOpen(false); setChatFull(false) }}><PanelRightClose size={16} /></button>
-            <button className="icon-button close-mobile-panel" aria-label="Закрыть чат" onClick={() => setMobileChatOpen(false)}><X size={18} /></button>
+            <button className="icon-button desktop-chat-size" aria-label={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} title={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} onClick={() => setChatFull((value) => !value)}>{chatFull ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           </div>
         </div>
         <div className="chat-context-line">

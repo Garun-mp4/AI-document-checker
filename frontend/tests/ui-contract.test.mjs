@@ -27,6 +27,14 @@ test('model picker exposes only the two supported Codex models', () => {
   assert.match(app, /filter\(\(item\) => ALLOWED_CODEX_MODELS\.has\(item\.id\.toLowerCase\(\)\)\)/)
 })
 
+test('chat visibility has one persistent control outside the chat panel', () => {
+  assert.match(app, /className="icon-button chat-visibility-toggle"/)
+  assert.match(app, /aria-label=\{chatVisible \? 'Свернуть чат' : 'Открыть чат'\}/)
+  assert.match(app, /aria-controls="document-chat"/)
+  assert.doesNotMatch(app, /header-chat-toggle/)
+  assert.doesNotMatch(app, /mobile-chat-toggle/)
+})
+
 test('new chat opens the empty workspace instead of the file picker', () => {
   assert.match(app, /NEW_CHAT_STORAGE_KEY\s*=\s*'document-checker-new-chat'/)
   assert.match(app, /useState\(\(\) => localStorage\.getItem\(NEW_CHAT_STORAGE_KEY\) === 'true'/)

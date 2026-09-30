@@ -165,7 +165,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 }
 .icon-button:hover:not(:disabled) { color: var(--ink); border-color: var(--line-soft); background: var(--surface-soft); }
 .button:active:not(:disabled), .icon-button:active:not(:disabled), .library-add:active:not(:disabled), .send-button:active:not(:disabled) { transform: scale(.97); }
-.mobile-menu, .mobile-chat-toggle, .close-mobile-panel { display: none; }
+.mobile-menu, .close-mobile-panel { display: none; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .spin { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -685,7 +685,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .app-shell.chat-full .workspace { display: block; }
   .app-shell.chat-full .chat-panel { top: 64px; right: 0; left: var(--sidebar-width); width: auto; border-left: 0; }
   .app-shell.chat-full.library-manual-collapsed .chat-panel { left: 72px; }
-  .mobile-chat-toggle, .close-mobile-panel { display: inline-grid; }
+  .close-mobile-panel { display: inline-grid; }
   .desktop-chat-size { display: none; }
   .topbar { padding: 0 16px; }
   .workspace-scroll { padding-right: 20px; padding-left: 20px; }
@@ -707,7 +707,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
   .connection-button span { display: none; }
   .header-upload { width: 34px; min-height: 34px; padding: 0; }
   .header-upload span { display: none; }
-  .mobile-chat-toggle { width: 32px; height: 32px; }
+  .chat-visibility-toggle { width: 32px; height: 32px; }
   .library { position: fixed; z-index: 23; top: 58px; bottom: 0; left: 0; display: flex; width: min(300px, calc(100vw - 44px)); transform: translateX(-102%); opacity: 0; visibility: hidden; pointer-events: none; transition: transform 240ms var(--ease-drawer), opacity var(--duration-state) var(--ease-out), visibility 0s linear 240ms; box-shadow: 1px 0 0 var(--line); }
   .mobile-library-open .library { transform: translateX(0); opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
   .library-heading { justify-content: space-between; padding: 0 5px; }
