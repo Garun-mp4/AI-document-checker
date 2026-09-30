@@ -34,6 +34,13 @@ test('new chat opens the empty workspace instead of the file picker', () => {
   assert.match(app, /Загрузите документ\.<br \/>/)
 })
 
+test('empty workspace fits the desktop viewport without page scrolling', () => {
+  assert.match(app, /workspace-empty/)
+  assert.match(styles, /\.workspace\.workspace-empty\s*\{[^}]*overflow:\s*hidden/)
+  assert.match(styles, /\.empty-workspace\s*\{[^}]*height:\s*100%[^}]*min-height:\s*0/)
+  assert.match(styles, /\.dropzone\s*\{[^}]*min-height:\s*clamp\(/)
+})
+
 test('chat markdown renders GFM safely and keeps citation actions interactive', () => {
   assert.match(chatMarkdown, /remarkPlugins=\{\[remarkGfm, remarkCitations\]\}/)
   assert.match(chatMarkdown, /rehypePlugins=\{\[rehypeSanitize\]\}/)

@@ -845,7 +845,7 @@ function App() {
         </div>
       </aside>
 
-      <main id="main-content" tabIndex={-1} className={`workspace ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
+      <main id="main-content" tabIndex={-1} className={`workspace ${!selectedId || !visibleStatus ? 'workspace-empty' : ''} ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
         <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} aria-label="Выберите документ" onChange={(event) => void uploadFile(event.target.files?.[0])} />
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
 
