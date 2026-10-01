@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api import router
+from app.config import settings
 from app.database import engine
 from app.services.codex import CodexService
 from app.services.processing import DocumentProcessor
@@ -41,10 +42,7 @@ async def protect_local_writes(request: Request, call_next):
         origin = request.headers.get("origin")
         if origin:
             parsed = urlsplit(origin)
-            allowed = {
-                "http://localhost:5173",
-                "http://127.0.0.1:5173",
-            }
+            allowed = set(settings.local_ui_origins)
             if f"{parsed.scheme}://{parsed.netloc}" not in allowed:
                 return JSONResponse(status_code=403, content={"detail": "Запрос разрешён только из локального интерфейса."})
     return await call_next(request)

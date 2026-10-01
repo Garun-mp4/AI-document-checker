@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     codex_home: str = "./data/codex"
     codex_model: str = "gpt-6-luna"
     codex_reasoning_effort: str = "medium"
+    local_ui_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     max_upload_bytes: int = 25 * 1024 * 1024
     model_context_chars: int = 42_000
     markdown_max_chars: int = 5_000_000

@@ -13,7 +13,11 @@ from app.services.embeddings import EmbeddingConfigurationError
 from app.services.markdown_mapping import MappedMarkdownBlock
 from app.services.markitdown_service import MarkdownConversionError, MarkdownResult
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
-from app.services.processing import DocumentProcessor, _computed_blocks, _ocr_analysis_blocks
+from app.services.processing import (
+    DocumentProcessor,
+    _computed_blocks,
+    _ocr_analysis_blocks,
+)
 
 
 def test_computed_blocks_adds_table_summary_and_numeric_columns() -> None:
@@ -186,12 +190,17 @@ def _processing_document(tmp_path: Path):
     return document_id, path, document
 
 
+@pytest.mark.parametrize("file_type", ["txt", "md"])
 def test_process_persists_markdown_mapping_and_indexes_markdown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_type: str,
 ) -> None:
     document_id, _path, document = _processing_document(tmp_path)
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
+    original = upload_dir / f"{document_id}.{file_type}"
+    original.write_bytes("Автор: Алексей Пример".encode("cp1251"))
+    document.storage_path = str(original)
+    document.file_type = file_type
     monkeypatch.setattr(processing.settings, "upload_dir", str(upload_dir))
     native = SourceBlock("Original text", {"kind": "txt", "label": "Строка 1", "line_start": 1})
     parsed = ParsedDocument("txt", [native], {"line_count": 1})
@@ -219,6 +228,8 @@ def test_process_persists_markdown_mapping_and_indexes_markdown(
     assert document.status == "indexing"
     assert document.markdown_status == "ready"
     assert document.analysis_source == "markitdown"
+    assert original.read_bytes() == "Автор: Алексей Пример".encode("cp1251")
+    assert Path(document.markdown_path) != original
     assert document.markdown_path and Path(document.markdown_path).read_text(encoding="utf-8") == "# Report\n\nOriginal text\n"
     assert document.markdown_line_count == 3
     assert document.markdown_char_count == len("# Report\n\nOriginal text\n")
@@ -228,12 +239,17 @@ def test_process_persists_markdown_mapping_and_indexes_markdown(
     assert sessions[3].added[0].document_id == document_id
 
 
+@pytest.mark.parametrize("file_type", ["txt", "md"])
 def test_process_falls_back_to_native_sources_when_markdown_conversion_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_type: str,
 ) -> None:
     document_id, _path, document = _processing_document(tmp_path)
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
+    original = upload_dir / f"{document_id}.{file_type}"
+    original.write_bytes(b"unchanged original")
+    document.storage_path = str(original)
+    document.file_type = file_type
     monkeypatch.setattr(processing.settings, "upload_dir", str(upload_dir))
     native = SourceBlock("Native source", {"kind": "txt", "label": "Строка 1", "line_start": 1})
     parsed = ParsedDocument("txt", [native], {"line_count": 1})
@@ -250,6 +266,7 @@ def test_process_falls_back_to_native_sources_when_markdown_conversion_fails(
     asyncio.run(processor._process(document_id))
 
     assert document.markdown_status == "fallback"
+    assert original.read_bytes() == b"unchanged original"
     assert document.analysis_source == "native_fallback"
     assert document.markdown_error == "conversion failed"
     assert document.markdown_path is None

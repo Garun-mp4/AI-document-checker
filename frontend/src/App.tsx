@@ -324,7 +324,7 @@ function App() {
       return
     }
     let active = true
-    let loaded = false
+    let loadedVersion: string | null = null
     setDocument(null)
     setInsights([])
     setDocumentPreview(null)
@@ -340,8 +340,10 @@ function App() {
         if (!active) return
         setDocument(result)
         updateDocumentInLibrary(result)
-        if (result.status === 'ready' && !loaded) {
-          loaded = true
+        // A rebuild can finish between two polls. Reload derived data when
+        // its persisted document version changes, even if both polls see ready.
+        if (result.status === 'ready' && loadedVersion !== result.updated_at) {
+          loadedVersion = result.updated_at
           await loadReadyData(selectedId)
         }
       } catch (error) {

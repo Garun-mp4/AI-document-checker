@@ -1,0 +1,63 @@
+# Воспроизводимая приёмка M01
+
+## Требования и запуск
+
+Запущенный Docker Engine, Compose v2 с поддержкой `!override`, Node.js 22, Python 3.12 и PowerShell. На Windows запуск/восстановление Docker Desktop выполняется по процедуре хоста; скрипт тестов не перезапускает Desktop.
+
+Из корня проекта:
+
+```powershell
+py -3.12 -m venv backend/.venv
+backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt -r backend/requirements-test.txt
+pwsh -File scripts/test-e2e.ps1
+```
+
+Команда генерирует 37 синтетических файлов, запускает backend unit с coverage, frontend contracts/build, production Compose `document-checker-e2e` на **5174**, Chromium E2E и семь API-интеграционных тестов. У проекта собственные PostgreSQL, оригиналы, Markdown, preferences и embeddings volumes. Скрипт очищает только volumes этого явно названного тестового проекта перед/после прогона. Рабочий проект на 5173 не затрагивается.
+
+`-KeepRunning` оставляет окружение для диагностики; следующий запуск всё равно начинает с чистой тестовой базы. Первый запуск скачивает Chromium и локальную multilingual embedding model. OCR работает настоящими Poppler/Tesseract rus+eng. Текст документов не передаётся в облако.
+
+Тестовый Codex существует только в исключённом из production-образа каталоге `backend/tests/e2e_support`; штатный entrypoint его не импортирует. Подменён только облачный провайдер. Парсеры, MarkItDown, embeddings, OCR, БД, сохранение сообщений и renderer настоящие. Fault-сценарии отдельно подменяют один вызов конвертации или браузерный fetch. Synthetic answers проверяют механику, а не интеллект Codex.
+
+`LOCAL_UI_ORIGINS` задаёт точный JSON-список разрешённых origins; production default остаётся localhost/127.0.0.1:5173, изолированный E2E разрешает только 5174.
+
+Unit и integration запускаются раздельно (`-m "not integration"` / `-m integration`), поэтому полная приёмка не скрывает отсутствие Compose через skip. Интеграционные тесты выполняются с disconnected provider, браузерные — с ready provider. В E2E нет ретраев и `test.skip`, состояние ожидается по API/DOM; stream gate открывается после проверки промежуточного ответа.
+
+## Артефакты и отдельные сценарии
+
+- `frontend/playwright-report`: HTML-report.
+- `frontend/test-results`: JUnit, шесть screenshots responsive-состояний, browser-log attachments; screenshot/video/trace каждого сбоя.
+- `e2e-artifacts/compose.log`: логи только test stack.
+- `e2e-artifacts/backend-coverage.json`: backend unit coverage.
+
+Файлы генерируются локально, не коммитятся. После оставленного test stack:
+
+```powershell
+cd frontend
+npm run test:e2e -- -g "pdf: upload"
+npx playwright show-report
+# При сбое подставьте реальный путь из сообщения теста:
+npx playwright show-trace test-results/<failed-test>/trace.zip
+```
+
+В `compose.e2e.yml` фиксированы project services и loopback port. Не перенаправляйте эти тесты на рабочую библиотеку. Тест истории перезапускает только `document-checker-e2e` api/db/web. Cleanup:
+
+```powershell
+docker compose -p document-checker-e2e -f compose.e2e.yml down -v --remove-orphans
+```
+
+## Явно включаемый live Codex
+
+Проверка исключена из обычного E2E. В Codex передаются только сгенерированный `sample.txt` (вымышленный проект, Алексей/Мария Пример, дата 2026-11-30) и вопрос «Кто автор документа?». Не подключайте рабочую библиотеку или рабочий auth volume.
+
+```powershell
+docker compose -p document-checker-e2e-live -f compose.e2e.yml -f compose.e2e-live.yml up --build -d --wait
+# Откройте http://localhost:5175 и подключите Codex через UI отдельного проекта.
+$env:E2E_LIVE_CODEX_ACK = 'send-synthetic-document-to-cloud'
+cd frontend
+npm run test:e2e:live
+cd ..
+Remove-Item Env:E2E_LIVE_CODEX_ACK
+docker compose -p document-checker-e2e-live -f compose.e2e.yml -f compose.e2e-live.yml down -v
+```
+
+Без ACK конфигурация отказывает в запуске. Без входа/подходящей модели тест падает, а не пропускается. Он проверяет отсутствие test-provider endpoint, семь ответов, имя автора и citations; синтетический документ удаляется в `finally`. Обычная локальная приёмка не требует live Codex и не заявляет, что он был проверен.

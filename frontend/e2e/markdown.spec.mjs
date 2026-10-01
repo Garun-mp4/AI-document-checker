@@ -1,0 +1,23 @@
+import { test, expect, provider, upload, originalVisible } from './helpers.mjs'
+
+test('Conversion fault uses native fallback; rebuilding preserves the document and chat', async ({ page, request }) => {
+  await provider(request, { markdown_failure: true })
+  const doc = await upload(page, 'sample.txt')
+  const state = await (await request.get(`/api/v1/documents/${doc.id}`)).json()
+  expect(state.markdown_status).toBe('fallback')
+  expect(state.analysis_source).toBe('native_fallback')
+  await originalVisible(page, 'text')
+  const before = (await (await request.get('/api/v1/chats')).json()).find(item => item.document_id === doc.id)
+  await page.getByRole('tab', { name: 'Markdown', exact: true }).click()
+  await expect(page.locator('.markdown-empty')).toContainText('Анализ построен резервным способом')
+  await provider(request)
+  await page.getByRole('button', { name: 'Создать Markdown', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(`/api/v1/documents/${doc.id}`)).json()).markdown_status, { timeout: 90_000 }).toBe('ready')
+  await expect(page.locator('.insight-card')).toHaveCount(7)
+  await expect(page.getByRole('link', { name: 'Скачать .md', exact: true })).toBeVisible()
+  await page.getByRole('tab', { name: 'Markdown', exact: true }).click()
+  await expect(page.locator('.markdown-viewer')).toContainText('Алексей')
+  const after = (await (await request.get('/api/v1/chats')).json()).find(item => item.document_id === doc.id)
+  expect(after.id).toBe(before.id)
+  expect((await request.get(`/api/v1/documents/${doc.id}/file`)).ok()).toBeTruthy()
+})

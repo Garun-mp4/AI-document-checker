@@ -62,6 +62,30 @@ def _best_sources(text: str, native_blocks: list[SourceBlock], used: set[int]) -
         source = _plain(block.text)
         if source and (candidate in source or source in candidate):
             exact.append(index)
+            continue
+        if block.locator.get("kind") == "xml":
+            # The native parser appends XML attributes as (key=value), while
+            # MarkItDown preserves them in the opening tag, before node text.
+            node_text = _plain(re.sub(r"\s+\([^()]*=[^()]*\)$", "", block.text))
+            if node_text and node_text in candidate:
+                exact.append(index)
+                continue
+        if block.locator.get("kind") in {"xlsx", "xls"} and block.locator.get("columns"):
+            # Native spreadsheet rows include column labels; Markdown tables
+            # put those labels in the header. Compare the row's ordered cell
+            # values, accounting for xlrd's 10.0 vs Markdown's 10 formatting.
+            cells = block.text.split(" | ")
+            values = []
+            for cell in cells:
+                for column in block.locator["columns"]:
+                    prefix = f"{column}: "
+                    if cell.startswith(prefix):
+                        values.append(cell[len(prefix):])
+                        break
+            row = _plain(" | ".join(values))
+            normalize_numbers = lambda value: re.sub(r"(?<![\w.])(\d+)\.0+(?![\w.])", r"\1", value)
+            if row and normalize_numbers(row) in normalize_numbers(candidate):
+                exact.append(index)
     if exact:
         return exact[:4], "exact"
     scored: list[tuple[float, int]] = []
@@ -91,6 +115,11 @@ def map_markdown(markdown: str, native_blocks: list[SourceBlock]) -> tuple[list[
         source_locators = [native_blocks[index].locator for index in source_indices]
         source_text = "\n\n".join(native_blocks[index].text for index in source_indices)
         primary = dict(native_blocks[source_indices[0]].locator) if source_indices else {}
+        if source_locators and primary.get("kind") in {"xlsx", "xls"}:
+            same_sheet = all(item.get("sheet") == primary.get("sheet") for item in source_locators)
+            if same_sheet:
+                primary["row_start"] = min(item["row_start"] for item in source_locators)
+                primary["row_end"] = max(item["row_end"] for item in source_locators)
         locator = primary
         locator.update({
             "kind": primary.get("kind", "markdown"),

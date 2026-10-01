@@ -8,7 +8,7 @@ import pytest
 from app.config import settings
 from app.services.markdown_mapping import map_markdown
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
-from app.services.parsing import SourceBlock
+from app.services.parsing import SourceBlock, parse_document
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SUPPORTED_FIXTURES = [
@@ -119,3 +119,33 @@ def test_mapping_reports_no_match_without_fabricating_source() -> None:
     assert mapped[0].confidence == "none"
     assert mapped[0].locator.get("source_text") is None
     assert sidecar["quality"]["none"] == 1
+
+
+def test_xml_mapping_keeps_nodes_with_attribute_annotations(tmp_path: Path) -> None:
+    content = (FIXTURES / "sample.xml").read_bytes()
+    original = tmp_path / "sample.xml"
+    original.write_bytes(content)
+    native = parse_document(original.name, content)
+    markdown = MarkItDownService(tmp_path).convert_local(original).markdown
+    mapped, _ = map_markdown(markdown, native.blocks)
+    sources = "\n".join(block.locator.get("source_text", "") for block in mapped)
+    assert "Алексей Пример" in sources
+    assert "Проверка (due=2026-11-30)" in sources
+    paths = {locator["path"] for block in mapped for locator in block.locator.get("source_locators", [])}
+    assert paths == {block.locator["path"] for block in native.blocks}
+
+
+@pytest.mark.parametrize("filename", ["sample.xlsx", "sample.xls"])
+def test_spreadsheet_markdown_maps_both_rows_despite_numeric_formatting(filename, tmp_path):
+    content = (FIXTURES / filename).read_bytes()
+    original = tmp_path / filename
+    original.write_bytes(content)
+    native = parse_document(filename, content)
+    markdown = MarkItDownService(tmp_path).convert_local(original).markdown
+    mapped, _ = map_markdown(markdown, native.blocks)
+    sources = "\n".join(block.locator.get("source_text", "") for block in mapped)
+    assert "Альфа" in sources
+    assert "Бета" in sources
+    rows = {locator["row_start"] for block in mapped for locator in block.locator.get("source_locators", [])}
+    assert {2, 3} <= rows
+    assert any(block.locator.get("row_start") == 2 and block.locator.get("row_end") == 3 for block in mapped)

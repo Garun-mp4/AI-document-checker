@@ -1,0 +1,53 @@
+# Standalone test project. No production volumes, auth or host virtualenv.
+services:
+  db:
+    image: pgvector/pgvector:0.8.6-pg17
+    environment:
+      POSTGRES_DB: e2e
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: synthetic-test-only
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U e2e -d e2e"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  api:
+    build: ./backend
+    command: [sh, -c, "alembic upgrade head && uvicorn e2e_app:app --host 0.0.0.0 --port 8000"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://e2e:synthetic-test-only@db:5432/e2e
+      PYTHONPATH: /test_support:/app
+      LOCAL_UI_ORIGINS: '["http://localhost:5174","http://127.0.0.1:5174"]'
+      CODEX_HOME: /data/codex
+      UPLOAD_DIR: /data/uploads
+      EMBEDDING_CACHE_DIR: /data/embeddings
+      HF_HOME: /data/embeddings/huggingface
+      OCR_ENABLED: 'true'
+      OCR_LANGUAGES: rus+eng
+    volumes:
+      - ./backend/tests/e2e_support:/test_support:ro
+      - documents:/data/uploads
+      - preferences:/data/codex
+      - embeddings:/data/embeddings
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+  web:
+    build: ./frontend
+    ports: ['127.0.0.1:5174:80']
+    depends_on:
+      api:
+        condition: service_healthy
+volumes:
+  database:
+  documents:
+  preferences:
+  embeddings:

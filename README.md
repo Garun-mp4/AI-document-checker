@@ -74,18 +74,12 @@ Backend-тесты покрывают парсеры и карту источн�
 unit-тестов backend; API-эндпоинты и полный пользовательский поток дополнительно проверяются
 Compose-интеграционными тестами ниже.
 
-Для проверки полного API-потока используйте отдельный Compose-проект. Его PostgreSQL, файлы, авторизация Codex и кэш эмбеддингов изолированы от рабочего приложения. Уникальный проект без входа Codex позволяет проверить извлечение текста и локальную индексацию, не отправляя тестовые документы облачной модели:
+Полная приёмка M01 запускает unit/contract/build, браузерные E2E и API-интеграционные тесты в отдельном Compose-проекте на 5174. Рабочая библиотека, volumes и аккаунт Codex не используются. Первое скачивание Chromium и локальной модели embeddings требует интернета; синтетические документы не отправляются в облако.
 
 ```powershell
-$env:WEB_PORT = "5174"
-docker compose -p document-checker-integration up --build -d
-cd backend
-$env:AI_CHECKER_BASE_URL = "http://localhost:5174"
-python -m pytest -q -m integration
-cd ..
-docker compose -p document-checker-integration down -v
-Remove-Item Env:WEB_PORT
-Remove-Item Env:AI_CHECKER_BASE_URL
+py -3.12 -m venv backend/.venv
+backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt -r backend/requirements-test.txt
+pwsh -File scripts/test-e2e.ps1
 ```
 
-Набор создаёт синтетические документы всех поддерживаемых форматов, проверяет MarkItDown, карту соответствий Markdown → оригинал, fallback, ссылки на источники, индексацию, API-предпросмотр, таблицы, CSV-агрегаты, скачивание Markdown и безопасность путей. Отдельные unit-тесты проверяют якоря, соотношение сторон, табличные строки, расчётные блоки и миграцию артефактов. Интеграционные тесты также проверяют контракт статуса Codex. Обычный `pytest -q` оставляет Compose-тесты пропущенными, если `AI_CHECKER_BASE_URL` не задан.
+Подробности запуска, диагностика и отдельная opt-in проверка живого Codex: [docs/E2E_TESTING.md](docs/E2E_TESTING.md). Покрытие требований и ограничения: [docs/M01_ACCEPTANCE_MATRIX.md](docs/M01_ACCEPTANCE_MATRIX.md). Фактические результаты: [TESTING_REPORT.md](TESTING_REPORT.md).

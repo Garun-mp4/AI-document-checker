@@ -18,3 +18,8 @@ Thumbs.db
 .DS_Store
 .idea/
 .vscode/
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/fixtures/
+e2e-artifacts/
+.playwright-cli/

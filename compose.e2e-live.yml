@@ -1,0 +1,10 @@
+# Use with compose.e2e.yml and project document-checker-e2e-live only.
+# Sign in through localhost:5175. No production auth volume is reused.
+services:
+  api:
+    command: [sh, -c, "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    environment:
+      PYTHONPATH: /app
+      LOCAL_UI_ORIGINS: '["http://localhost:5175","http://127.0.0.1:5175"]'
+  web:
+    ports: !override ['127.0.0.1:5175:80']

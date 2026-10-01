@@ -38,6 +38,18 @@ function normalizedIncludes(value: string, query: string): boolean {
   return value.replace(/\s+/g, ' ').toLocaleLowerCase().includes(query.replace(/\s+/g, ' ').toLocaleLowerCase())
 }
 
+function textSourceQueries(preview: DocumentPreview, source: ViewerSource | null): string[] {
+  // XML/JSON Markdown blocks can link several separate values. Their combined
+  // source_text is not contiguous in the original (tags/keys remain visible).
+  if (['xml', 'json'].includes(preview.renderer) && source) {
+    return source.text.split(/\n+/).map((part) => {
+      const value = part.trim()
+      return preview.renderer === 'xml' ? value.replace(/\s+\([^()]*=[^()]*\)$/, '') : value
+    }).filter(Boolean)
+  }
+  return [sourceQuery(source)].filter(Boolean)
+}
+
 function scrollIntoViewRespectingMotion(target: Element | null | undefined, block: ScrollLogicalPosition = 'center') {
   if (!target) return
   const reduceMotion = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -103,7 +115,7 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
 
   useEffect(() => {
     if (!text || !selectedSource || !linesRef.current) return
-    const query = sourceQuery(selectedSource)
+    const queries = textSourceQueries(preview, selectedSource)
     const lineStart = typeof selectedSource.locator.line_start === 'number' ? selectedSource.locator.line_start : null
     const lineEnd = typeof selectedSource.locator.line_end === 'number' ? selectedSource.locator.line_end : lineStart
     const nodes = Array.from(linesRef.current.querySelectorAll<HTMLElement>('[data-line]'))
@@ -113,16 +125,16 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
       const line = node.textContent || ''
       const number = Number(node.dataset.line)
       const inRange = lineStart !== null && number >= lineStart && number <= (lineEnd ?? lineStart)
-      if (normalizedIncludes(line, query)) { exact = true; target ??= node }
+      if (queries.some((query) => normalizedIncludes(line, query))) { exact = true; target ??= node }
       if (!target && inRange) target = node
     }
     onMatch(exact)
     scrollIntoViewRespectingMotion(target)
-  }, [text, selectedSource, onMatch])
+  }, [text, selectedSource, onMatch, preview.renderer])
 
   if (error) return <div className="preview-inline-error">{error}</div>
   if (text === null) return <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю оригинальный текст…</div>
-  const query = sourceQuery(selectedSource)
+  const queries = textSourceQueries(preview, selectedSource)
   const lineStart = typeof selectedSource?.locator.line_start === 'number' ? selectedSource.locator.line_start : null
   const lineEnd = typeof selectedSource?.locator.line_end === 'number' ? selectedSource.locator.line_end : lineStart
   const lines = text.split(/\r?\n/)
@@ -131,7 +143,7 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
       {lines.map((line, index) => {
         const number = index + 1
         const inRange = lineStart !== null && number >= lineStart && number <= (lineEnd ?? lineStart)
-        const match = query && normalizedIncludes(line, query)
+        const match = queries.some((query) => normalizedIncludes(line, query))
         return <div className={`source-text-line ${inRange ? 'source-line-range' : ''}`} data-line={number} key={number}>
           <span className="source-line-number">{number}</span>
           <code>{match ? <mark>{line || ' '}</mark> : inRange && selectedSource ? <mark>{line || ' '}</mark> : line || ' '}</code>

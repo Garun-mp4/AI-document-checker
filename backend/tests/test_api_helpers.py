@@ -131,3 +131,16 @@ def test_local_write_middleware_allows_local_origin_and_read_requests() -> None:
     assert asyncio.run(protect_local_writes(local, call_next)).status_code == 200
     assert asyncio.run(protect_local_writes(read, call_next)).status_code == 200
     assert calls == [local, read]
+
+
+def test_local_write_origins_can_isolate_an_explicit_test_port(monkeypatch) -> None:
+    from app.config import settings
+    monkeypatch.setattr(settings, "local_ui_origins", ["http://localhost:5174"])
+
+    async def call_next(request):
+        return PlainTextResponse("ok")
+
+    for origin, status in [("http://localhost:5174", 200), ("http://localhost:5173", 403),
+                           ("https://evil.example", 403)]:
+        request = SimpleNamespace(method="POST", headers={"origin": origin})
+        assert asyncio.run(protect_local_writes(request, call_next)).status_code == status

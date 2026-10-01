@@ -184,7 +184,10 @@ class DocumentProcessor:
 
             content = await asyncio.to_thread(path.read_bytes)
             parsed = await asyncio.to_thread(parse_document, filename, content)
-            markdown_path = Path(settings.upload_dir).resolve() / f"{document_id}.md"
+            # The original Markdown upload is already named <id>.md. Use a
+            # separate artifact name so conversion/fallback cannot overwrite
+            # or unlink the immutable original (including its encoding).
+            markdown_path = Path(settings.upload_dir).resolve() / f"{document_id}.markdown.md"
             markdown_map_path = Path(settings.upload_dir).resolve() / f"{document_id}.map.json"
             analysis_blocks: list[tuple[str, dict[str, object], str, int | None, int | None, int | None, int | None, str | None]] = []
             markdown_status = "fallback"
