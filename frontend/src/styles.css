@@ -375,6 +375,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .preview-source-callout p { max-height: 66px; margin: 6px 0 0; overflow: auto; color: var(--ink-soft); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-reprocess-button { display: inline-flex; width: fit-content; min-height: 30px; align-items: center; gap: 6px; margin-top: 8px; padding: 0 10px; font-size: 11px; }
 .preview-source-callout small { display: block; margin-top: 6px; color: var(--ink-tertiary); font-size: 11px; }
+.source-calculation-input { color: var(--ink-secondary) !important; font-weight: 600; }
 .original-text-viewer { min-width: max-content; padding: 12px 0; background: #fff; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .source-text-line { display: grid; grid-template-columns: 46px minmax(0, 1fr); min-height: 22px; padding: 0 14px 0 0; }
 .source-text-line:hover { background: #f6f6f6; }
@@ -389,7 +390,9 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .pdf-ocr-highlight-box { position: absolute; min-width: 1px; min-height: 1px; border-radius: 2px; background: rgb(190 190 190 / 72%); }
 .pdf-text-layer { position: absolute; z-index: 2; inset: 0; overflow: hidden; user-select: text; }
 .pdf-text-layer span { position: absolute; display: block; overflow: hidden; color: transparent; font-family: sans-serif; line-height: 1; white-space: pre; transform-origin: left top; }
-.pdf-text-layer .pdf-text-match { border-radius: 2px; background: rgb(190 190 190 / 72%); }
+.pdf-text-layer .pdf-text-match { border-radius: 2px; }
+.pdf-text-layer .pdf-text-highlight-fallback { background: rgb(190 190 190 / 72%); }
+::highlight(document-source-range) { background: rgb(190 190 190 / 78%); color: transparent; }
 .pdf-native-fallback { display: flex; min-height: 100%; flex-direction: column; gap: 8px; background: #525252; }
 .pdf-native-fallback-note { display: flex; align-items: baseline; gap: 8px; padding: 9px 12px; background: #fff; color: var(--ink-secondary); font-size: 11px; line-height: 1.4; }
 .pdf-native-fallback-note strong { color: var(--ink); font-size: 12px; }
@@ -399,8 +402,11 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .docx-render-host { min-height: 100%; }
 .docx-original-viewer .docx-wrapper { min-height: 100%; padding: 18px !important; background: #eeeeee !important; }
 .docx-original-viewer .docx-wrapper > section { margin: 0 auto 18px; box-shadow: 0 7px 20px rgb(0 0 0 / 8%); }
-.docx-original-viewer .source-match { outline: 3px solid #bdbdbd; outline-offset: 2px; background: #f0f0f0 !important; scroll-margin: 24px; }
+.docx-original-viewer .source-match { outline: 2px solid #bdbdbd; outline-offset: 2px; scroll-margin: 24px; }
 .csv-original-viewer { min-width: 0; background: #fff; }
+.csv-sheet-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); color: var(--ink-tertiary); font-size: 11px; }
+.csv-sheet-toolbar select { min-width: 120px; max-width: min(280px, 70%); min-height: 30px; padding: 4px 28px 4px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.csv-sheet-toolbar select:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .csv-table-scroll { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; }
 .original-csv-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; color: #303030; font-size: 12px; }
 .original-csv-table th, .original-csv-table td { max-width: 360px; padding: 8px 10px; border-right: 1px solid #e2e2e2; border-bottom: 1px solid #e2e2e2; vertical-align: top; line-height: 1.45; overflow-wrap: anywhere; }
@@ -409,6 +415,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .original-csv-table th:first-child { z-index: 3; background: #ededed; }
 .original-csv-table .source-row-match td { background: #e9e9e9; }
 .original-csv-table .source-row-match td:first-child { background: #dcdcdc; color: var(--ink); }
+.original-csv-table td.source-cell-match { background: #d5d5d5; color: var(--ink); font-weight: 600; }
 .csv-table-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-top: 1px solid var(--line-soft); color: var(--ink-tertiary); font-size: 11px; }
 .csv-table-footer .button { min-height: 29px; padding: 0 11px; font-size: 11px; }
 .source-map-original-viewer { min-height: 100%; padding: 18px 22px; background: #fff; }

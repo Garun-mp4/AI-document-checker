@@ -102,7 +102,10 @@ def execute(payload: dict, progress_callback=None):
         from app.services.preview import read_csv_table, read_spreadsheet_table
         if payload['file_type'] == 'csv':
             return read_csv_table(data, offset=payload['offset'], limit=payload['limit'])
-        return read_spreadsheet_table(data, payload['file_type'], offset=payload['offset'], limit=payload['limit'])
+        return read_spreadsheet_table(
+            data, payload['file_type'], offset=payload['offset'], limit=payload['limit'],
+            sheet=payload.get('sheet'),
+        )
     raise ValueError('Unknown worker operation')
 
 

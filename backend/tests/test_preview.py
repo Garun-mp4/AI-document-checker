@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from openpyxl import Workbook
 
-from app.services.preview import build_preview, read_csv_table
+from app.services.parsing import DocumentParsingError
+from app.services.preview import build_preview, read_csv_table, read_spreadsheet_table
 
 
 def chunk(text: str, locator: dict, ordinal: int = 0, *, derived: bool = False) -> SimpleNamespace:
@@ -54,7 +57,14 @@ def test_preview_keeps_source_anchor_for_every_supported_format(
     assert preview["layout"] == layout
     assert preview["blocks"][0]["kind"] == kind
     assert preview["blocks"][0]["source_id"] == str(source.id)
-    assert preview["blocks"][0]["locator"] == source.locator
+    locator = preview["blocks"][0]["locator"]
+    assert {key: locator[key] for key in source.locator} == source.locator
+    assert locator["locator_version"] == 1
+    assert locator["document_id"] == "document-1"
+    assert locator["processing_version"] == 1
+    assert locator["source_type"]
+    assert locator["source_range"]["coordinate_space"]
+    assert {key: value for key, value in locator["source_range"].items() if key != "coordinate_space"} == {}
     assert preview["aspect_ratio"] > 0
     assert preview["total_blocks"] == 1
     assert preview["truncated"] is False
@@ -179,3 +189,36 @@ def test_original_csv_table_decodes_cp1251_and_caps_page_size() -> None:
     assert table["columns"] == ["Название", "Значение"]
     assert table["rows"][0]["cells"] == ["Тест", "готово"]
     assert table["limit"] == 500
+
+
+def test_original_xlsx_table_selects_sheet_and_keeps_physical_row_numbers() -> None:
+    workbook = Workbook()
+    workbook.active.title = "Обзор"
+    workbook.active.append(["Title", "Value"])
+    workbook.active.append(["Overview row", 1])
+    worksheet = workbook.create_sheet("Источники")
+    worksheet.append(["Title", "Value"])
+    worksheet.append(["First", 10])
+    worksheet.append(["Second", 20])
+    worksheet.append(["Third", 30])
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+
+    table = read_spreadsheet_table(stream.getvalue(), "xlsx", sheet="Источники", offset=1, limit=1)
+
+    assert table["sheet"] == "Источники"
+    assert table["available_sheets"] == ["Обзор", "Источники"]
+    assert table["rows"] == [{"number": 3, "cells": ["Second", "20"]}]
+    assert table["total_rows"] == 3
+
+
+def test_original_xlsx_table_rejects_unknown_sheet() -> None:
+    workbook = Workbook()
+    workbook.active.append(["Value"])
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+
+    with pytest.raises(DocumentParsingError, match="лист книги не найден"):
+        read_spreadsheet_table(stream.getvalue(), "xlsx", sheet="Missing")

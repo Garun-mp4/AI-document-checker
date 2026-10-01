@@ -1,4 +1,4 @@
-import { test, expect, upload, provider, originalVisible } from './helpers.mjs'
+import { test, expect, upload, provider, originalVisible, showChat } from './helpers.mjs'
 
 test.beforeEach(async ({ request }) => provider(request))
 
@@ -14,6 +14,13 @@ for (const [extension, renderer] of Object.entries(formats)) {
     const state = await (await page.request.get(`/api/v1/documents/${doc.id}`)).json()
     expect(state.chunk_count).toBeGreaterThan(0)
     expect(state.markdown_status).toBe('ready')
+    const preview = await (await page.request.get(`/api/v1/documents/${doc.id}/preview`)).json()
+    expect(preview.blocks[0].locator).toMatchObject({
+      locator_version: 1,
+      document_id: doc.id,
+      processing_version: state.active_version,
+    })
+    expect(preview.blocks[0].locator.source_range.coordinate_space).toBeTruthy()
     const citation = page.locator('.citation-chip').first()
     await expect(citation).toBeVisible()
     await citation.click()
@@ -84,6 +91,65 @@ test('CSV aggregates and actual row pagination', async ({ page }) => {
   await page.getByRole('button', { name: 'Показать ещё', exact: true }).click()
   await expect(page.locator('.original-csv-table tbody tr')).toHaveCount(240)
   await expect(page.getByRole('button', { name: 'Показать ещё', exact: true })).toHaveCount(0)
+})
+
+test('Citation loads and highlights a matching CSV range beyond the first table page', async ({ page }) => {
+  const doc = await upload(page, 'large.csv')
+  const seeded = await page.request.post('/api/v1/__e2e/citation', { data: { document_id: doc.id, row: 238 } })
+  expect(seeded.ok()).toBeTruthy()
+  await page.reload()
+  await showChat(page)
+  const citation = page.locator('.assistant-message .inline-citation').last()
+  await expect(citation).toBeVisible()
+  await citation.click()
+
+  await expect(page.locator('.preview-source-callout')).toContainText('Проект 237')
+  const matchingRow = page.locator('.original-csv-table tbody tr.source-row-match').filter({ hasText: 'Проект 237' })
+  await expect(matchingRow).toBeVisible()
+  const rowNumber = Number(await matchingRow.locator('.csv-row-number').textContent())
+  expect(rowNumber).toBeGreaterThan(101)
+  await expect(page.locator('.preview-source-callout')).toContainText('Найден и подсвечен')
+})
+
+for (const extension of ['xlsx', 'xls']) {
+  test(`${extension}: citation switches to its sheet and row`, async ({ page }) => {
+    const doc = await upload(page, `multisheet.${extension}`)
+    const seeded = await page.request.post('/api/v1/__e2e/citation', {
+      data: { document_id: doc.id, row: 2, sheet: extension === 'xlsx' ? 'Второй лист' : 'Второй' },
+    })
+    expect(seeded.ok()).toBeTruthy()
+    await page.reload()
+    await showChat(page)
+    const citation = page.locator('.assistant-message .inline-citation').last()
+    await expect(citation).toBeVisible()
+    await citation.click()
+
+    const sheet = page.getByRole('combobox', { name: 'Лист исходного файла' })
+    await expect(sheet).toHaveValue(extension === 'xlsx' ? 'Второй лист' : 'Второй')
+    await expect(page.locator('.original-csv-table tbody tr[data-row-number="2"]')).toContainText('Сигма')
+    await expect(page.locator('.preview-source-callout')).toContainText('Найден и подсвечен')
+  })
+}
+
+test('Mobile citation opens the viewer and keeps the source range in view', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await upload(page, 'sample.txt')
+  await page.locator('.citation-chip').first().click()
+  const viewer = page.locator('#document-original-viewer')
+  await expect(viewer.locator('.original-text-viewer mark').first()).toBeVisible()
+  const measure = () => page.evaluate(() => {
+    const viewer = document.querySelector('#document-original-viewer')
+    const mark = viewer?.querySelector('.original-text-viewer mark')
+    if (!viewer || !mark) return null
+    const outer = viewer.getBoundingClientRect()
+    const target = mark.getBoundingClientRect()
+    return { outerVisible: outer.bottom > 0 && outer.top < innerHeight, targetVisible: target.bottom > 0 && target.top < innerHeight, documentWidth: document.documentElement.scrollWidth }
+  })
+  await expect.poll(measure, { timeout: 5_000 }).toMatchObject({ outerVisible: true, targetVisible: true })
+  const geometry = await measure()
+  expect(geometry?.outerVisible).toBeTruthy()
+  expect(geometry?.targetVisible).toBeTruthy()
+  expect(geometry?.documentWidth).toBeLessThanOrEqual(390)
 })
 
 test('Real local Russian OCR → page canvas → source citation', async ({ page }) => {

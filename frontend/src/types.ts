@@ -140,6 +140,8 @@ export interface TablePreview {
   offset: number
   limit: number
   total_rows: number
+  sheet: string | null
+  available_sheets: string[]
 }
 
 export interface Insight {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BookOpen, ChevronDown, LoaderCircle, Settings2, TriangleAlert, X } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 import * as pdfjsLib from 'pdfjs-dist'
@@ -56,9 +56,124 @@ interface OriginalDocumentViewerProps {
 
 function sourceQuery(source: ViewerSource | null): string {
   if (!source) return ''
-  const value = source.text.replace(/\s+/g, ' ').trim()
-  if (!value) return ''
-  return value.length > 100 ? value.slice(0, 100).replace(/\s+\S*$/, '') : value
+  return source.text.replace(/\s+/g, ' ').trim()
+}
+
+type MatchQuality = 'exact' | 'approximate' | 'page_only' | 'not_found' | 'calculation'
+
+interface NormalizedRange {
+  start: number
+  end: number
+}
+
+function normalizedRange(text: string, query: string, startHint = 0): NormalizedRange | null {
+  const normalized: string[] = []
+  const starts: number[] = []
+  const ends: number[] = []
+  let inWhitespace = false
+  let offset = 0
+  for (const character of text) {
+    const transformed = character.normalize('NFKC').toLocaleLowerCase()
+    if (/\s/u.test(character) || /\s/u.test(transformed)) {
+      if (normalized.length && !inWhitespace) {
+        normalized.push(' '); starts.push(offset); ends.push(offset + character.length)
+      } else if (normalized.length && inWhitespace) ends[ends.length - 1] = offset + character.length
+      inWhitespace = true
+      offset += character.length
+      continue
+    }
+    inWhitespace = false
+    for (let index = 0; index < transformed.length; index += 1) {
+      const item = transformed[index]
+      normalized.push(item); starts.push(offset); ends.push(offset + character.length)
+    }
+    offset += character.length
+  }
+  const needle = query.normalize('NFKC').toLocaleLowerCase().trim().replace(/\s+/gu, ' ')
+  if (!needle) return null
+  const haystack = normalized.join('')
+  let best: number | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+  let from = 0
+  while (from <= haystack.length - needle.length) {
+    const found = haystack.indexOf(needle, from)
+    if (found < 0) break
+    const distance = Math.abs(starts[found] - startHint)
+    if (distance < bestDistance) { best = found; bestDistance = distance }
+    from = found + 1
+  }
+  return best === null ? null : { start: starts[best], end: ends[best + needle.length - 1] }
+}
+
+function lineOffsetsFor(text: string): number[] {
+  const offsets = [0]
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '\r') {
+      if (text[index + 1] === '\n') index += 1
+      offsets.push(index + 1)
+    } else if (text[index] === '\n') offsets.push(index + 1)
+  }
+  return offsets
+}
+
+function codePointOffsetToUtf16(text: string, codePointOffset: number): number {
+  if (codePointOffset <= 0) return 0
+  let codePoints = 0
+  let utf16Offset = 0
+  for (const character of text) {
+    if (codePoints >= codePointOffset) break
+    codePoints += 1
+    utf16Offset += character.length
+  }
+  return utf16Offset
+}
+
+interface HighlightRegistryLike { set(name: string, value: unknown): void; delete(name: string): boolean }
+interface HighlightConstructorLike { new (...ranges: Range[]): unknown }
+
+function installTextHighlight(name: string, ranges: Range[]): boolean {
+  const registry = (globalThis.CSS as unknown as { highlights?: HighlightRegistryLike } | undefined)?.highlights
+  const HighlightConstructor = (globalThis as typeof globalThis & { Highlight?: HighlightConstructorLike }).Highlight
+  if (!registry || !HighlightConstructor || !ranges.length) return false
+  registry.set(name, new HighlightConstructor(...ranges))
+  return true
+}
+
+function rangesWithinElement(element: HTMLElement, query: string): Range[] {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+  const nodes: Text[] = []
+  let text = ''
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text
+    nodes.push(node)
+    text += node.data
+  }
+  const match = normalizedRange(text, query)
+  if (!match) return []
+  const ranges: Range[] = []
+  let cursor = 0
+  let range: Range | null = null
+  for (const node of nodes) {
+    const nodeStart = cursor
+    const nodeEnd = cursor + node.data.length
+    cursor = nodeEnd
+    const from = Math.max(match.start, nodeStart)
+    const to = Math.min(match.end, nodeEnd)
+    if (to <= from) continue
+    if (!range) range = document.createRange()
+    range.setStart(node, from - nodeStart)
+    range.setEnd(node, to - nodeStart)
+    ranges.push(range)
+    range = null
+  }
+  return ranges
+}
+
+function isCalculation(source: ViewerSource | null): boolean {
+  return Boolean(source && (
+    ('is_derived' in source && source.is_derived) ||
+    source.locator.source_type === 'calculation' || source.locator.derived === true
+  ))
 }
 
 interface PdfOcrWordBox {
@@ -113,6 +228,12 @@ function scrollIntoViewRespectingMotion(target: Element | null | undefined, bloc
   target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block })
 }
 
+function navigateToSource(target: Element | null | undefined) {
+  const viewer = document.getElementById('document-original-viewer')
+  scrollIntoViewRespectingMotion(viewer, 'nearest')
+  window.requestAnimationFrame(() => scrollIntoViewRespectingMotion(target, 'center'))
+}
+
 function locatorLabel(source: ViewerSource): string {
   const label = source.locator.label
   if (typeof label === 'string' && label) return label
@@ -129,17 +250,34 @@ function locatorLabel(source: ViewerSource): string {
   return 'Фрагмент документа'
 }
 
-function SourceCallout({ source, exact, onReprocess, reprocessing = false }: { source: ViewerSource | null; exact: boolean; onReprocess?: () => void; reprocessing?: boolean }) {
+function SourceCallout({ source, quality, activeVersion, onReprocess, reprocessing = false }: { source: ViewerSource | null; quality: MatchQuality; activeVersion: number; onReprocess?: () => void; reprocessing?: boolean }) {
   if (!source) return null
+  const matchQuality = isCalculation(source) ? 'calculation' : quality
   const needsOcrRecovery = source.locator.ocr === true && pdfOcrWordBoxes(source).length === 0
+  const column = typeof source.locator.column === 'string' ? source.locator.column : null
+  const rowStart = typeof source.locator.row_start === 'number' ? source.locator.row_start : null
+  const rowEnd = typeof source.locator.row_end === 'number' ? source.locator.row_end : rowStart
+  const sourceVersion = typeof source.locator.processing_version === 'number' ? source.locator.processing_version : null
+  const isOlderVersion = sourceVersion !== null && activeVersion > 0 && sourceVersion < activeVersion
+  const explanation: Record<MatchQuality, string> = {
+    exact: 'Найден и подсвечен исходный текстовый диапазон.',
+    approximate: source.locator.source_type === 'slide_block' || source.locator.source_type === 'chapter_block'
+      ? 'Показан связанный извлечённый блок. Структурированный просмотр не сохраняет исходное оформление слайда или книги.'
+      : 'Показан соответствующий абзац или исходный блок; точный диапазон недоступен.',
+    page_only: 'Открыта связанная страница, строка или структурированный блок без точной подсветки текста.',
+    not_found: 'Точное место в оригинале не найдено. Ниже показан сохранённый фрагмент источника.',
+    calculation: 'Это локальный расчёт приложения. В оригинале показан исходный диапазон данных, из которого он рассчитан.',
+  }
   return (
     <div className="preview-source-callout" role="status">
-      <div className="preview-source-callout-heading"><BookOpen size={14} /><span>Выбран источник · {locatorLabel(source)}</span></div>
+      <div className="preview-source-callout-heading"><BookOpen size={14} /><span>{matchQuality === 'calculation' ? 'Расчёт приложения' : 'Выбран источник'} · {locatorLabel(source)}</span></div>
       <p>{source.text}</p>
+      {matchQuality === 'calculation' && <small className="source-calculation-input">{column ? `Столбец «${column}»` : 'Область расчёта'}{rowStart !== null ? ` · исходные строки ${rowStart}–${rowEnd}` : ''}</small>}
+      {isOlderVersion && <small>Источник сохранён в версии обработки {sourceVersion}; сейчас активна версия {activeVersion}. Исходная цитата и её координаты сохранены.</small>}
       {needsOcrRecovery
         ? <><small>У этого старого результата OCR сохранена страница, но нет координат точной подсветки. Повторная обработка создаст карту координат.</small>
           {onReprocess && <button className="button button-light preview-reprocess-button" type="button" onClick={onReprocess} disabled={reprocessing}>{reprocessing ? <><LoaderCircle size={14} className="spin" /> Создаю карту координат…</> : 'Создать карту координат'}</button>}</>
-        : !exact && <small>Точное место не найдено, показана ближайшая область.</small>}
+        : <small>{explanation[matchQuality]}</small>}
     </div>
   )
 }
@@ -155,7 +293,7 @@ function RenderError({ preview, originalUrl, message, onRetry }: { preview: Docu
   )
 }
 
-function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onError }: { preview: DocumentPreview; originalUrl: string; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void; onError: (message: string) => void }) {
+function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onError }: { preview: DocumentPreview; originalUrl: string; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void; onError: (message: string) => void }) {
   const [text, setText] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const linesRef = useRef<HTMLDivElement>(null)
@@ -175,22 +313,36 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
   }, [originalUrl, preview.encoding])
 
   useEffect(() => {
-    if (!text || !selectedSource || !linesRef.current) return
+    if (!selectedSource || !linesRef.current) return
+    if (isCalculation(selectedSource)) { onMatch('calculation'); return }
+    if (!text) { onMatch('not_found'); return }
     const queries = textSourceQueries(preview, selectedSource)
     const lineStart = typeof selectedSource.locator.line_start === 'number' ? selectedSource.locator.line_start : null
     const lineEnd = typeof selectedSource.locator.line_end === 'number' ? selectedSource.locator.line_end : lineStart
+    const rawCharStart = typeof selectedSource.locator.char_start === 'number' ? selectedSource.locator.char_start : null
+    const rawCharEnd = typeof selectedSource.locator.char_end === 'number' ? selectedSource.locator.char_end : null
+    const charStart = rawCharStart === null ? null : codePointOffsetToUtf16(text, rawCharStart)
+    const charEnd = rawCharEnd === null ? null : codePointOffsetToUtf16(text, rawCharEnd)
     const nodes = Array.from(linesRef.current.querySelectorAll<HTMLElement>('[data-line]'))
-    let exact = false
+    const starts = lineOffsetsFor(text)
     let target: HTMLElement | undefined
+    const range = charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
+      ? { start: charStart, end: charEnd }
+      : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null
     for (const node of nodes) {
-      const line = node.textContent || ''
       const number = Number(node.dataset.line)
-      const inRange = lineStart !== null && number >= lineStart && number <= (lineEnd ?? lineStart)
-      if (queries.some((query) => normalizedIncludes(line, query))) { exact = true; target ??= node }
-      if (!target && inRange) target = node
+      if (!target && lineStart !== null && number >= lineStart && number <= (lineEnd ?? lineStart)) target = node
+      if (!target && range) {
+        const lineText = node.querySelector('code')?.textContent || ''
+        const index = number - 1
+        if (index >= 0 && range.start < starts[index] + lineText.length && range.end > starts[index]) target = node
+      }
     }
-    onMatch(exact)
-    scrollIntoViewRespectingMotion(target)
+    const pathAvailable = typeof selectedSource.locator.path === 'string' && Boolean(selectedSource.locator.path)
+    const lineAvailable = lineStart !== null
+    const exact = Boolean(range && (charStart !== null || queries.some((query) => normalizedRange(text, query, range.start))))
+    onMatch(exact ? 'exact' : target ? 'approximate' : pathAvailable || lineAvailable ? 'page_only' : 'not_found')
+    navigateToSource(target)
   }, [text, selectedSource, onMatch, preview.renderer])
 
   if (error) return <div className="preview-inline-error">{error}</div>
@@ -198,16 +350,31 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
   const queries = textSourceQueries(preview, selectedSource)
   const lineStart = typeof selectedSource?.locator.line_start === 'number' ? selectedSource.locator.line_start : null
   const lineEnd = typeof selectedSource?.locator.line_end === 'number' ? selectedSource.locator.line_end : lineStart
-  const lines = text.split(/\r?\n/)
+  const lines = text.split(/\r\n|\r|\n/)
+  const lineOffsets = lineOffsetsFor(text)
+  const rawCharStart = typeof selectedSource?.locator.char_start === 'number' ? selectedSource.locator.char_start : null
+  const rawCharEnd = typeof selectedSource?.locator.char_end === 'number' ? selectedSource.locator.char_end : null
+  const charStart = rawCharStart === null ? null : codePointOffsetToUtf16(text, rawCharStart)
+  const charEnd = rawCharEnd === null ? null : codePointOffsetToUtf16(text, rawCharEnd)
+  const exactRange = charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
+    ? { start: charStart, end: charEnd }
+    : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null
   return (
     <div className="original-text-viewer" ref={linesRef}>
       {lines.map((line, index) => {
         const number = index + 1
         const inRange = lineStart !== null && number >= lineStart && number <= (lineEnd ?? lineStart)
+        const lineOffset = lineOffsets[index] ?? 0
+        const start = exactRange ? Math.max(0, exactRange.start - lineOffset) : -1
+        const end = exactRange ? Math.min(line.length, exactRange.end - lineOffset) : -1
+        const hasExactText = start >= 0 && end > start
         const match = queries.some((query) => normalizedIncludes(line, query))
+        const content = hasExactText
+          ? <>{line.slice(0, start)}<mark>{line.slice(start, end)}</mark>{line.slice(end) || (!line.slice(start, end) ? ' ' : '')}</>
+          : match || (inRange && selectedSource) ? <mark>{line || ' '}</mark> : line || ' '
         return <div className={`source-text-line ${inRange ? 'source-line-range' : ''}`} data-line={number} key={number}>
           <span className="source-line-number">{number}</span>
-          <code>{match ? <mark>{line || ' '}</mark> : inRange && selectedSource ? <mark>{line || ' '}</mark> : line || ' '}</code>
+          <code>{content}</code>
         </div>
       })}
     </div>
@@ -220,10 +387,11 @@ function isPdfCancellation(reason: unknown): boolean {
   return reason instanceof Error && (reason.name === 'RenderingCancelledException' || reason.name === 'AbortException')
 }
 
-function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }: { originalUrl: string; pageNumber: number; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void }) {
+function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }: { originalUrl: string; pageNumber: number; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sheetRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<HTMLDivElement>(null)
+  const textSpansRef = useRef(new Map<number, HTMLSpanElement>())
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
   const [items, setItems] = useState<PdfTextItem[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -309,21 +477,56 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
     return () => { active = false; renderTask?.cancel(); page?.cleanup() }
   }, [pdf, pageNumber, viewerWidth])
   useEffect(() => {
+    const registry = (globalThis.CSS as unknown as { highlights?: HighlightRegistryLike } | undefined)?.highlights
+    registry?.delete('document-source-range')
+    if (!selectedSource) return
+    if (isCalculation(selectedSource)) { onMatch('calculation'); return }
     const sourcePage = typeof selectedSource?.locator.page === 'number' ? selectedSource.locator.page : null
+    if (sourcePage !== null && sourcePage !== pageNumber) { onMatch('page_only'); return }
     if (selectedSource?.locator.ocr === true && sourcePage === pageNumber) {
       const boxes = pdfOcrWordBoxes(selectedSource)
-      onMatch(boxes.length > 0)
+      onMatch(boxes.length > 0 ? 'exact' : sourcePage !== null ? 'page_only' : 'not_found')
       const target = boxes.length
         ? sheetRef.current?.querySelector('.pdf-ocr-highlight-box')
         : sheetRef.current
-      scrollIntoViewRespectingMotion(target)
+      navigateToSource(target)
       return
     }
-    if (!items.length || !selectedSource) return
     const query = sourceQuery(selectedSource)
-    const exact = items.some((item) => normalizedIncludes(item.str, query) || query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(item.str, word)))
-    onMatch(exact)
-    if (exact) scrollIntoViewRespectingMotion(sheetRef.current)
+    if (!items.length) { onMatch(sourcePage !== null ? 'page_only' : 'not_found'); return }
+    const starts: number[] = []
+    let joined = ''
+    items.forEach((item, index) => {
+      starts.push(joined.length)
+      joined += `${index ? ' ' : ''}${item.str}`
+    })
+    const match = normalizedRange(joined, query)
+    if (!match) {
+      onMatch(sourcePage !== null ? 'page_only' : 'not_found')
+      if (sourcePage !== null) navigateToSource(sheetRef.current)
+      return
+    }
+    const ranges: Range[] = []
+    let target: HTMLSpanElement | null = null
+    items.forEach((item, index) => {
+      const start = starts[index] + (index ? 1 : 0)
+      const end = start + item.str.length
+      const from = Math.max(match.start, start)
+      const to = Math.min(match.end, end)
+      if (to <= from) return
+      const span = textSpansRef.current.get(index)
+      const textNode = span?.firstChild
+      if (!span || !textNode || textNode.nodeType !== Node.TEXT_NODE) return
+      const range = document.createRange()
+      range.setStart(textNode, from - start)
+      range.setEnd(textNode, to - start)
+      ranges.push(range)
+      target ??= span
+    })
+    const exact = installTextHighlight('document-source-range', ranges)
+    onMatch(exact ? 'exact' : ranges.length ? 'approximate' : sourcePage !== null ? 'page_only' : 'not_found')
+    navigateToSource(target || sheetRef.current)
+    return () => { registry?.delete('document-source-range') }
   }, [items, pageNumber, selectedSource, onMatch])
   if (nativeFallback) return <div className="pdf-native-fallback">
     <div className="pdf-native-fallback-note">
@@ -334,6 +537,19 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
   </div>
   if (error) return <div className="preview-inline-error">{error}</div>
   const query = sourceQuery(selectedSource)
+  const joinedItems = items.map((item) => item.str).join(' ')
+  const textMatch = normalizedRange(joinedItems, query)
+  const matchIndexes = new Set<number>()
+  if (textMatch) {
+    let cursor = 0
+    items.forEach((item, index) => {
+      const start = cursor + (index ? 1 : 0)
+      const end = start + item.str.length
+      if (end > textMatch.start && start < textMatch.end) matchIndexes.add(index)
+      cursor = end
+    })
+  }
+  const hasCssHighlights = Boolean((globalThis.CSS as unknown as { highlights?: HighlightRegistryLike } | undefined)?.highlights && (globalThis as typeof globalThis & { Highlight?: HighlightConstructorLike }).Highlight)
   return <div className="pdf-original-page-wrap" ref={viewerRef}>
     {rendering && <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Рендерю страницу {pageNumber}…</div>}
     <div className="pdf-page-sheet" ref={sheetRef}>
@@ -343,15 +559,15 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
       </div>}
       <div className="pdf-text-layer" aria-hidden="true">
         {items.map((item, index) => {
-          const match = Boolean(query && (normalizedIncludes(item.str, query) || query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(item.str, word))))
-          return <span key={`${item.left}-${item.top}-${index}`} className={match ? 'pdf-text-match' : ''} style={{ left: item.left, top: item.top, width: item.width, height: item.height, fontSize: item.height }}>{item.str}</span>
+          const match = matchIndexes.has(index)
+          return <span ref={(node) => { if (node) textSpansRef.current.set(index, node); else textSpansRef.current.delete(index) }} key={`${item.left}-${item.top}-${index}`} className={`${match ? 'pdf-text-match' : ''}${match && !hasCssHighlights ? ' pdf-text-highlight-fallback' : ''}`} style={{ left: item.left, top: item.top, width: item.width, height: item.height, fontSize: item.height }}>{item.str}</span>
         })}
       </div>
     </div>
   </div>
 }
 
-function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: { originalUrl: string; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void; onError: (message: string) => void }) {
+function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: { originalUrl: string; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void; onError: (message: string) => void }) {
   // docx-preview owns the contents of this host and mutates it imperatively.
   // Keep it separate from React children so replaceChildren() cannot remove
   // React-managed loading or error nodes.
@@ -397,14 +613,42 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
     return () => { active = false; controller.abort(); resizeObserver?.disconnect(); renderHost.replaceChildren() }
   }, [originalUrl])
   useEffect(() => {
-    if (!containerRef.current || !selectedSource || loading) return
+    const container = containerRef.current
+    const registry = (globalThis.CSS as unknown as { highlights?: HighlightRegistryLike } | undefined)?.highlights
+    registry?.delete('document-source-range')
+    if (!container) return
+    container.querySelectorAll<HTMLElement>('.source-match').forEach((element) => element.classList.remove('source-match'))
+    const elements = Array.from(container.querySelectorAll<HTMLElement>('p, h1, h2, h3, h4, h5, h6, td, th, li'))
+    if (!selectedSource || loading) return
+    if (isCalculation(selectedSource)) { onMatch('calculation'); return }
     const query = sourceQuery(selectedSource)
-    const elements = Array.from(containerRef.current.querySelectorAll<HTMLElement>('p, h1, h2, h3, h4, h5, h6, td, th, li'))
-    elements.forEach((element) => element.classList.remove('source-match'))
-    const target = elements.find((element) => normalizedIncludes(element.textContent || '', query)) || elements.find((element) => query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(element.textContent || '', word)))
-    onMatch(Boolean(target))
+    const paragraphElements = elements.filter((element) => element.matches('p, h1, h2, h3, h4, h5, h6'))
+    const tableIndex = typeof selectedSource.locator.table === 'number' ? selectedSource.locator.table - 1 : -1
+    const rowIndex = typeof selectedSource.locator.row === 'number' ? selectedSource.locator.row - 1 : -1
+    const tableRow = tableIndex >= 0 && rowIndex >= 0
+      ? container.querySelectorAll<HTMLElement>('table')[tableIndex]?.querySelectorAll<HTMLElement>('tr')[rowIndex]
+      : undefined
+    const paragraph = typeof selectedSource.locator.paragraph === 'number'
+      ? paragraphElements[selectedSource.locator.paragraph - 1]
+      : undefined
+    const preferredElements = tableRow
+      ? [tableRow, ...Array.from(tableRow.querySelectorAll<HTMLElement>('td, th'))]
+      : paragraph ? [paragraph] : []
+    const searchOrder = [...preferredElements, ...elements.filter((element) => !preferredElements.includes(element))]
+    let target: HTMLElement | undefined
+    let ranges: Range[] = []
+    for (const element of searchOrder) {
+      ranges = rangesWithinElement(element, query)
+      if (ranges.length) { target = element; break }
+    }
+    let exact = Boolean(target && installTextHighlight('document-source-range', ranges))
+    if (!target) target = tableRow || paragraph
+    if (!exact && target) target.classList.add('source-match')
+    const anchored = typeof selectedSource.locator.paragraph === 'number' || typeof selectedSource.locator.row === 'number'
+    onMatch(exact ? 'exact' : target ? 'approximate' : anchored ? 'page_only' : 'not_found')
     target?.classList.add('source-match')
-    scrollIntoViewRespectingMotion(target)
+    navigateToSource(target)
+    return () => { registry?.delete('document-source-range') }
   }, [loading, selectedSource, onMatch])
   if (error) return <div className="preview-inline-error">{error}</div>
   return <div className="docx-original-viewer">
@@ -413,18 +657,20 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
   </div>
 }
 
-function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void; onError: (message: string) => void }) {
+function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void; onError: (message: string) => void }) {
   const [table, setTable] = useState<TablePreview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
   const requestRef = useRef(0)
-  const load = async (offset: number, append: boolean) => {
+  const navigatedSourceRef = useRef<string | null>(null)
+  const load = async (offset: number, append: boolean, sheetName?: string) => {
     const requestId = ++requestRef.current
     const controller = new AbortController()
     setLoading(true); setError(null)
     try {
-      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table?offset=${offset}&limit=${CSV_PAGE_SIZE}`, { signal: controller.signal })
+      const sheetQuery = sheetName ? `&sheet=${encodeURIComponent(sheetName)}` : ''
+      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table?offset=${offset}&limit=${CSV_PAGE_SIZE}${sheetQuery}`, { signal: controller.signal })
       if (!response.ok) throw new Error('Таблица недоступна')
       const next = await response.json() as TablePreview
       if (requestId !== requestRef.current) return
@@ -444,53 +690,89 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   useEffect(() => {
     if (!table || !selectedSource) return
     const start = typeof selectedSource.locator.row_start === 'number' ? selectedSource.locator.row_start : null
-    if (start === null) return
+    const requestedSheet = typeof selectedSource.locator.sheet === 'string' ? selectedSource.locator.sheet : null
+    const derived = isCalculation(selectedSource)
+    if (requestedSheet && table.sheet !== requestedSheet) {
+      if (navigatedSourceRef.current !== selectedSource.id) {
+        navigatedSourceRef.current = selectedSource.id
+        void load(start !== null && start > 1 ? Math.max(0, start - 2) : 0, false, requestedSheet)
+      } else onMatch('page_only')
+      return
+    }
+    navigatedSourceRef.current = selectedSource.id
+    if (start === null) { onMatch(derived ? 'calculation' : 'not_found'); return }
     const end = typeof selectedSource.locator.row_end === 'number' ? selectedSource.locator.row_end : start
     const loaded = table.rows.some((row) => row.number >= start && row.number <= end)
-    if (!loaded && start > 1 && start - 2 < table.total_rows) { void load(Math.max(0, start - 2), false); return }
+    if (!loaded && start > 1 && start - 2 < table.total_rows) { void load(Math.max(0, start - 2), false, table.sheet || undefined); return }
     const target = table.rows.find((row) => row.number >= start && row.number <= end)
-    const exact = Boolean(target)
-    onMatch(exact)
-    if (target) scrollIntoViewRespectingMotion(document.getElementById(`csv-row-${target.number}`))
+    const exact = Boolean(target && !derived)
+    onMatch(derived ? 'calculation' : exact ? 'exact' : selectedSource.locator.sheet ? 'page_only' : 'not_found')
+    if (target) navigateToSource(tableRef.current?.querySelector(`[data-row-number="${target.number}"]`))
   }, [table, selectedSource, onMatch])
   if (error) return <div className="preview-inline-error">{error}</div>
   if (!table) return <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю оригинальную таблицу…</div>
   const start = typeof selectedSource?.locator.row_start === 'number' ? selectedSource.locator.row_start : null
   const end = typeof selectedSource?.locator.row_end === 'number' ? selectedSource.locator.row_end : start
+  const selectedColumn = typeof selectedSource?.locator.column === 'string' ? selectedSource.locator.column : null
+  const selectedColumnIndex = selectedColumn ? table.columns.indexOf(selectedColumn) : -1
   return <div className="csv-original-viewer" ref={tableRef}>
+    {table.available_sheets.length > 1 && <div className="csv-sheet-toolbar"><label htmlFor={`csv-sheet-${preview.document_id}`}>Лист</label><select id={`csv-sheet-${preview.document_id}`} aria-label="Лист исходного файла" value={table.sheet || ''} onChange={(event) => void load(0, false, event.target.value)}>
+      {table.available_sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
+    </select></div>}
     <div className="csv-table-scroll">
       <table className="original-csv-table"><thead><tr><th scope="col">№</th>{table.columns.map((column) => <th scope="col" key={column}>{column}</th>)}</tr></thead>
-        <tbody>{table.rows.map((row) => <tr id={`csv-row-${row.number}`} className={start !== null && row.number >= start && row.number <= (end ?? start) ? 'source-row-match' : ''} key={row.number}><td className="csv-row-number">{row.number}</td>{row.cells.map((cell, index) => <td key={`${row.number}-${index}`}>{cell || '—'}</td>)}</tr>)}</tbody>
+        <tbody>{table.rows.map((row) => {
+          const inRange = start !== null && row.number >= start && row.number <= (end ?? start)
+          return <tr data-row-number={row.number} className={inRange ? 'source-row-match' : ''} key={row.number}><td className="csv-row-number">{row.number}</td>{row.cells.map((cell, index) => <td className={inRange && selectedColumnIndex === index ? 'source-cell-match' : ''} key={`${row.number}-${index}`}>{cell || '—'}</td>)}</tr>
+        })}</tbody>
       </table>
     </div>
-    <div className="csv-table-footer"><span>Показано {table.rows.length} из {table.total_rows} строк</span>{table.rows.length < table.total_rows && <button type="button" className="button button-light" onClick={() => void load(table.rows.length, true)} disabled={loading}>{loading ? 'Загружаю…' : 'Показать ещё'}</button>}</div>
+    <div className="csv-table-footer"><span>{table.sheet ? `Лист «${table.sheet}» · ` : ''}Показано {table.rows.length} из {table.total_rows} строк</span>{table.rows.length < table.total_rows && <button type="button" className="button button-light" onClick={() => void load(table.offset + table.rows.length, true, table.sheet || undefined)} disabled={loading}>{loading ? 'Загружаю…' : 'Показать ещё'}</button>}</div>
   </div>
 }
 
-function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: boolean) => void }) {
-  const query = sourceQuery(selectedSource)
+function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void }) {
+  const viewerRef = useRef<HTMLDivElement>(null)
   const selectedId = selectedSource?.id
+  const selectedBlock = selectedSource && !isCalculation(selectedSource)
+    ? preview.blocks.find((block) => block.source_id === selectedSource.id) || preview.blocks.find((block) => {
+      const locator = selectedSource.locator
+      if (typeof locator.slide === 'number' && typeof locator.shape === 'number') {
+        return block.locator.slide === locator.slide && block.locator.shape === locator.shape
+      }
+      if (typeof locator.chapter === 'number' && typeof locator.path === 'string') {
+        return block.locator.chapter === locator.chapter && block.locator.path === locator.path
+      }
+      return false
+    })
+    : undefined
+  const selectedBlockId = selectedBlock?.source_id
   useEffect(() => {
     if (!selectedSource) return
-    const target = Array.from(document.querySelectorAll<HTMLElement>('[data-source-id]')).find((element) => element.dataset.sourceId === selectedSource.id)
-    const exact = Boolean(preview.blocks.find((block) => block.source_id === selectedId || normalizedIncludes(block.text, query)))
-    onMatch(exact)
-    scrollIntoViewRespectingMotion(target)
-  }, [preview.blocks, query, selectedId, selectedSource, onMatch])
-  return <div className="source-map-original-viewer">
+    if (isCalculation(selectedSource)) { onMatch('calculation'); return }
+    const target = Array.from(viewerRef.current?.querySelectorAll<HTMLElement>('[data-source-id]') || []).find((element) => element.dataset.sourceId === selectedBlockId)
+    const hasAnchor = typeof selectedSource.locator.slide === 'number' || typeof selectedSource.locator.chapter === 'number'
+    onMatch(target ? 'approximate' : hasAnchor ? 'page_only' : 'not_found')
+    navigateToSource(target || viewerRef.current?.querySelector('.source-map-fallback'))
+  }, [preview.blocks, selectedBlockId, selectedId, selectedSource, onMatch])
+  return <div className="source-map-original-viewer" ref={viewerRef}>
     {preview.blocks.map((block) => {
-      const active = block.source_id === selectedId || Boolean(query && normalizedIncludes(block.text, query))
+      const active = block.source_id === selectedBlockId
       return <article className={`preview-block ${active ? 'source-match' : ''}`} data-source-id={block.source_id} key={block.id}>
         <div className="preview-block-meta"><span>{locatorLabel(block)}</span></div>
         <p>{block.text}</p>
       </article>
     })}
+    {selectedSource && !isCalculation(selectedSource) && !selectedBlock && <article className="preview-block source-match source-map-fallback" data-source-id={selectedId}>
+      <div className="preview-block-meta"><span>Сохранённый фрагмент · {locatorLabel(selectedSource)}</span></div>
+      <p>{selectedSource.text}</p>
+    </article>}
   </div>
 }
 
 export function OriginalDocumentViewer({ document: record, preview, selectedSource, selectedSourceId, originalUrl, pageNumber, onReprocess, reprocessing = false }: OriginalDocumentViewerProps) {
   const [renderError, setRenderError] = useState<string | null>(null)
-  const [exactMatch, setExactMatch] = useState(true)
+  const [matchReport, setMatchReport] = useState<{ sourceId: string | null; quality: MatchQuality }>({ sourceId: null, quality: 'not_found' })
   const [retryKey, setRetryKey] = useState(0)
   const [ocrSettingsOpen, setOcrSettingsOpen] = useState(false)
   const [language, setLanguage] = useState<OcrLanguage>('rus+eng')
@@ -499,7 +781,8 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set())
   const [confirmReprocess, setConfirmReprocess] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
-  const handleMatch = (value: boolean) => setExactMatch(value)
+  const handleMatch = useCallback((quality: MatchQuality) => setMatchReport({ sourceId: selectedSourceId, quality }), [selectedSourceId])
+  const matchQuality = matchReport.sourceId === selectedSourceId ? matchReport.quality : 'not_found'
   const renderer = preview.renderer || (record.file_type === 'docx' ? 'docx' : record.file_type === 'pdf' ? 'pdf' : ['csv', 'xlsx', 'xls'].includes(record.file_type) ? record.file_type : record.file_type === 'xml' ? 'xml' : record.file_type === 'pptx' || record.file_type === 'epub' ? record.file_type : 'text')
   const rawPageMap = Array.isArray(record.metadata.pdf_page_map) ? record.metadata.pdf_page_map as Record<string, unknown>[] : []
   const rawOcrPageMap = Array.isArray(record.metadata.ocr_page_map) ? record.metadata.ocr_page_map as Record<string, unknown>[] : []
@@ -590,8 +873,8 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
     if (renderer === 'csv' || renderer === 'xlsx' || renderer === 'xls') return <CsvOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
     if (renderer === 'pptx' || renderer === 'epub') return <SourceMapOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} />
     return <TextOriginalViewer key={retryKey} preview={preview} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
-  }, [originalUrl, pageNumber, preview, record.file_type, renderer, retryKey, selectedSource])
-  useEffect(() => { setRenderError(null); setExactMatch(true) }, [preview.document_id, renderer, retryKey])
+  }, [handleMatch, originalUrl, pageNumber, preview, record.file_type, renderer, retryKey, selectedSource])
+  useEffect(() => { setRenderError(null) }, [preview.document_id, renderer, retryKey])
   return <div className={`original-viewer-body renderer-${renderer}`} data-renderer={renderer} data-selected-source={selectedSourceId || undefined}>
     <div className="preview-toolbar"><span>Оригинал файла{preview.encoding ? ` · ${preview.encoding}` : ''}</span><a href={originalUrl} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>
     {renderer === 'pdf' && <section className="ocr-panel" aria-label="Статус и настройки OCR" data-testid="ocr-panel">
@@ -655,7 +938,7 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
         <div className="ocr-impact-actions"><button type="button" className="button button-light" onClick={() => setConfirmReprocess(false)}>Отмена</button><button type="button" className="button button-dark" onClick={() => void submitReprocess()} disabled={reprocessing}>{reprocessing ? 'Обрабатываю…' : 'Создать версию'}</button></div>
       </dialog>
     </section>}
-    <SourceCallout source={selectedSource} exact={exactMatch} onReprocess={selectedSource?.locator.ocr === true ? openSourcePageReprocess : undefined} reprocessing={reprocessing} />
+    <SourceCallout source={selectedSource} quality={matchQuality} activeVersion={record.active_version} onReprocess={selectedSource?.locator.ocr === true ? openSourcePageReprocess : undefined} reprocessing={reprocessing} />
     {renderError ? <RenderError preview={preview} originalUrl={originalUrl} message={renderError} onRetry={() => { setRenderError(null); setRetryKey((value) => value + 1) }} /> : <div className="original-render-surface">{content || <RenderError preview={preview} originalUrl={originalUrl} onRetry={() => setRetryKey((value) => value + 1)} />}</div>}
   </div>
 }

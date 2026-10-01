@@ -25,6 +25,17 @@ def test_plain_text_supports_cp1251_and_keeps_line_locations() -> None:
     assert parsed.blocks[0].locator["line_end"] == 2
 
 
+def test_plain_text_crlf_ranges_point_to_exact_original_characters() -> None:
+    original = "Заголовок\r\nЦитируемая строка документа\r\nЗаключение"
+    parsed = parse_document("ranges.txt", original.encode("utf-8"))
+    source = next(block for block in parsed.blocks if "Цитируемая строка" in block.text)
+
+    excerpt = original[source.locator["char_start"]:source.locator["char_end"]]
+    assert "Цитируемая строка" in excerpt
+    assert source.locator["line_start"] == 1
+    assert source.locator["line_end"] == 3
+
+
 def test_csv_fallback_does_not_mutate_global_excel_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
     def no_dialect(*args: object, **kwargs: object) -> csv.Dialect:
         raise csv.Error("ambiguous sample")
@@ -78,11 +89,43 @@ def test_docx_preserves_paragraph_and_table_row_locations() -> None:
 
 
 def test_xml_keeps_element_path_and_rejects_entities() -> None:
-    parsed = parse_document("report.xml", b"<report><owner>Team</owner></report>")
+    original = "<report><owner>Team</owner></report>"
+    parsed = parse_document("report.xml", original.encode())
 
     assert parsed.blocks[0].locator["path"] == "/report[1]/owner[1]"
+    assert "Team" in original[parsed.blocks[0].locator["char_start"]:parsed.blocks[0].locator["char_end"]]
     with pytest.raises(DocumentParsingError, match="XML"):
         parse_document("unsafe.xml", b'<!DOCTYPE x [<!ENTITY e SYSTEM "file:///secret">]><x>&e;</x>')
+
+
+def test_xml_entity_ranges_cover_the_original_encoded_value() -> None:
+    original = "<report>\n  <owner>Team &amp; Alpha</owner>\n</report>"
+    parsed = parse_document("entity-value.xml", original.encode())
+    source = next(block for block in parsed.blocks if "Team & Alpha" in block.text)
+
+    value = original[source.locator["char_start"]:source.locator["char_end"]]
+    assert "Team &amp; Alpha" in value
+    assert source.locator["line_start"] == 2
+
+
+def test_json_locators_include_exact_raw_value_ranges() -> None:
+    original = '{\n  "owner": "Алексей Пример",\n  "items": [1, 2]\n}'
+    parsed = parse_document("report.json", original.encode())
+    source = next(block for block in parsed.blocks if block.locator.get("path") == "$.owner")
+
+    value = original[source.locator["char_start"]:source.locator["char_end"]]
+    assert "Алексей Пример" in value
+    assert source.locator["line_start"] == source.locator["line_end"] == 2
+
+
+def test_html_locators_include_original_source_ranges() -> None:
+    original = "<html>\n<body>\n<p>Автор: Алексей &amp; команда</p>\n</body>\n</html>"
+    parsed = parse_document("report.html", original.encode())
+    source = next(block for block in parsed.blocks if "Автор:" in block.text)
+
+    value = original[source.locator["char_start"]:source.locator["char_end"]]
+    assert "Автор: Алексей &amp; команда" in value
+    assert source.locator["line_start"] == source.locator["line_end"] == 3
 
 
 def test_pdf_text_is_extracted_with_page_locator() -> None:

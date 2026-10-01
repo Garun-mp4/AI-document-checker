@@ -31,7 +31,11 @@ test('Stream Markdown, citations, reload, real container restart and new chat', 
   await page.reload()
   await showChat(page)
   await expect(page.locator('.assistant-message li')).toHaveCount(2)
-  execFileSync('docker', ['compose', '-p', 'document-checker-e2e', '-f', 'compose.e2e.yml', 'restart', 'api', 'db', 'web'], { cwd: path.resolve('..'), timeout: 90_000 })
+  const compose = ['compose', '-p', 'document-checker-e2e', '-f', 'compose.e2e.yml']
+  for (const service of ['db', 'api', 'worker', 'web']) {
+    execFileSync('docker', [...compose, 'restart', service], { cwd: path.resolve('..'), timeout: 90_000 })
+    execFileSync('docker', [...compose, 'up', '-d', '--wait', '--wait-timeout', '120', service], { cwd: path.resolve('..'), timeout: 150_000 })
+  }
   await expect.poll(async () => {
     try { return (await request.get('/api/v1/documents')).status() } catch { return 0 }
   }, { timeout: 90_000 }).toBe(200)

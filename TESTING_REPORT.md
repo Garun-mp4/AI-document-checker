@@ -1,5 +1,24 @@
 # Отчёт о тестировании AI Document Checker
 
+## M07 — единый механизм citations и точная подсветка
+
+Дата: 1 октября 2026 года. M07 реализован и проверен; M08 не начинался.
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit/parser/API | **242 passed, 9 integration skipped** без `AI_CHECKER_BASE_URL` |
+| Ruff `app` и `tests` | **PASS** |
+| Frontend contract tests | **19 passed** |
+| TypeScript / production build | **PASS**; остаётся предупреждение Vite о крупном JS bundle с PDF.js |
+| Isolated Compose security acceptance | **10 passed**: сетевые/ресурсные лимиты, chunked upload, nginx body limit, Linux file pinning и безопасная ошибка конвертера |
+| Chromium E2E | **71 passed**; 13 форматов, citation по длинной CSV-таблице, переход по листам XLS/XLSX, TXT/MD/XML/HTML ranges, PDF native/OCR, mobile, восстановление и restart |
+| PostgreSQL queue acceptance | **13 passed**; concurrency, leases, fencing, retry/deletion и сохранность результатов старой версии |
+| Compose API integration | **9 passed** |
+
+Добавлен единый versioned locator с идентификатором документа и версией обработки. Locator сохраняет диапазоны строк/символов и координатное пространство; существующие поля и citation ID остаются совместимыми. Для PDF native текст выделяется через CSS Highlights, а OCR-карта выводит координатные подсветки поверх исходной страницы. DOCX выбирает нужный абзац/табличную строку, текстовые форматы используют сохранённые диапазоны, а CSV/XLS/XLSX переключают лист и догружают порцию, содержащую цитируемую строку. Для PPTX/EPUB доступны структурированные исходные блоки с честно ограниченным уровнем точности. Вычисленные значения показываются как расчёты с исходным диапазоном, без поиска вычисленного текста в оригинале.
+
+Новые проверки закрепляют версию и систему координат preview locators, исходные offsets TXT/XML/JSON/HTML, диапазоны глав EPUB, листовую пагинацию и переходы citation в длинные/не загруженные таблицы. E2E-тесты используют тестовый endpoint только в приложении поддержки тестов, чтобы выбрать настоящий сохранённый locator; production API не расширяется тестовым маршрутом. Перезапуск Compose выполняется последовательно, чтобы исключить гонку DNS между nginx и API.
+
 ## M06 — настройки и повторный OCR
 
 Дата: 1 октября 2026 года. M06 реализован, проверен в unit-тестах и в изолированном Docker Compose; следующий milestone не начинался. Описание поведения и ограничений: [docs/M06_OCR_SETTINGS.md](docs/M06_OCR_SETTINGS.md).

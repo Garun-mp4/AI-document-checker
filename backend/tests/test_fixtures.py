@@ -68,6 +68,18 @@ def test_docx_fixture_includes_paragraph_and_table_sources() -> None:
     assert any("Ответственный" in block.text for block in parsed.blocks)
 
 
+def test_epub_sources_keep_chapter_path_and_raw_xhtml_ranges() -> None:
+    parsed = parse_document("sample.epub", (FIXTURES / "sample.epub").read_bytes())
+
+    source = next(block for block in parsed.blocks if "Тестовый проект" in block.text)
+    assert source.locator["chapter"] == 1
+    assert source.locator["path"].endswith("chapter1.xhtml")
+    assert source.locator["element"] == "h1"
+    assert source.locator["char_start"] >= 0
+    assert source.locator["char_end"] > source.locator["char_start"]
+    assert source.locator["line_start"] == source.locator["line_end"]
+
+
 def test_csv_fixture_aggregates_are_exact_and_keep_row_locations() -> None:
     parsed = parse_document("sample.csv", (FIXTURES / "sample.csv").read_bytes())
     metrics = {item["name"]: item for item in parsed.metadata["numeric_columns"]}

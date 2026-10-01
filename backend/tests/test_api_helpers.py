@@ -25,11 +25,15 @@ class _Result:
 
 
 class _Session:
-    def __init__(self, rows):
+    def __init__(self, rows, document=None):
         self.rows = rows
+        self.document = document
 
     async def execute(self, _statement):
         return _Result(self.rows)
+
+    async def get(self, _model, _document_id):
+        return self.document
 
 
 def test_sse_serializes_unicode_and_keeps_event_framing() -> None:
@@ -43,17 +47,22 @@ def test_sse_serializes_unicode_and_keeps_event_framing() -> None:
 def test_sources_for_ids_ignores_invalid_ids_and_preserves_requested_order() -> None:
     first_id, second_id = uuid4(), uuid4()
     rows = [
-        SimpleNamespace(id=first_id, text="first fallback", locator={"label": "Абзац 1", "source_text": "first source"}, ordinal=1, is_derived=False),
-        SimpleNamespace(id=second_id, text="second", locator={"label": "Абзац 2"}, ordinal=2, is_derived=True),
+        SimpleNamespace(id=first_id, version=3, text="first fallback", locator={"label": "Абзац 1", "source_text": "first source"}, ordinal=1, is_derived=False),
+        SimpleNamespace(id=second_id, version=2, text="second", locator={"label": "Абзац 2"}, ordinal=2, is_derived=True),
     ]
     requested = [str(second_id), "not-a-uuid", str(first_id), str(uuid4())]
+    document = SimpleNamespace(id=uuid4(), file_type="txt")
 
-    result = asyncio.run(api._sources_for_ids(_Session(rows), uuid4(), requested))
+    result = asyncio.run(api._sources_for_ids(_Session(rows, document), document.id, requested))
 
     assert [item.id for item in result] == [str(second_id), str(first_id)]
     assert result[0].text == "second"
     assert result[1].text == "first source"
     assert result[0].is_derived is True
+    assert result[0].locator["document_id"] == str(document.id)
+    assert result[0].locator["processing_version"] == 2
+    assert result[0].locator["source_type"] == "calculation"
+    assert result[1].locator["processing_version"] == 3
 
 
 def test_document_out_exposes_markdown_processing_metadata() -> None:

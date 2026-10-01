@@ -48,18 +48,19 @@ def generate():
     document.save(stream)
     contents["multipage.docx"] = stream.getvalue()
     workbook = Workbook()
-    for sheet in (workbook.active, workbook.create_sheet("Второй лист")):
+    for index, sheet in enumerate((workbook.active, workbook.create_sheet("Второй лист"))):
         sheet.append(["Проект", "Часы"])
-        sheet.append(["Альфа", 10])
-        sheet.append(["Бета", 20])
+        sheet.append(["Альфа", 10] if index == 0 else ["Сигма", 37])
+        sheet.append(["Бета", 20] if index == 0 else ["Омега", 41])
     stream = BytesIO()
     workbook.save(stream)
     contents["multisheet.xlsx"] = stream.getvalue()
     import xlwt
     book = xlwt.Workbook()
-    for title in ("Первый", "Второй"):
+    for index, title in enumerate(("Первый", "Второй")):
         sheet = book.add_sheet(title)
-        for row, values in enumerate([["Проект", "Часы"], ["Альфа", 10], ["Бета", 20]]):
+        rows = [["Проект", "Часы"], ["Альфа", 10], ["Бета", 20]] if index == 0 else [["Проект", "Часы"], ["Сигма", 37], ["Омега", 41]]
+        for row, values in enumerate(rows):
             for column, value in enumerate(values):
                 sheet.write(row, column, value)
     stream = BytesIO()

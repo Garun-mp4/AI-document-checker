@@ -76,6 +76,7 @@ from app.services.parsing import (
 )
 from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview
 from app.services.retrieval import search_chunks
+from app.services.source_locators import versioned_source_locator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -145,12 +146,17 @@ async def _sources_for_ids(session, document_id: uuid.UUID, ids: list[str]) -> l
             continue
     if not parsed_ids:
         return []
+    document = await session.get(Document, document_id)
+    if document is None:
+        return []
     rows = (await session.execute(
         select(Chunk).where(Chunk.document_id == document_id, Chunk.id.in_(parsed_ids))
     )).scalars().all()
     by_id = {str(chunk.id): chunk for chunk in rows}
     return [
-        SourceOut(id=value, text=str((by_id[value].locator or {}).get("source_text") or by_id[value].text)[:2_500], locator=by_id[value].locator,
+        SourceOut(id=value, text=str((by_id[value].locator or {}).get("source_text") or by_id[value].text)[:2_500], locator=versioned_source_locator(
+                  by_id[value].locator, document_id=str(document.id), processing_version=by_id[value].version,
+                  file_type=document.file_type, is_derived=by_id[value].is_derived),
                   ordinal=by_id[value].ordinal, is_derived=by_id[value].is_derived)
         for value in ids if value in by_id
     ]
@@ -434,7 +440,10 @@ async def list_chunks(document_id: uuid.UUID, offset: int = 0, limit: int = 50) 
             select(Chunk).where(Chunk.document_id == document_id, Chunk.version == await active_chunk_version(session, document)).order_by(Chunk.ordinal).offset(offset).limit(limit)
         )).scalars().all()
         return [SourceOut(
-            id=str(chunk.id), text=str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500], locator=chunk.locator,
+            id=str(chunk.id), text=str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500], locator=versioned_source_locator(
+                chunk.locator, document_id=str(document.id), processing_version=chunk.version,
+                file_type=document.file_type, is_derived=chunk.is_derived,
+            ),
             ordinal=chunk.ordinal, is_derived=chunk.is_derived,
         ) for chunk in chunks]
 
@@ -460,6 +469,7 @@ async def document_preview(document_id: uuid.UUID) -> DocumentPreviewOut:
             chunks=chunks,
             original_url=f"/api/v1/documents/{document.id}/file",
             total_blocks=document.chunk_count,
+            processing_version=document.active_version or 1,
         )
         return DocumentPreviewOut.model_validate(payload)
 
@@ -491,6 +501,7 @@ async def document_preview_table(
     document_id: uuid.UUID,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
+    sheet: str | None = Query(default=None, max_length=128),
 ) -> TablePreviewOut:
     """Return a paginated view of the original CSV table.
 
@@ -509,7 +520,7 @@ async def document_preview_table(
         except DocumentParsingError as exc:
             raise HTTPException(status_code=404, detail='Исходный файл недоступен.') from exc
     try:
-        payload = await run_document_operation('table', path, file_type=document.file_type, offset=offset, limit=limit)
+        payload = await run_document_operation('table', path, file_type=document.file_type, offset=offset, limit=limit, sheet=sheet)
     except DocumentParsingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return TablePreviewOut.model_validate(payload)

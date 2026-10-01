@@ -38,6 +38,7 @@ from app.services.processing_helpers import (
     _ocr_analysis_blocks,
     _pdf_markdown,
 )
+from app.services.source_locators import versioned_source_locator
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +310,10 @@ class ProcessingAttempt:
                 remove_storage(batch_path)
                 session.add_all([Chunk(
                     document_id=document_id, version=job.version, ordinal=start+i, text=b[0],
-                    locator={**b[1], 'processing_version': job.version}, embedding=v, is_derived=False,
+                    locator=versioned_source_locator(
+                        b[1], document_id=str(document_id), processing_version=job.version,
+                        file_type=document.file_type,
+                    ), embedding=v, is_derived=False,
                     content_source=b[2], markdown_line_start=b[3], markdown_line_end=b[4],
                     markdown_char_start=b[5], markdown_char_end=b[6], mapping_confidence=b[7],
                 ) for i, (b,v) in enumerate(zip(batch,vectors,strict=True))])
@@ -318,7 +322,10 @@ class ProcessingAttempt:
         async with fenced(self.job.id, self.job.owner) as (session, document, job):
             session.add_all([Chunk(document_id=document_id, version=job.version,
                 ordinal=len(analysis_blocks)+i, text=b.text,
-                locator={**b.locator, 'processing_version': job.version}, is_derived=True)
+                locator=versioned_source_locator(
+                    b.locator, document_id=str(document_id), processing_version=job.version,
+                    file_type=document.file_type, is_derived=True,
+                ), is_derived=True)
                 for i,b in enumerate(derived)])
             snapshot['chunk_count'] = len(analysis_blocks)+len(derived)
             version = await session.get(DocumentVersion, (document_id, job.version))

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import bisect
 import csv
+import html
 import io
 import json
 import re
+import unicodedata
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -84,6 +87,71 @@ def _decode_text(data: bytes) -> str:
     return _decode_text_with_encoding(data)[0]
 
 
+def _normalize_for_source_match(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _find_normalized_source_range(
+    source: str,
+    expected: str,
+    start_hint: int = 0,
+    *,
+    decode_entities: bool = False,
+) -> tuple[int, int] | None:
+    """Find a normalized citation in source text and return original offsets."""
+
+    normalized: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    in_space = False
+    def source_units() -> Iterable[tuple[str, int, int]]:
+        offset = 0
+        while offset < len(source):
+            if decode_entities and source[offset] == "&":
+                entity_end = source.find(";", offset + 1, min(len(source), offset + 20))
+                if entity_end >= 0:
+                    entity = source[offset:entity_end + 1]
+                    decoded = html.unescape(entity)
+                    if decoded != entity:
+                        for character in decoded:
+                            yield character, offset, entity_end + 1
+                        offset = entity_end + 1
+                        continue
+            character = source[offset]
+            yield character, offset, offset + 1
+            offset += 1
+
+    for character, offset, source_end in source_units():
+        transformed = unicodedata.normalize("NFKC", character).casefold()
+        if character.isspace() or transformed.isspace():
+            if normalized and not in_space:
+                normalized.append(" ")
+                starts.append(offset)
+                ends.append(source_end)
+            elif normalized and in_space:
+                ends[-1] = source_end
+            in_space = True
+            continue
+        in_space = False
+        for item in transformed:
+            normalized.append(item)
+            starts.append(offset)
+            ends.append(source_end)
+    needle = _normalize_for_source_match(expected)
+    if not needle:
+        return None
+    source_normalized = "".join(normalized)
+    candidates: list[int] = []
+    offset = 0
+    while (found := source_normalized.find(needle, offset)) >= 0:
+        candidates.append(found)
+        offset = found + 1
+    if not candidates:
+        return None
+    candidate = min(candidates, key=lambda found: abs(starts[found] - start_hint))
+    return starts[candidate], ends[candidate + len(needle) - 1]
+
+
 def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TARGET_CHARS) -> list[SourceBlock]:
     normalized = text.strip()
     if not normalized:
@@ -94,11 +162,18 @@ def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TAR
     result: list[SourceBlock] = []
     buffer = ""
     part_index = 1
+    base_char_start = locator.get("char_start")
+    has_base_char_start = isinstance(base_char_start, int) and not isinstance(base_char_start, bool)
+    leading_trim = len(text) - len(text.lstrip())
 
     def part_locator(start: int, end: int, part: int) -> dict[str, Any]:
         current = {**locator, "part": part}
-        current.setdefault("char_start", start)
-        current.setdefault("char_end", end)
+        if has_base_char_start:
+            current["char_start"] = base_char_start + leading_trim + start
+            current["char_end"] = base_char_start + leading_trim + end
+        else:
+            current.pop("char_start", None)
+            current.pop("char_end", None)
         return current
 
     for paragraph in paragraphs:
@@ -129,6 +204,15 @@ def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TAR
             buffer = candidate
     if buffer:
         result.append(SourceBlock(buffer, part_locator(0, len(buffer), part_index)))
+    if has_base_char_start:
+        search_cursor = 0
+        for block in result:
+            source_range = _find_normalized_source_range(normalized, block.text, search_cursor)
+            if source_range:
+                start, end = source_range
+                block.locator["char_start"] = base_char_start + leading_trim + start
+                block.locator["char_end"] = base_char_start + leading_trim + end
+                search_cursor = end
     return result
 
 
@@ -302,12 +386,15 @@ def _parse_docx(data: bytes) -> ParsedDocument:
 
 def _parse_plain_text(data: bytes, file_type: str) -> ParsedDocument:
     text, encoding = _decode_text_with_encoding(data)
-    lines = text.splitlines()
+    raw_lines = text.splitlines(keepends=True)
+    if not raw_lines and text:
+        raw_lines = [text]
+    lines = [line.rstrip("\r\n") for line in raw_lines]
     line_offsets: list[int] = []
     cursor = 0
-    for line in lines:
+    for raw_line in raw_lines:
         line_offsets.append(cursor)
-        cursor += len(line) + 1
+        cursor += len(raw_line)
     blocks: list[SourceBlock] = []
     start_line = 1
     while start_line <= len(lines):
@@ -316,14 +403,21 @@ def _parse_plain_text(data: bytes, file_type: str) -> ParsedDocument:
         if section:
             section_start = line_offsets[start_line - 1]
             section_end = section_start + len(section)
-            blocks.extend(_split_long_text(section, {
+            section_blocks = _split_long_text(section, {
                 "kind": file_type,
                 "label": f"Строки {start_line}–{end_line}",
                 "line_start": start_line,
                 "line_end": end_line,
                 "char_start": section_start,
                 "char_end": section_end,
-            }))
+            })
+            for block in section_blocks:
+                match = _find_normalized_source_range(text, block.text, section_start)
+                if match:
+                    block.locator["char_start"], block.locator["char_end"] = match
+                    block.locator["line_start"] = bisect.bisect_right(line_offsets, match[0])
+                    block.locator["line_end"] = bisect.bisect_right(line_offsets, max(match[0], match[1] - 1))
+            blocks.extend(section_blocks)
         start_line = end_line + 1
     if not blocks:
         raise DocumentParsingError("Файл пустой — извлекать нечего.")
@@ -375,8 +469,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
         "label": "Заголовки столбцов",
         "row_start": 1,
         "row_end": 1,
-        "char_start": 0,
-        "char_end": len(header_text),
+        "columns": headers,
     }))
 
     group: list[str] = []
@@ -393,8 +486,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
                 "label": f"Строки {group_start}–{row_number - 1}",
                 "row_start": group_start,
                 "row_end": row_number - 1,
-                "char_start": 0,
-                "char_end": group_chars,
+                "columns": headers,
             }))
             group = []
             group_chars = 0
@@ -406,8 +498,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
                     "label": f"Строки {group_start}–{row_number - 1}",
                     "row_start": group_start,
                     "row_end": row_number - 1,
-                    "char_start": 0,
-                    "char_end": group_chars,
+                    "columns": headers,
                 }))
                 group = []
                 group_chars = 0
@@ -416,8 +507,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
                 "label": f"Строка {row_number}",
                 "row_start": row_number,
                 "row_end": row_number,
-                "char_start": 0,
-                "char_end": len(line),
+                "columns": headers,
             }, target=CSV_GROUP_CHARS))
             group_start = row_number + 1
             continue
@@ -429,8 +519,7 @@ def _parse_csv(data: bytes) -> ParsedDocument:
             "label": f"Строки {group_start}–{len(data_rows) + 1}",
             "row_start": group_start,
             "row_end": len(data_rows) + 1,
-            "char_start": 0,
-            "char_end": group_chars,
+            "columns": headers,
         }))
 
     numeric_columns: list[dict[str, Any]] = []
@@ -470,7 +559,26 @@ def _parse_xml(data: bytes) -> ParsedDocument:
     except Exception as exc:
         raise DocumentParsingError("XML повреждён или содержит запрещённую DTD/entity-конструкцию.") from exc
 
+    source_text, encoding = _decode_text_with_encoding(data)
+    line_starts = [0]
+    line_starts.extend(index + 1 for index, char in enumerate(source_text) if char == "\n")
+    source_cursor = 0
     blocks: list[SourceBlock] = []
+
+    def value_locator(path: str, value: str) -> dict[str, Any]:
+        nonlocal source_cursor
+        locator: dict[str, Any] = {"kind": "xml", "label": path, "path": path}
+        source_range = _find_normalized_source_range(source_text, value, source_cursor, decode_entities=True)
+        if source_range:
+            start, end = source_range
+            locator.update({
+                "char_start": start,
+                "char_end": end,
+                "line_start": bisect.bisect_right(line_starts, start),
+                "line_end": bisect.bisect_right(line_starts, max(start, end - 1)),
+            })
+            source_cursor = end
+        return locator
     stack: list[tuple[Element, str]] = [(root, f"/{_local_name(root.tag)}[1]")]
     node_count = 0
     while stack:
@@ -485,17 +593,54 @@ def _parse_xml(data: bytes) -> ParsedDocument:
             value = text or attributes
             if attributes and text:
                 value = f"{text} ({attributes})"
-            blocks.extend(_split_long_text(value, {
-                "kind": "xml",
-                "label": path,
-                "path": path,
-            }))
+            # Attribute summaries do not occur literally in the source XML;
+            # locate the visible element text and retain a path locator for
+            # attribute-only values.
+            locator = value_locator(path, text) if text else {"kind": "xml", "label": path, "path": path}
+            if attributes and text:
+                # The indexed summary includes attributes that are not at this
+                # text offset in the original XML, so only the path/line is a
+                # reliable locator for this combined block.
+                locator.pop("char_start", None)
+                locator.pop("char_end", None)
+                locator["match_quality"] = "approximate"
+            xml_blocks = _split_long_text(value, locator)
+            if not attributes and text and isinstance(locator.get("char_start"), int):
+                source_hint = locator["char_start"]
+                for block in xml_blocks:
+                    source_range = _find_normalized_source_range(
+                        source_text, block.text, source_hint, decode_entities=True,
+                    )
+                    if source_range:
+                        start, end = source_range
+                        block.locator.update({
+                            "char_start": start,
+                            "char_end": end,
+                            "line_start": bisect.bisect_right(line_starts, start),
+                            "line_end": bisect.bisect_right(line_starts, max(start, end - 1)),
+                        })
+                        source_hint = end
+            blocks.extend(xml_blocks)
         if element.tail and element.tail.strip():
-            blocks.extend(_split_long_text(element.tail.strip(), {
-                "kind": "xml",
-                "label": path,
-                "path": path,
-            }))
+            tail = element.tail.strip()
+            tail_locator = value_locator(path, tail)
+            tail_blocks = _split_long_text(tail, tail_locator)
+            if isinstance(tail_locator.get("char_start"), int):
+                source_hint = tail_locator["char_start"]
+                for block in tail_blocks:
+                    source_range = _find_normalized_source_range(
+                        source_text, block.text, source_hint, decode_entities=True,
+                    )
+                    if source_range:
+                        start, end = source_range
+                        block.locator.update({
+                            "char_start": start,
+                            "char_end": end,
+                            "line_start": bisect.bisect_right(line_starts, start),
+                            "line_end": bisect.bisect_right(line_starts, max(start, end - 1)),
+                        })
+                        source_hint = end
+            blocks.extend(tail_blocks)
         counts: dict[str, int] = {}
         indexed_children: list[tuple[Element, str]] = []
         for child in children:
@@ -505,18 +650,8 @@ def _parse_xml(data: bytes) -> ParsedDocument:
         stack.extend(reversed(indexed_children))
     if not blocks:
         raise DocumentParsingError("В XML не найдено текстовых значений или атрибутов.")
-    try:
-        data.decode("utf-8-sig")
-        encoding = "utf-8-sig"
-    except UnicodeDecodeError:
-        try:
-            data.decode("cp1251")
-            encoding = "cp1251"
-        except UnicodeDecodeError:
-            encoding = None
     metadata: dict[str, Any] = {"root": _local_name(root.tag), "element_count": node_count}
-    if encoding:
-        metadata["encoding"] = encoding
+    metadata["encoding"] = encoding
     return ParsedDocument("xml", blocks, metadata)
 
 
@@ -531,23 +666,88 @@ def _parse_json(data: bytes) -> ParsedDocument:
         raise DocumentParsingError("JSON пустой — извлекать нечего.")
     blocks: list[SourceBlock] = []
 
-    def walk(node: Any, path: str) -> None:
-        if isinstance(node, dict):
-            for key, child in node.items():
-                walk(child, f"{path}.{key}")
-            return
-        if isinstance(node, list):
-            for index, child in enumerate(node):
-                walk(child, f"{path}[{index}]")
-            return
-        value_text = json.dumps(node, ensure_ascii=False) if node is not None else "null"
+    line_starts = [0]
+    line_starts.extend(index + 1 for index, char in enumerate(text) if char == "\n")
+
+    def line_at(offset: int) -> int:
+        return bisect.bisect_right(line_starts, offset)
+
+    decoder = json.JSONDecoder()
+
+    def skip_space(offset: int) -> int:
+        while offset < len(text) and text[offset].isspace():
+            offset += 1
+        return offset
+
+    def walk(path: str, offset: int) -> int:
+        offset = skip_space(offset)
+        if offset >= len(text):
+            return offset
+        token = text[offset]
+        if token == "{":
+            offset = skip_space(offset + 1)
+            while offset < len(text) and text[offset] != "}":
+                key, key_end = decoder.raw_decode(text, offset)
+                offset = skip_space(key_end)
+                if offset >= len(text) or text[offset] != ":":
+                    raise ValueError("Invalid object token")
+                offset = walk(f"{path}.{key}", offset + 1)
+                offset = skip_space(offset)
+                if offset < len(text) and text[offset] == ",":
+                    offset = skip_space(offset + 1)
+                else:
+                    break
+            if offset < len(text) and text[offset] == "}":
+                return offset + 1
+            raise ValueError("Unclosed object token")
+        if token == "[":
+            offset = skip_space(offset + 1)
+            index = 0
+            while offset < len(text) and text[offset] != "]":
+                offset = walk(f"{path}[{index}]", offset)
+                index += 1
+                offset = skip_space(offset)
+                if offset < len(text) and text[offset] == ",":
+                    offset = skip_space(offset + 1)
+                else:
+                    break
+            if offset < len(text) and text[offset] == "]":
+                return offset + 1
+            raise ValueError("Unclosed array token")
+
+        start = offset
+        scalar, end = decoder.raw_decode(text, offset)
+        value_text = json.dumps(scalar, ensure_ascii=False) if scalar is not None else "null"
         blocks.append(SourceBlock(str(value_text), {
             "kind": "json",
             "label": path,
             "path": path,
+            "line_start": line_at(start),
+            "line_end": line_at(max(start, end - 1)),
+            "char_start": start,
+            "char_end": end,
         }))
+        return end
 
-    walk(value, "$" )
+    try:
+        walk("$", 0)
+    except (ValueError, json.JSONDecodeError):
+        # json.loads already validated the document. Keep path-based locators
+        # as a safe compatibility fallback if tokenizer behavior ever differs.
+        blocks.clear()
+
+        def walk_fallback(node: Any, path: str) -> None:
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    walk_fallback(child, f"{path}.{key}")
+            elif isinstance(node, list):
+                for index, child in enumerate(node):
+                    walk_fallback(child, f"{path}[{index}]")
+            else:
+                value_text = json.dumps(node, ensure_ascii=False) if node is not None else "null"
+                blocks.append(SourceBlock(str(value_text), {"kind": "json", "label": path, "path": path}))
+
+        walk_fallback(value, "$")
     if not blocks:
         blocks.append(SourceBlock(pretty, {"kind": "json", "label": "JSON-документ", "path": "$"}))
     return ParsedDocument("json", blocks, {
@@ -567,16 +767,25 @@ class _HtmlBlockParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.blocks: list[tuple[str, str, int]] = []
-        self._parts: list[str] = []
+        self.blocks: list[tuple[str, str, int, int, int]] = []
+        self._parts: list[tuple[str, int, int]] = []
         self._tag = "body"
         self._start_line = 1
         self._ignored: list[str] = []
+        self.raw_text = ""
+        self.line_starts = [0]
+
+    def set_source(self, text: str) -> None:
+        self.raw_text = text
+        self.line_starts = [0]
+        self.line_starts.extend(index + 1 for index, char in enumerate(text) if char == "\n")
 
     def _flush(self) -> None:
-        text = re.sub(r"\s+", " ", " ".join(self._parts)).strip()
+        text = re.sub(r"\s+", " ", " ".join(part[0] for part in self._parts)).strip()
         if text:
-            self.blocks.append((text, self._tag, self._start_line))
+            start = min(part[1] for part in self._parts)
+            end = max(part[2] for part in self._parts)
+            self.blocks.append((text, self._tag, self._start_line, start, end))
         self._parts = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -600,7 +809,13 @@ class _HtmlBlockParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if data.strip() and not self._ignored:
-            self._parts.append(data)
+            line, column = self.getpos()
+            line_index = min(max(line - 1, 0), len(self.line_starts) - 1)
+            start = self.line_starts[line_index] + column
+            end = self.raw_text.find("<", start)
+            if end < 0:
+                end = len(self.raw_text)
+            self._parts.append((data, start, end))
 
     def close(self) -> None:
         super().close()
@@ -610,6 +825,7 @@ class _HtmlBlockParser(HTMLParser):
 def _parse_html(data: bytes, file_type: str = "html") -> ParsedDocument:
     text, encoding = _decode_text_with_encoding(data)
     parser = _HtmlBlockParser()
+    parser.set_source(text)
     try:
         parser.feed(text)
         parser.close()
@@ -620,8 +836,10 @@ def _parse_html(data: bytes, file_type: str = "html") -> ParsedDocument:
         "label": f"{tag.upper()} · строка {line}",
         "element": tag,
         "line_start": line,
-        "line_end": line,
-    }) for value, tag, line in parser.blocks]
+        "line_end": bisect.bisect_right(parser.line_starts, max(start, end - 1)),
+        "char_start": start,
+        "char_end": end,
+    }) for value, tag, line, start, end in parser.blocks]
     if not blocks:
         raise DocumentParsingError("В HTML не найден текст.")
     return ParsedDocument(file_type, blocks, {
@@ -790,20 +1008,31 @@ def _parse_epub(data: bytes) -> ParsedDocument:
         blocks: list[SourceBlock] = []
         for chapter, item in enumerate(html_entries, start=1):
             member = _safe_epub_member(item.filename)
-            blocks.extend(SourceBlock(value, {
-                "kind": "epub",
-                "label": f"Глава {chapter}",
-                "chapter": chapter,
-                "path": member,
-            }) for value, _, _ in _html_parser_blocks(archive.read(item.filename)))
+            chapter_data = archive.read(item.filename)
+            chapter_text, _ = _decode_text_with_encoding(chapter_data)
+            line_starts = [0]
+            line_starts.extend(index + 1 for index, char in enumerate(chapter_text) if char == "\n")
+            for value, tag, line, start, end in _html_parser_blocks(chapter_data):
+                blocks.append(SourceBlock(value, {
+                    "kind": "epub",
+                    "label": f"Глава {chapter} · {tag.upper()} · строка {line}",
+                    "chapter": chapter,
+                    "path": member,
+                    "element": tag,
+                    "line_start": line,
+                    "line_end": bisect.bisect_right(line_starts, max(start, end - 1)),
+                    "char_start": start,
+                    "char_end": end,
+                }))
     if not blocks:
         raise DocumentParsingError("В EPUB не найден текст глав.")
     return ParsedDocument("epub", blocks, {"chapter_count": len(html_entries)})
 
 
-def _html_parser_blocks(data: bytes) -> list[tuple[str, str, int]]:
+def _html_parser_blocks(data: bytes) -> list[tuple[str, str, int, int, int]]:
     text = _decode_text(data)
     parser = _HtmlBlockParser()
+    parser.set_source(text)
     parser.feed(text)
     parser.close()
     return parser.blocks

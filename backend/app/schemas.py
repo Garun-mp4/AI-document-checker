@@ -109,6 +109,8 @@ class TablePreviewOut(BaseModel):
     offset: int
     limit: int
     total_rows: int
+    sheet: str | None = None
+    available_sheets: list[str] = Field(default_factory=list)
 
 
 class InsightOut(BaseModel):

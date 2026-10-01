@@ -11,14 +11,17 @@ CSV lines) from being presented as the uploaded document.
 
 import csv
 import io
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from app.services.parsing import DocumentParsingError, _decode_text
+from app.services.source_locators import versioned_source_locator
 
 MAX_PREVIEW_BLOCKS = 2_000
 MAX_TABLE_ROWS = 500
+logger = logging.getLogger(__name__)
 
 
 def _renderer_for(file_type: str) -> str:
@@ -156,6 +159,8 @@ def read_csv_table(data: bytes, *, offset: int = 0, limit: int = 100) -> dict[st
         "limit": limit,
         "total_rows": total_rows,
         "delimiter": delimiter,
+        "sheet": None,
+        "available_sheets": [],
     }
 
 
@@ -168,55 +173,90 @@ def read_csv_table_file(path: Path, *, offset: int = 0, limit: int = 100) -> dic
         raise DocumentParsingError("Не удалось прочитать исходный CSV-файл.") from exc
 
 
-def read_spreadsheet_table(data: bytes, file_type: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+def read_spreadsheet_table(
+    data: bytes,
+    file_type: str,
+    *,
+    offset: int = 0,
+    limit: int = 100,
+    sheet: str | None = None,
+) -> dict[str, Any]:
     if offset < 0:
         raise DocumentParsingError("offset не может быть отрицательным.")
     limit = max(1, min(limit, MAX_TABLE_ROWS))
+    workbook = None
     try:
         if file_type == "xlsx":
             from openpyxl import load_workbook
             workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-            sheet = workbook.worksheets[0]
-            if (sheet.max_row or 0) > 100_000 or (sheet.max_column or 0) > 500:
-                workbook.close()
+            available_sheets = list(workbook.sheetnames)
+            selected_name = sheet or (available_sheets[0] if available_sheets else None)
+            if selected_name not in available_sheets:
+                raise DocumentParsingError("Выбранный лист книги не найден.")
+            worksheet = workbook[selected_name]
+            if (worksheet.max_row or 0) > 100_000 or (worksheet.max_column or 0) > 500:
                 raise DocumentParsingError('Размер таблицы превышает безопасный предел строк или столбцов.')
-            rows = [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]
-            sheet_name = sheet.title
-            workbook.close()
+            header = next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+            columns = ["" if value is None else str(value) for value in header]
+            start_row = offset + 2
+            end_row = min((worksheet.max_row or 1), start_row + limit - 1)
+            rows = [
+                ["" if value is None else str(value) for value in row]
+                for row in worksheet.iter_rows(min_row=start_row, max_row=end_row, values_only=True)
+            ] if start_row <= (worksheet.max_row or 1) else []
+            total_rows = max(0, (worksheet.max_row or 1) - 1)
+            sheet_name = selected_name
         else:
             import xlrd
             workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
-            sheet = workbook.sheet_by_index(0)
-            if sheet.nrows > 100_000 or sheet.ncols > 500:
+            available_sheets = list(workbook.sheet_names())
+            selected_name = sheet or (available_sheets[0] if available_sheets else None)
+            if selected_name not in available_sheets:
+                raise DocumentParsingError("Выбранный лист книги не найден.")
+            worksheet = workbook.sheet_by_name(selected_name)
+            if worksheet.nrows > 100_000 or worksheet.ncols > 500:
                 raise DocumentParsingError('Размер таблицы превышает безопасный предел строк или столбцов.')
-            rows = [["" if value is None else str(value) for value in sheet.row_values(index)] for index in range(sheet.nrows)]
-            sheet_name = sheet.name
+            columns = worksheet.row_values(0) if worksheet.nrows else []
+            start_row = offset + 1
+            end_row = min(worksheet.nrows, start_row + limit)
+            rows = [worksheet.row_values(index) for index in range(start_row, end_row)]
+            sheet_name = selected_name
+            total_rows = max(0, worksheet.nrows - 1)
+    except DocumentParsingError:
+        raise
     except ImportError as exc:
         raise DocumentParsingError(f"Для {file_type.upper()} не установлен модуль чтения таблиц.") from exc
     except Exception as exc:
         raise DocumentParsingError(f"{file_type.upper()} повреждён или имеет неверную структуру.") from exc
-    rows = [row for row in rows if any(cell.strip() for cell in row)]
-    if not rows:
+    finally:
+        if workbook is not None:
+            try:
+                if hasattr(workbook, "close"):
+                    workbook.close()
+                elif hasattr(workbook, "release_resources"):
+                    workbook.release_resources()
+            except (OSError, ValueError):
+                logger.debug("Could not close spreadsheet preview workbook", exc_info=True)
+    if not columns:
         raise DocumentParsingError("Таблица пустая — строк не найдено.")
-    columns = [cell.strip() or f"Столбец {index + 1}" for index, cell in enumerate(rows[0])]
+    columns = [str(cell).strip() or f"Столбец {index + 1}" for index, cell in enumerate(columns)]
     if len(columns) > 500:
         raise DocumentParsingError("В таблице слишком много столбцов (максимум 500).")
-    data_rows = rows[1:]
-    page = data_rows[offset:offset + limit]
     return {
         "columns": columns,
         "rows": [
-            {"number": offset + index + 2, "cells": row[:len(columns)] + [""] * max(0, len(columns) - len(row))}
-            for index, row in enumerate(page)
+            {"number": offset + index + 2, "cells": ["" if value is None else str(value) for value in row[:len(columns)]] + [""] * max(0, len(columns) - len(row))}
+            for index, row in enumerate(rows)
         ],
         "offset": offset,
         "limit": limit,
-        "total_rows": len(data_rows),
+        "total_rows": total_rows,
         "sheet": sheet_name,
+        "available_sheets": available_sheets,
     }
 
 
-def read_table_file(path: Path, file_type: str, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+def read_table_file(path: Path, file_type: str, *, offset: int = 0, limit: int = 100, sheet: str | None = None) -> dict[str, Any]:
     try:
         data = path.read_bytes()
     except FileNotFoundError as exc:
@@ -225,7 +265,7 @@ def read_table_file(path: Path, file_type: str, *, offset: int = 0, limit: int =
         raise DocumentParsingError("Не удалось прочитать исходный файл таблицы.") from exc
     if file_type == "csv":
         return read_csv_table(data, offset=offset, limit=limit)
-    return read_spreadsheet_table(data, file_type, offset=offset, limit=limit)
+    return read_spreadsheet_table(data, file_type, offset=offset, limit=limit, sheet=sheet)
 
 
 def build_preview(
@@ -236,6 +276,7 @@ def build_preview(
     chunks: Iterable[Any],
     original_url: str | None,
     total_blocks: int | None = None,
+    processing_version: int = 1,
 ) -> dict[str, Any]:
     """Return the original-file preview contract and its citation source map."""
 
@@ -245,8 +286,16 @@ def build_preview(
     blocks: list[dict[str, Any]] = []
     columns = [str(value) for value in metadata.get("columns", [])]
     for chunk in all_chunks[:MAX_PREVIEW_BLOCKS]:
-        locator = dict(getattr(chunk, "locator", None) or {})
         is_derived = bool(getattr(chunk, "is_derived", False))
+        raw_locator = dict(getattr(chunk, "locator", None) or {})
+        chunk_version = getattr(chunk, "version", raw_locator.get("processing_version", processing_version))
+        locator = versioned_source_locator(
+            raw_locator,
+            document_id=document_id,
+            processing_version=chunk_version if isinstance(chunk_version, int) else processing_version,
+            file_type=file_type,
+            is_derived=is_derived,
+        )
         block: dict[str, Any] = {
             "id": str(chunk.id),
             "source_id": str(chunk.id),
