@@ -336,6 +336,81 @@ def test_compose_indexes_mixed_pdf_and_persists_page_coordinate_map(compose_clie
         assert delete_response.status_code == 204, delete_response.text
 
 
+@pytest.mark.integration
+def test_compose_ocr_reprocess_creates_isolated_version_and_preserves_active_document_on_analysis_failure(
+    compose_client: httpx.Client,
+) -> None:
+    _require_disconnected_codex(compose_client)
+    original_bytes = (FIXTURES / "mixed.pdf").read_bytes()
+    response = compose_client.post(
+        "/api/v1/documents",
+        files={"file": ("mixed.pdf", original_bytes, "application/pdf")},
+    )
+    assert response.status_code == 202, response.text
+    document_id = response.json()["id"]
+    try:
+        initial = _wait_for_document(compose_client, document_id)
+        assert initial["active_version"] > 0
+        old_version = initial["active_version"]
+        old_chunks = compose_client.get(f"/api/v1/documents/{document_id}/chunks?limit=200").json()
+        original_ocr_ids = {chunk["id"] for chunk in old_chunks if chunk["locator"].get("ocr") is True}
+        assert original_ocr_ids
+        for invalid_settings in (
+            {"language": "fra", "quality": "balanced"},
+            {"language": "rus", "quality": "high", "pages": [5]},
+            {"language": "eng", "quality": "fast", "pages": list(range(1, 102))},
+        ):
+            invalid = compose_client.post(
+                f"/api/v1/documents/{document_id}/ocr/reprocess",
+                json=invalid_settings,
+            )
+            assert invalid.status_code == 422, invalid.text
+
+        reprocess = compose_client.post(
+            f"/api/v1/documents/{document_id}/ocr/reprocess",
+            json={"language": "eng", "quality": "high", "pages": [2]},
+        )
+        assert reprocess.status_code == 202, reprocess.text
+        assert reprocess.json()["active_version"] == old_version
+
+        jobs_response = compose_client.get(f"/api/v1/documents/{document_id}/jobs")
+        assert jobs_response.status_code == 200, jobs_response.text
+        retry_job = next(job for job in jobs_response.json() if job["version"] > old_version)
+        assert retry_job["parameters"]["ocr"] == {
+            "enabled": True,
+            "languages": "eng",
+            "dpi": 300,
+            "quality": "high",
+            "max_pages": 100,
+        }
+        assert retry_job["parameters"]["ocr_pages"] == [2]
+
+        deadline = time.monotonic() + 180
+        terminal_job = None
+        while time.monotonic() < deadline:
+            jobs = compose_client.get(f"/api/v1/documents/{document_id}/jobs").json()
+            terminal_job = next(job for job in jobs if job["version"] == retry_job["version"])
+            if terminal_job["state"] in {"failed", "cancelled", "succeeded"}:
+                break
+            time.sleep(0.5)
+        assert terminal_job is not None and terminal_job["state"] == "failed", terminal_job
+        assert terminal_job["error"]
+
+        active = compose_client.get(f"/api/v1/documents/{document_id}").json()
+        assert active["active_version"] == old_version
+        assert active["chunk_count"] == initial["chunk_count"]
+        assert active["metadata"]["pdf_page_map"] == initial["metadata"]["pdf_page_map"]
+        active_chunks = compose_client.get(f"/api/v1/documents/{document_id}/chunks?limit=200").json()
+        assert {chunk["id"] for chunk in active_chunks if chunk["locator"].get("ocr") is True} == original_ocr_ids
+        original = compose_client.get(f"/api/v1/documents/{document_id}/file")
+        assert original.status_code == 200
+        assert original.content == original_bytes
+        assert compose_client.get(f"/api/v1/documents/{document_id}/chat").status_code == 200
+    finally:
+        delete_response = compose_client.delete(f"/api/v1/documents/{document_id}")
+        assert delete_response.status_code == 204, delete_response.text
+
+
 def _large_docx() -> bytes:
     source = (FIXTURES / "sample.docx").read_bytes()
     expanded = BytesIO()

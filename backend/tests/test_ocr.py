@@ -216,3 +216,91 @@ def test_ocr_reports_unreadable_scan(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     with pytest.raises(OCRProcessingError, match="не нашёл читаемого текста"):
         OCRService(upload_dir).process(path)
+
+
+@pytest.mark.parametrize("language", ["rus", "eng", "rus+eng"])
+def test_ocr_uses_selected_language_quality_and_warning_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    language: str,
+) -> None:
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    path = upload_dir / "settings.pdf"
+    path.write_bytes(b"placeholder")
+    rendered: list[dict[str, object]] = []
+    recognized: list[str] = []
+
+    class MissingTesseract(RuntimeError):
+        pass
+
+    class FakeTesseract:
+        TesseractNotFoundError = MissingTesseract
+
+        @staticmethod
+        def get_tesseract_version() -> str:
+            return "5.3.0"
+
+        @staticmethod
+        def image_to_data(*_args, **kwargs):
+            recognized.append(kwargs["lang"])
+            return {
+                "text": ["OCR", "check"], "conf": ["80", "84"],
+                "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
+                "left": ["1", "30"], "top": ["1", "1"], "width": ["25", "30"], "height": ["10", "10"],
+            }
+
+    monkeypatch.setattr(ocr.settings, "ocr_languages", language)
+    monkeypatch.setattr(ocr.settings, "ocr_dpi", 300)
+    monkeypatch.setattr(ocr.settings, "ocr_confidence_warning_threshold", 55)
+    monkeypatch.setattr(ocr, "PdfReader", lambda *_args, **_kwargs: SimpleNamespace(is_encrypted=False, pages=[object()]))
+
+    def render(*_args, **kwargs):
+        rendered.append(kwargs)
+        return [SimpleNamespace(width=100, height=140)]
+
+    monkeypatch.setattr(ocr, "convert_from_path", render)
+    monkeypatch.setattr(ocr, "pytesseract", FakeTesseract)
+    monkeypatch.setattr(ocr, "Output", SimpleNamespace(DICT="dict"))
+    result = OCRService(upload_dir).process(path)
+
+    assert recognized == [language]
+    assert rendered[0]["dpi"] == 300
+    assert result.parsed.metadata["ocr_confidence_warning_threshold"] == 55
+    assert result.parsed.metadata["ocr_page_map"][0]["confidence"] == 82
+
+
+def test_missing_tesseract_language_pack_returns_actionable_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    path = upload_dir / "missing-language.pdf"
+    path.write_bytes(b"placeholder")
+
+    class MissingTesseract(RuntimeError):
+        pass
+
+    MissingLanguageDataError = type("TesseractError", (RuntimeError,), {})
+
+    class FakeTesseract:
+        TesseractNotFoundError = MissingTesseract
+        TesseractError = MissingLanguageDataError
+
+        @staticmethod
+        def get_tesseract_version() -> str:
+            return "5.3.0"
+
+        @staticmethod
+        def image_to_data(*_args, **_kwargs):
+            raise MissingLanguageDataError("Error opening data file /tessdata/eng.traineddata")
+
+    monkeypatch.setattr(ocr.settings, "ocr_languages", "eng")
+    monkeypatch.setattr(ocr, "PdfReader", lambda *_args, **_kwargs: SimpleNamespace(is_encrypted=False, pages=[object()]))
+    monkeypatch.setattr(ocr, "convert_from_path", lambda *_args, **_kwargs: [SimpleNamespace(width=100, height=140)])
+    monkeypatch.setattr(ocr, "pytesseract", FakeTesseract)
+    monkeypatch.setattr(ocr, "Output", SimpleNamespace(DICT="dict"))
+
+    with pytest.raises(OCRProcessingError, match="языковой пакет Tesseract.*eng"):
+        OCRService(upload_dir).process(path)

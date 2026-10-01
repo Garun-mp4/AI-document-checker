@@ -251,6 +251,7 @@ class OCRService:
         self.max_pages = max(1, min(settings.ocr_max_pages, 500))
         self.timeout = max(10, settings.ocr_timeout_seconds)
         self.max_chars = max(10_000, settings.ocr_max_chars)
+        self.confidence_warning_threshold = max(0, min(settings.ocr_confidence_warning_threshold, 100))
 
     def _safe_path(self, path: Path) -> Path:
         from app.services.document_security import storage_path
@@ -281,6 +282,8 @@ class OCRService:
     ) -> OCRResult:
         if not self.enabled:
             raise OCRProcessingError("OCR отключён настройками приложения.")
+        if self.languages not in {"rus", "eng", "rus+eng"}:
+            raise OCRProcessingError("Выбран неподдерживаемый язык OCR. Выберите русский, английский или оба языка.")
         safe_path = self._safe_path(path)
         engine_version = self._engine_version()
         try:
@@ -420,7 +423,15 @@ class OCRService:
                 page_status.update({"classification": "unreadable", "error": "coordinate_map_failed"})
             except pytesseract.TesseractNotFoundError as exc:
                 raise OCRProcessingError("OCR недоступен: в контейнере не найден Tesseract.") from exc
-            except (RuntimeError, OSError):
+            except (RuntimeError, OSError) as exc:
+                details = str(exc).casefold()
+                if type(exc).__name__ == "TesseractError" and any(
+                    marker in details for marker in ("traineddata", "failed loading language", "error opening data file", "language data")
+                ):
+                    raise OCRProcessingError(
+                        f"Не установлен языковой пакет Tesseract для режима «{self.languages}». "
+                        "Установите соответствующие данные языка в backend и повторите OCR."
+                    ) from exc
                 # A single unreadable page should not discard successful OCR
                 # from other pages in the same mixed PDF.
                 page_status.update({"classification": "unreadable", "error": "recognition_failed"})
@@ -445,6 +456,7 @@ class OCRService:
             "ocr_config": "--psm 3",
             "ocr_max_page_seconds": self.timeout,
             "ocr_max_chars": self.max_chars,
+            "ocr_confidence_warning_threshold": self.confidence_warning_threshold,
             "ocr_engine_version": engine_version,
             "ocr_page_count": sum(page["classification"] == "ocr" for page in page_results),
             "ocr_char_count": total_chars,

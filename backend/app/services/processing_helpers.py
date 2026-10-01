@@ -31,6 +31,28 @@ def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
     return blocks
 
 
+def _carry_forward_unselected_ocr_pages(
+    previous_blocks: list[SourceBlock],
+    previous_page_map: list[dict[str, object]],
+    current_blocks: list[SourceBlock],
+    current_page_map: list[dict[str, object]],
+    selected_pages: set[int],
+) -> tuple[list[SourceBlock], list[dict[str, object]]]:
+    """Reuse successful OCR locators on untouched pages in a new processing version."""
+    blocks = [block for block in previous_blocks if block.locator.get('page') not in selected_pages]
+    blocks.extend(current_blocks)
+    pages = {
+        item['page']: dict(item)
+        for item in previous_page_map
+        if isinstance(item.get('page'), int) and item['page'] not in selected_pages
+    }
+    for item in current_page_map:
+        page = item.get('page')
+        if isinstance(page, int):
+            pages[page] = dict(item)
+    return blocks, [pages[page] for page in sorted(pages)]
+
+
 def _ocr_analysis_blocks(
     parsed: ParsedDocument,
     markdown: str,
@@ -121,6 +143,9 @@ def _merge_pdf_ocr_pages(native: ParsedDocument, ocr: ParsedDocument) -> tuple[P
         info["ocr_result"] = raster_result.get("classification", "not_run")
         info["ocr_word_count"] = raster_result.get("word_count", 0)
         info["ocr_line_count"] = raster_result.get("line_count", 0)
+        info["ocr_confidence"] = raster_result.get("confidence")
+        info["ocr_language"] = raster_result.get("language")
+        info["ocr_dpi"] = raster_result.get("dpi")
         selected.extend(chosen)
 
     selected.sort(key=lambda block: (int(block.locator.get("page", 0)), int(block.locator.get("char_start", 0))))
@@ -133,6 +158,7 @@ def _merge_pdf_ocr_pages(native: ParsedDocument, ocr: ParsedDocument) -> tuple[P
         "ocr_used": bool(summary["ocr_pages"]),
         "ocr_language": ocr.metadata.get("ocr_language"),
         "ocr_dpi": ocr.metadata.get("ocr_dpi"),
+        "ocr_settings": ocr.metadata.get("ocr_settings"),
         "ocr_engine_version": ocr.metadata.get("ocr_engine_version"),
         "ocr_page_map": ocr.metadata.get("ocr_page_map", []),
         "ocr_page_count": len(summary["ocr_pages"]),

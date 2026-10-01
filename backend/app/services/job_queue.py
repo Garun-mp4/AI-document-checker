@@ -25,12 +25,15 @@ async def active_chunk_version(session, document: Document) -> int:
     return version.chunk_version if version else 0
 
 
-async def enqueue(session, document: Document, operation: str = 'process') -> ProcessingJob:
+async def enqueue(session, document: Document, operation: str = 'process', *, parameters: dict | None = None,
+                  reject_if_active: bool = False) -> ProcessingJob:
     """Caller holds the document row lock (or is inserting a new document)."""
     existing = (await session.execute(select(ProcessingJob).where(
         ProcessingJob.document_id == document.id, ProcessingJob.state.in_(ACTIVE)
     ))).scalar_one_or_none()
     if existing:
+        if reject_if_active:
+            raise ValueError('Для документа уже выполняется обработка. Дождитесь её завершения и повторите OCR.')
         return existing
     base = None
     if operation in ('retry', 'analysis'):
@@ -47,13 +50,16 @@ async def enqueue(session, document: Document, operation: str = 'process') -> Pr
                                 chunk_version=base.chunk_version if base else number,
                                 state='indexed' if base else 'staging',
                                 snapshot=dict(base.snapshot) if base else {}))
+    job_parameters = {'model': settings.codex_model,
+                      'reasoning_effort': settings.codex_reasoning_effort,
+                      'ocr': {'enabled': settings.ocr_enabled, 'languages': settings.ocr_languages,
+                              'dpi': settings.ocr_dpi, 'max_pages': settings.ocr_max_pages},
+                      'converter_version': '0.1.8'}
+    if parameters:
+        job_parameters.update(parameters)
     job = ProcessingJob(document_id=document.id, operation=operation, version=number,
                         input_version=document.input_checksum, state='queued', stage='queued',
-                        parameters={'model': settings.codex_model,
-                                    'reasoning_effort': settings.codex_reasoning_effort,
-                                    'ocr': {'enabled': settings.ocr_enabled, 'languages': settings.ocr_languages,
-                                            'dpi': settings.ocr_dpi, 'max_pages': settings.ocr_max_pages},
-                                    'converter_version': '0.1.8'})
+                        parameters=job_parameters)
     session.add(job)
     if document.status != 'ready':
         document.status = 'queued'
@@ -61,13 +67,15 @@ async def enqueue(session, document: Document, operation: str = 'process') -> Pr
     return job
 
 
-async def submit(document_id: uuid.UUID, operation: str = 'retry') -> ProcessingJob:
+async def submit(document_id: uuid.UUID, operation: str = 'retry', *, parameters: dict | None = None,
+                 reject_if_active: bool = False) -> ProcessingJob:
     async with SessionLocal() as session, session.begin():
         document = (await session.execute(select(Document).where(Document.id == document_id)
                                          .with_for_update())).scalar_one_or_none()
         if document is None:
             raise KeyError(document_id)
-        job = await enqueue(session, document, operation)
+        job = await enqueue(session, document, operation, parameters=parameters,
+                            reject_if_active=reject_if_active)
     return job
 
 

@@ -31,6 +31,7 @@ export interface ProcessingJob {
 }
 
 export interface DocumentRecord {
+  active_version: number
   id: string
   filename: string
   file_type: string

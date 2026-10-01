@@ -139,9 +139,10 @@ async def run_document_operation(operation: str, path: Path, *, timeout: float |
     names = ('embedding_cache_dir', 'upload_dir', 'max_upload_bytes', 'archive_max_bytes', 'archive_member_max_bytes',
              'archive_max_entries', 'document_max_pages', 'document_max_chars', 'markdown_max_chars',
              'ocr_enabled', 'ocr_languages', 'ocr_dpi', 'ocr_max_pages', 'ocr_timeout_seconds', 'ocr_max_chars',
+             'ocr_confidence_warning_threshold',
              'document_worker_memory_mb', 'document_worker_cpu_seconds', 'document_worker_max_output_bytes')
     overrides = configuration or {}
-    if overrides.keys() - {'ocr_enabled', 'ocr_languages', 'ocr_dpi', 'ocr_max_pages'}:
+    if overrides.keys() - {'ocr_enabled', 'ocr_languages', 'ocr_dpi', 'ocr_max_pages', 'ocr_confidence_warning_threshold'}:
         raise ValueError('Unsupported processing configuration')
     configuration = {name: getattr(settings, name) for name in names}
     configuration.update(overrides)

@@ -106,3 +106,23 @@ test('OCR has an explicit processing state and user-facing fallback message', ()
   assert.match(originalViewer, /pdfOcrWordBoxes\(selectedSource\)/)
   assert.match(originalViewer, /pdf-ocr-highlight-box/)
 })
+
+test('OCR retry keeps language, quality, scope, impact and page confidence explicit', () => {
+  for (const language of ['Русский', 'Английский', 'Русский + английский']) assert.ok(originalViewer.includes(language))
+  for (const dpi of ['150', '200', '300']) assert.match(originalViewer, new RegExp(`${dpi} DPI`))
+  assert.match(originalViewer, /ocr-page-status-list/)
+  assert.match(originalViewer, /эвристика, а не вероятность правильного распознавания/)
+  assert.match(originalViewer, /Создать новую версию OCR\?/)
+  assert.match(originalViewer, /Оригинал документа и история чата сохранятся/)
+  assert.match(originalViewer, /pages: number\[\] \| null/)
+  assert.match(app, /\/ocr\/reprocess/)
+  assert.match(styles, /\.ocr-impact-dialog::backdrop/)
+  assert.match(styles, /\.ocr-pages-select\s*\{[^}]*max-height/)
+})
+
+test('OCR automatic scope reflects pages that actually need OCR and keeps manual retry available', () => {
+  assert.match(originalViewer, /Все страницы, для которых нужен OCR \(\{eligiblePages\.length\}\)/)
+  assert.match(originalViewer, /eligiblePages\.length === 0/)
+  assert.match(originalViewer, /Страниц, которым требуется OCR, не найдено/)
+  assert.match(originalViewer, /disabled=\{page\.classification === 'blank' \|\| page\.ocrResult === 'blank'\}/)
+})

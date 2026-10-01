@@ -29,9 +29,10 @@ from app.services.isolated_documents import (
 from app.services.job_queue import LeaseLost, discard, enter_analysis, fenced
 from app.services.markdown_mapping import serialize_map
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
-from app.services.ocr import OCRProcessingError, OCRService
-from app.services.parsing import DocumentParsingError
+from app.services.ocr import OCRProcessingError
+from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
 from app.services.processing_helpers import (
+    _carry_forward_unselected_ocr_pages,
     _computed_blocks,
     _merge_pdf_ocr_pages,
     _ocr_analysis_blocks,
@@ -60,13 +61,13 @@ class ProcessingAttempt:
         self.stage_hook = stage_hook
         self.prefix = f'{job.document_id}.v{job.version}.{job.owner.hex}'
         self.markitdown = MarkItDownService(settings.upload_dir)
-        self.ocr = OCRService(settings.upload_dir)
         ocr = getattr(job, 'parameters', {}).get('ocr', {})
         self.configuration = {
             'ocr_enabled': ocr.get('enabled', settings.ocr_enabled),
             'ocr_languages': ocr.get('languages', settings.ocr_languages),
             'ocr_dpi': ocr.get('dpi', settings.ocr_dpi),
             'ocr_max_pages': ocr.get('max_pages', settings.ocr_max_pages),
+            'ocr_confidence_warning_threshold': settings.ocr_confidence_warning_threshold,
         }
 
     def artifact(self, suffix):
@@ -92,6 +93,8 @@ class ProcessingAttempt:
 
     async def index(self):
         document_id = self.job.document_id
+        previous_ocr_metadata: dict[str, object] = {}
+        previous_ocr_blocks: list[SourceBlock] = []
         async with fenced(self.job.id, self.job.owner) as (session, document, job):
             path = owned_storage(document.storage_path, document_id)
             filename = document.filename
@@ -102,6 +105,21 @@ class ProcessingAttempt:
             job.input_version = checksum
             version = await session.get(DocumentVersion, (document_id, job.version))
             version.snapshot = {'attempt_prefix': self.prefix}
+            if document.active_version:
+                previous_version = await session.get(DocumentVersion, (document_id, document.active_version))
+                if previous_version:
+                    previous_ocr_metadata = dict(
+                        previous_version.snapshot.get('metadata_json') or document.metadata_json or {}
+                    )
+                    previous_chunks = (await session.execute(select(Chunk.text, Chunk.locator).where(
+                        Chunk.document_id == document_id,
+                        Chunk.version == previous_version.chunk_version,
+                    ))).all()
+                    previous_ocr_blocks = [
+                        SourceBlock(text, locator)
+                        for text, locator in previous_chunks
+                        if isinstance(locator, dict) and locator.get('ocr') is True
+                    ]
         await self.stage('extracting')
         parsed = await parse_uploaded(path, filename, configuration=self.configuration)
         # The original Markdown upload is already named <id>.md. Use a
@@ -119,6 +137,22 @@ class ProcessingAttempt:
         markdown_engine_version: str | None = None
         ocr_metadata: dict[str, object] = {}
         candidate_pages = parsed.metadata.get("ocr_pages", []) if parsed.file_type == "pdf" else []
+        requested_pages = getattr(self.job, 'parameters', {}).get('ocr_pages')
+        previous_page_results = previous_ocr_metadata.get('ocr_page_map', [])
+        if parsed.file_type == 'pdf' and requested_pages is None:
+            retryable_previous_pages = [
+                item.get('page') for item in previous_page_results
+                if isinstance(item, dict) and item.get('classification') in {'ocr', 'ocr_candidate', 'unreadable'}
+            ]
+            candidate_pages = sorted(set(candidate_pages) | {
+                page for page in retryable_previous_pages if isinstance(page, int)
+            })
+        elif requested_pages is not None:
+            candidate_pages = requested_pages
+        deferred_pages: list[int] = []
+        if requested_pages is None and len(candidate_pages) > settings.ocr_max_pages:
+            deferred_pages = candidate_pages[settings.ocr_max_pages:]
+            candidate_pages = candidate_pages[:settings.ocr_max_pages]
         if candidate_pages:
             await self.stage('ocr', processed_pages=0, total_pages=len(candidate_pages))
 
@@ -126,9 +160,53 @@ class ProcessingAttempt:
                 await self.stage('ocr', processed_pages=processed_pages, total_pages=total)
 
             ocr_result = await ocr_uploaded(path, configuration=self.configuration, pages=candidate_pages,
-                                            allow_empty=bool(parsed.blocks),
+                                            allow_empty=bool(parsed.blocks) or bool(previous_ocr_blocks),
                                             progress_callback=report_ocr_progress)
-            parsed, ocr_summary = _merge_pdf_ocr_pages(parsed, ocr_result.parsed)
+            selected_pages = set(candidate_pages)
+            deferred_results = [
+                {
+                    'page': page,
+                    'classification': 'unreadable',
+                    'error': 'page_limit',
+                    'raster_width': None,
+                    'raster_height': None,
+                    'dpi': self.configuration['ocr_dpi'],
+                    'rotation': 0,
+                    'crop_box': None,
+                    'language': self.configuration['ocr_languages'],
+                    'engine_version': ocr_result.engine_version,
+                    'word_count': 0,
+                    'line_count': 0,
+                    'confidence': None,
+                }
+                for page in deferred_pages
+            ]
+            carried_blocks, carried_page_results = _carry_forward_unselected_ocr_pages(
+                previous_ocr_blocks,
+                [item for item in previous_page_results if isinstance(item, dict)],
+                ocr_result.parsed.blocks,
+                [item for item in ocr_result.parsed.metadata.get('ocr_page_map', []) if isinstance(item, dict)],
+                selected_pages,
+            )
+            combined_ocr = ParsedDocument(
+                'pdf',
+                carried_blocks,
+                {
+                    **ocr_result.parsed.metadata,
+                    'ocr_page_map': [
+                        *carried_page_results,
+                        *deferred_results,
+                    ],
+                    'ocr_language': self.configuration['ocr_languages'],
+                    'ocr_dpi': self.configuration['ocr_dpi'],
+                    'ocr_settings': {
+                        'language': self.configuration['ocr_languages'],
+                        'dpi': self.configuration['ocr_dpi'],
+                        'quality': getattr(self.job, 'parameters', {}).get('ocr', {}).get('quality', 'balanced'),
+                    },
+                },
+            )
+            parsed, ocr_summary = _merge_pdf_ocr_pages(parsed, combined_ocr)
             ocr_metadata = parsed.metadata
             if not parsed.blocks:
                 raise OCRProcessingError("В PDF не найден читаемый текст: страницы пустые или не удалось распознать скан.")
@@ -192,7 +270,13 @@ class ProcessingAttempt:
         snapshot = {
             'attempt_prefix': self.prefix,
             'file_type': parsed.file_type,
-            'metadata_json': {**parsed.metadata, 'markdown_status': markdown_status, 'analysis_source': analysis_source},
+            'metadata_json': {
+                **parsed.metadata,
+                'markdown_status': markdown_status,
+                'analysis_source': analysis_source,
+                'ocr_confidence_warning_threshold': settings.ocr_confidence_warning_threshold,
+                'ocr_max_pages': settings.ocr_max_pages,
+            },
             'markdown_status': markdown_status, 'analysis_source': analysis_source,
             'markdown_path': str(markdown_path) if markdown_status == 'ready' else None,
             'markdown_map_path': str(markdown_map_path) if markdown_status == 'ready' else None,

@@ -33,6 +33,7 @@ import {
 } from 'lucide-react'
 import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
+import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
 import { ChatMarkdown } from './components/ChatMarkdown'
 import { ProcessingStatusPanel } from './components/ProcessingStatusPanel'
@@ -146,6 +147,7 @@ function scrollIntoViewRespectingMotion(target: Element | null, block: ScrollLog
 
 function summaryToDocument(summary: ChatSummary): DocumentRecord {
   return {
+    active_version: 0,
     id: summary.document_id,
     filename: summary.filename,
     file_type: summary.file_type,
@@ -596,6 +598,29 @@ function App() {
     }
   }, [document, processingActionPending, showToast, updateDocumentInLibrary])
 
+  const reprocessDocumentOCR = useCallback(async (options: OcrReprocessOptions): Promise<boolean> => {
+    if (!document || processingActionPending) return false
+    setProcessingActionPending(true)
+    try {
+      const updated = await api<DocumentRecord>(`${API}/documents/${document.id}/ocr/reprocess`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options),
+      })
+      const jobs = await api<ProcessingJob[]>(`${API}/documents/${document.id}/jobs`)
+      setDocument(updated)
+      setProcessingJob(jobs.find((job) => ['queued', 'running', 'cancelling'].includes(job.state)) ?? jobs[0] ?? null)
+      updateDocumentInLibrary(updated)
+      showToast('Повторный OCR поставлен в очередь. Предыдущая версия доступна до завершения обработки.')
+      return true
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось запустить повторный OCR.')
+      return false
+    } finally {
+      setProcessingActionPending(false)
+    }
+  }, [document, processingActionPending, showToast, updateDocumentInLibrary])
+
   const cancelProcessing = useCallback(async () => {
     if (!selectedId || processingActionPending) return
     setProcessingActionPending(true)
@@ -1006,7 +1031,7 @@ function App() {
                             {markdownDocument?.status === 'ready' && <a className="preview-download" href={`${API}/documents/${document.id}/markdown/download`} download>Скачать .md</a>}
                           </div>
                           {previewTab === 'original' ? (
-                            documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} onReprocess={() => void retryDocument('process')} reprocessing={processingActionPending} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>
+                            documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} onReprocess={reprocessDocumentOCR} reprocessing={processingActionPending || Boolean(processingJob && ['queued', 'running', 'cancelling'].includes(processingJob.state))} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>
                           ) : markdownDocument ? (
                             <MarkdownViewer data={markdownDocument} selectedSource={selectedSource} onRebuild={() => void rebuildMarkdown()} rebuilding={markdownRebuilding} onLoadMore={() => void loadMoreMarkdown()} loadingMore={markdownLoadingMore} />
                           ) : <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю Markdown…</div>}

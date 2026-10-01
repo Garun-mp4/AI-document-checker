@@ -45,6 +45,7 @@ from app.schemas import (
     InsightOut,
     MarkdownOut,
     MessageOut,
+    OcrReprocessIn,
     ProcessingJobOut,
     SendMessageIn,
     SourceOut,
@@ -323,6 +324,56 @@ async def retry_document(document_id: uuid.UUID, request: Request, operation: st
         if operation not in {"retry", "analysis", "process"}:
             raise HTTPException(status_code=422, detail="Неизвестная операция.")
         await request.app.state.processor.retry(document_id, operation)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Документ не найден.") from exc
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        return _document_out(document)
+
+
+@router.post("/documents/{document_id}/ocr/reprocess", response_model=DocumentOut, status_code=202)
+async def reprocess_document_ocr(
+    document_id: uuid.UUID,
+    body: OcrReprocessIn,
+    request: Request,
+) -> DocumentOut:
+    quality_dpi = {"fast": 150, "balanced": 200, "high": 300}
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.file_type != "pdf":
+            raise HTTPException(status_code=422, detail="Повторное распознавание доступно только для PDF.")
+        page_count = (document.metadata_json or {}).get("page_count")
+        if not isinstance(page_count, int) or page_count < 1:
+            raise HTTPException(status_code=409, detail="Сначала дождитесь извлечения страниц PDF.")
+        if body.pages is not None:
+            if len(body.pages) > settings.ocr_max_pages:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"За один запуск можно выбрать не более {settings.ocr_max_pages} страниц.",
+                )
+            if any(page > page_count for page in body.pages):
+                raise HTTPException(status_code=422, detail=f"В PDF {page_count} страниц.")
+    try:
+        await request.app.state.processor.retry(
+            document_id,
+            "process",
+            parameters={
+                "ocr": {
+                    "enabled": True,
+                    "languages": body.language,
+                    "dpi": quality_dpi[body.quality],
+                    "quality": body.quality,
+                    "max_pages": settings.ocr_max_pages,
+                },
+                **({"ocr_pages": body.pages} if body.pages is not None else {}),
+            },
+            reject_if_active=True,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:

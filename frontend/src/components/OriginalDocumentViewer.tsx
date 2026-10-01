@@ -1,11 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BookOpen, LoaderCircle, TriangleAlert } from 'lucide-react'
+import { BookOpen, ChevronDown, LoaderCircle, Settings2, TriangleAlert, X } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 import * as pdfjsLib from 'pdfjs-dist'
 import type { DocumentPreview, DocumentRecord, PreviewBlock, SourceRef, StreamCitation, TablePreview } from '../types'
 
 const API = '/api/v1'
 const CSV_PAGE_SIZE = 100
+
+export interface OcrReprocessOptions {
+  language: 'rus' | 'eng' | 'rus+eng'
+  quality: 'fast' | 'balanced' | 'high'
+  pages: number[] | null
+}
+
+type OcrLanguage = OcrReprocessOptions['language']
+type OcrQuality = OcrReprocessOptions['quality']
+
+const OCR_QUALITY: Record<OcrQuality, { label: string; dpi: number; description: string }> = {
+  fast: { label: 'Быстро', dpi: 150, description: '150 DPI · быстрее, подходит для крупных букв' },
+  balanced: { label: 'Сбалансированно', dpi: 200, description: '200 DPI · рекомендуемый баланс скорости и читаемости' },
+  high: { label: 'Высокое качество', dpi: 300, description: '300 DPI · медленнее, помогает мелкому тексту' },
+}
+
+interface OcrPageInfo {
+  page: number
+  classification: string
+  nativeClassification: string
+  ocrResult: string
+  error: string | null
+  confidence: number | null
+  language: string | null
+  dpi: number | null
+}
 
 // Vite copies the worker as a separate asset. Keeping it out of the main
 // bundle avoids a blank PDF viewer when the browser blocks an inline worker.
@@ -24,7 +50,7 @@ interface OriginalDocumentViewerProps {
   selectedSourceId: string | null
   originalUrl: string
   pageNumber: number
-  onReprocess?: () => void
+  onReprocess?: (options: OcrReprocessOptions) => Promise<boolean> | boolean
   reprocessing?: boolean
 }
 
@@ -466,8 +492,97 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   const [renderError, setRenderError] = useState<string | null>(null)
   const [exactMatch, setExactMatch] = useState(true)
   const [retryKey, setRetryKey] = useState(0)
+  const [ocrSettingsOpen, setOcrSettingsOpen] = useState(false)
+  const [language, setLanguage] = useState<OcrLanguage>('rus+eng')
+  const [quality, setQuality] = useState<OcrQuality>('balanced')
+  const [pageScope, setPageScope] = useState<'all' | 'selected'>('all')
+  const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set())
+  const [confirmReprocess, setConfirmReprocess] = useState(false)
+  const dialogRef = useRef<HTMLDialogElement>(null)
   const handleMatch = (value: boolean) => setExactMatch(value)
   const renderer = preview.renderer || (record.file_type === 'docx' ? 'docx' : record.file_type === 'pdf' ? 'pdf' : ['csv', 'xlsx', 'xls'].includes(record.file_type) ? record.file_type : record.file_type === 'xml' ? 'xml' : record.file_type === 'pptx' || record.file_type === 'epub' ? record.file_type : 'text')
+  const rawPageMap = Array.isArray(record.metadata.pdf_page_map) ? record.metadata.pdf_page_map as Record<string, unknown>[] : []
+  const rawOcrPageMap = Array.isArray(record.metadata.ocr_page_map) ? record.metadata.ocr_page_map as Record<string, unknown>[] : []
+  const ocrPageMap = new Map(rawOcrPageMap.flatMap((item) => typeof item.page === 'number' ? [[item.page, item] as const] : []))
+  const pageRows: OcrPageInfo[] = rawPageMap.flatMap((item) => {
+    if (typeof item.page !== 'number') return []
+    const ocrInfo = ocrPageMap.get(item.page) || {}
+    const confidence = typeof item.ocr_confidence === 'number' ? item.ocr_confidence : typeof ocrInfo.confidence === 'number' ? ocrInfo.confidence : null
+    return [{
+      page: item.page,
+      classification: typeof item.classification === 'string' ? item.classification : 'unknown',
+      nativeClassification: typeof item.native_classification === 'string' ? item.native_classification : 'unknown',
+      ocrResult: typeof item.ocr_result === 'string' ? item.ocr_result : typeof ocrInfo.classification === 'string' ? ocrInfo.classification : 'not_run',
+      error: typeof ocrInfo.error === 'string' ? ocrInfo.error : null,
+      confidence,
+      language: typeof item.ocr_language === 'string' ? item.ocr_language : typeof ocrInfo.language === 'string' ? ocrInfo.language : null,
+      dpi: typeof item.ocr_dpi === 'number' ? item.ocr_dpi : typeof ocrInfo.dpi === 'number' ? ocrInfo.dpi : null,
+    }]
+  })
+  const pageSignature = pageRows.map((page) => `${page.page}:${page.classification}:${page.ocrResult}:${page.confidence}`).join('|')
+  const warningThreshold = typeof record.metadata.ocr_confidence_warning_threshold === 'number' ? record.metadata.ocr_confidence_warning_threshold : 60
+  const maxOcrPages = typeof record.metadata.ocr_max_pages === 'number' && record.metadata.ocr_max_pages > 0 ? record.metadata.ocr_max_pages : 100
+  const eligiblePages = pageRows.filter((page) => page.classification !== 'blank' && page.ocrResult !== 'blank' && (
+    page.classification === 'ocr' || page.classification === 'ocr_candidate' || page.classification === 'unreadable' ||
+    page.nativeClassification === 'ocr_candidate' || page.ocrResult === 'unreadable'
+  )).map((page) => page.page)
+  const selectablePages = eligiblePages.length ? eligiblePages : pageRows.filter((page) => page.classification !== 'blank').map((page) => page.page)
+  const lowConfidencePages = pageRows.filter((page) => page.ocrResult === 'ocr' && page.confidence !== null && page.confidence < warningThreshold)
+  const statusCounts = {
+    recognized: pageRows.filter((page) => page.classification === 'ocr').length,
+    native: pageRows.filter((page) => page.classification === 'native').length,
+    blank: pageRows.filter((page) => page.classification === 'blank').length,
+    unreadable: pageRows.filter((page) => page.ocrResult === 'unreadable' || page.error === 'page_limit').length,
+  }
+  const pageStatusLabel = (page: OcrPageInfo) => {
+    if (page.error === 'page_limit') return 'Не обработана: лимит страниц'
+    if (page.classification === 'blank' || page.ocrResult === 'blank') return 'Пустая страница'
+    if (page.classification === 'ocr' && page.confidence !== null) return `Распознана · ${Math.round(page.confidence)} из 100 по эвристике`
+    if (page.classification === 'ocr') return 'Распознана'
+    if (page.ocrResult === 'unreadable') return 'Не распознана · исходный текст сохранён, если он был'
+    if (page.nativeClassification === 'ocr_candidate' || page.classification === 'ocr_candidate') return 'Скан · OCR пока не запускался'
+    if (page.classification === 'native') return 'Текстовый слой PDF'
+    return 'Текст не найден'
+  }
+  useEffect(() => {
+    const stored = record.metadata.ocr_settings as Record<string, unknown> | undefined
+    const savedLanguage = stored?.language
+    const savedDpi = stored?.dpi ?? record.metadata.ocr_dpi
+    if (savedLanguage === 'rus' || savedLanguage === 'eng' || savedLanguage === 'rus+eng') setLanguage(savedLanguage)
+    else if (record.ocr_language === 'rus' || record.ocr_language === 'eng' || record.ocr_language === 'rus+eng') setLanguage(record.ocr_language)
+    if (savedDpi === 150) setQuality('fast')
+    else if (savedDpi === 300) setQuality('high')
+    else setQuality('balanced')
+    setPageScope('all')
+    setConfirmReprocess(false)
+    setOcrSettingsOpen(false)
+  }, [record.id, record.active_version])
+  useEffect(() => {
+    setSelectedPages(new Set(selectablePages))
+  // pageSignature changes when an active OCR version replaces its page map.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [record.id, record.active_version, pageSignature])
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    if (confirmReprocess && !dialog.open) dialog.showModal()
+    else if (!confirmReprocess && dialog.open) dialog.close()
+  }, [confirmReprocess])
+  const submitReprocess = async () => {
+    if (!onReprocess) return
+    const pages = pageScope === 'all' ? null : [...selectedPages].sort((a, b) => a - b)
+    const accepted = await onReprocess({ language, quality, pages })
+    if (accepted) setConfirmReprocess(false)
+  }
+  const openSourcePageReprocess = () => {
+    const sourcePage = typeof selectedSource?.locator.page === 'number' ? selectedSource.locator.page : null
+    if (sourcePage !== null) {
+      setPageScope('selected')
+      setSelectedPages(new Set([sourcePage]))
+    }
+    setOcrSettingsOpen(true)
+    setConfirmReprocess(true)
+  }
   const content = useMemo(() => {
     const onError = (message: string) => setRenderError(message)
     if (renderer === 'pdf') return <PdfOriginalViewer key={retryKey} originalUrl={originalUrl} pageNumber={pageNumber} selectedSource={selectedSource} onMatch={handleMatch} />
@@ -479,7 +594,68 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   useEffect(() => { setRenderError(null); setExactMatch(true) }, [preview.document_id, renderer, retryKey])
   return <div className={`original-viewer-body renderer-${renderer}`} data-renderer={renderer} data-selected-source={selectedSourceId || undefined}>
     <div className="preview-toolbar"><span>Оригинал файла{preview.encoding ? ` · ${preview.encoding}` : ''}</span><a href={originalUrl} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>
-    <SourceCallout source={selectedSource} exact={exactMatch} onReprocess={onReprocess} reprocessing={reprocessing} />
+    {renderer === 'pdf' && <section className="ocr-panel" aria-label="Статус и настройки OCR" data-testid="ocr-panel">
+      <div className="ocr-panel-summary">
+        <BookOpen size={15} aria-hidden="true" />
+        <span>{statusCounts.recognized} OCR · {statusCounts.native} текстовых · {statusCounts.blank} пустых{statusCounts.unreadable ? ` · ${statusCounts.unreadable} требуют внимания` : ''}</span>
+        {onReprocess && <button className="ocr-panel-toggle" type="button" aria-expanded={ocrSettingsOpen} onClick={() => setOcrSettingsOpen((open) => !open)}>
+          <Settings2 size={14} /> {ocrSettingsOpen ? 'Скрыть настройки' : 'Настроить OCR'} <ChevronDown size={14} className={ocrSettingsOpen ? 'is-open' : ''} />
+        </button>}
+      </div>
+      {lowConfidencePages.length > 0 && <p className="ocr-quality-warning" role="status"><TriangleAlert size={14} /> Низкое значение на страницах {lowConfidencePages.map((page) => page.page).join(', ')} (порог {warningThreshold}). Уверенность Tesseract — эвристика, а не вероятность правильного распознавания.</p>}
+      {ocrSettingsOpen && <div className="ocr-settings-panel" data-testid="ocr-settings">
+        <div className="ocr-settings-fields">
+          <label>Язык распознавания<select value={language} onChange={(event) => setLanguage(event.target.value as OcrLanguage)}>
+            <option value="rus">Русский</option><option value="eng">Английский</option><option value="rus+eng">Русский + английский</option>
+          </select></label>
+          <label>Качество<select value={quality} onChange={(event) => setQuality(event.target.value as OcrQuality)}>
+            {(Object.keys(OCR_QUALITY) as OcrQuality[]).map((key) => <option value={key} key={key}>{OCR_QUALITY[key].label}</option>)}
+          </select><small>{OCR_QUALITY[quality].description}</small></label>
+        </div>
+        <fieldset className="ocr-page-scope">
+          <legend>Какие страницы повторно распознать</legend>
+          <label><input type="radio" name={`ocr-scope-${record.id}`} value="all" checked={pageScope === 'all'} onChange={() => setPageScope('all')} /> Все страницы, для которых нужен OCR ({eligiblePages.length})</label>
+          <label><input type="radio" name={`ocr-scope-${record.id}`} value="selected" checked={pageScope === 'selected'} onChange={() => setPageScope('selected')} /> Только выбранные страницы</label>
+        </fieldset>
+        {pageScope === 'all' && eligiblePages.length === 0 && <p className="ocr-settings-limit">Страниц, которым требуется OCR, не найдено. Если нужно распознать текстовый слой заново, выберите страницы вручную.</p>}
+        {pageScope === 'selected' && <div className="ocr-pages-select" role="group" aria-label="Страницы для повторного OCR">
+          {pageRows.map((page) => <label className="ocr-page-option" key={page.page}>
+            <input type="checkbox" checked={selectedPages.has(page.page)} disabled={page.classification === 'blank' || page.ocrResult === 'blank'} onChange={(event) => setSelectedPages((current) => {
+              const next = new Set(current)
+              if (event.target.checked) {
+                if (next.size < maxOcrPages) next.add(page.page)
+              } else next.delete(page.page)
+              return next
+            })} />
+            <span><strong>Страница {page.page}</strong><small>{pageStatusLabel(page)}</small></span>
+            {page.confidence !== null && page.ocrResult === 'ocr' && <span className="ocr-page-confidence">{Math.round(page.confidence)}</span>}
+          </label>)}
+        </div>}
+        <div className="ocr-page-status-list" data-testid="ocr-page-status-list">
+          <details><summary>Статус OCR по страницам</summary><ul>{pageRows.map((page) => <li key={page.page}>
+            <span>Страница {page.page}</span><span>{pageStatusLabel(page)}{page.language ? ` · ${page.language}` : ''}{page.dpi ? ` · ${page.dpi} DPI` : ''}</span>
+          </li>)}</ul></details>
+        </div>
+        <p className="ocr-settings-limit">Не более {maxOcrPages} страниц за одно задание. При большем числе сканов запустите OCR для выбранных страниц по частям. Высокое разрешение и два языка требуют больше времени.</p>
+        <button type="button" className="button button-dark ocr-start-button" onClick={() => setConfirmReprocess(true)} disabled={reprocessing || (pageScope === 'all' && (eligiblePages.length === 0 || eligiblePages.length > maxOcrPages)) || (pageScope === 'selected' && (selectedPages.size === 0 || selectedPages.size > maxOcrPages))}>
+          {reprocessing ? <><LoaderCircle size={14} className="spin" /> OCR выполняется</> : 'Повторить OCR'}
+        </button>
+        {pageScope === 'all' && eligiblePages.length > maxOcrPages && <small className="ocr-settings-error">В документе больше {maxOcrPages} страниц для OCR. Выберите не более {maxOcrPages} страниц для этого задания.</small>}
+      </div>}
+      <dialog ref={dialogRef} className="ocr-impact-dialog" aria-labelledby={`ocr-impact-title-${record.id}`} onCancel={(event) => { event.preventDefault(); setConfirmReprocess(false) }} onClick={(event) => {
+        const bounds = event.currentTarget.getBoundingClientRect()
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) setConfirmReprocess(false)
+      }}>
+        <button type="button" className="icon-button ocr-impact-close" aria-label="Закрыть" onClick={() => setConfirmReprocess(false)}><X size={17} /></button>
+        <span className="ocr-impact-icon"><Settings2 size={18} /></span>
+        <h3 id={`ocr-impact-title-${record.id}`}>Создать новую версию OCR?</h3>
+        <p>Будут заново извлечены текст, индекс и ответы{pageScope === 'selected' ? ` для ${selectedPages.size} выбранных страниц` : ' для страниц, которым нужен OCR'}.</p>
+        <p className="ocr-impact-preservation">Оригинал документа и история чата сохранятся. Новая версия станет активной только после успешной обработки; при ошибке останется текущая.</p>
+        <p className="ocr-impact-choice">{language === 'rus' ? 'Русский' : language === 'eng' ? 'Английский' : 'Русский + английский'} · {OCR_QUALITY[quality].dpi} DPI · {pageScope === 'selected' ? `${selectedPages.size} стр.` : `${eligiblePages.length} стр.`}</p>
+        <div className="ocr-impact-actions"><button type="button" className="button button-light" onClick={() => setConfirmReprocess(false)}>Отмена</button><button type="button" className="button button-dark" onClick={() => void submitReprocess()} disabled={reprocessing}>{reprocessing ? 'Обрабатываю…' : 'Создать версию'}</button></div>
+      </dialog>
+    </section>}
+    <SourceCallout source={selectedSource} exact={exactMatch} onReprocess={selectedSource?.locator.ocr === true ? openSourcePageReprocess : undefined} reprocessing={reprocessing} />
     {renderError ? <RenderError preview={preview} originalUrl={originalUrl} message={renderError} onRetry={() => { setRenderError(null); setRetryKey((value) => value + 1) }} /> : <div className="original-render-surface">{content || <RenderError preview={preview} originalUrl={originalUrl} onRetry={() => setRetryKey((value) => value + 1)} />}</div>}
   </div>
 }

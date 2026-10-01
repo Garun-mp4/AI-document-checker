@@ -35,8 +35,9 @@ class DocumentProcessor:
     async def stop(self):
         pass
 
-    async def retry(self, document_id, operation='retry'):
-        return await submit(document_id, operation)
+    async def retry(self, document_id, operation='retry', *, parameters=None, reject_if_active=False):
+        return await submit(document_id, operation, parameters=parameters,
+                            reject_if_active=reject_if_active)
 
     async def schedule_pending_analysis(self):
         async with SessionLocal() as session:

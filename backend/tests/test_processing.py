@@ -13,6 +13,7 @@ from app.services.markdown_mapping import MappedMarkdownBlock
 from app.services.markitdown_service import MarkdownConversionError, MarkdownResult
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
 from app.services.processing_helpers import (
+    _carry_forward_unselected_ocr_pages,
     _computed_blocks,
     _merge_pdf_ocr_pages,
     _ocr_analysis_blocks,
@@ -311,3 +312,63 @@ def test_lost_lease_does_not_write_failure_or_activate(monkeypatch,tmp_path):
     assert not session.added
     assert document.active_version == 0
     assert attempt.job.state == 'running'
+
+
+def test_selected_ocr_reprocess_carries_untouched_page_text_and_coordinates_forward() -> None:
+    previous_blocks = [
+        SourceBlock("Old page two", {"kind": "pdf", "page": 2, "ocr": True, "ocr_map": {"word_boxes": [[1, 2, 3, 4]]}}),
+        SourceBlock("Old page four", {"kind": "pdf", "page": 4, "ocr": True, "ocr_map": {"word_boxes": [[5, 6, 7, 8]]}}),
+    ]
+    previous_page_map = [
+        {"page": 2, "classification": "ocr", "confidence": 71},
+        {"page": 4, "classification": "ocr", "confidence": 84},
+    ]
+    current_blocks = [SourceBlock("New page two", {"kind": "pdf", "page": 2, "ocr": True, "ocr_map": {"word_boxes": [[9, 10, 11, 12]]}})]
+    current_page_map = [{"page": 2, "classification": "ocr", "confidence": 96}]
+
+    blocks, page_map = _carry_forward_unselected_ocr_pages(
+        previous_blocks,
+        previous_page_map,
+        current_blocks,
+        current_page_map,
+        {2},
+    )
+
+    assert [(block.locator["page"], block.text) for block in blocks] == [(4, "Old page four"), (2, "New page two")]
+    assert page_map == [
+        {"page": 2, "classification": "ocr", "confidence": 96},
+        {"page": 4, "classification": "ocr", "confidence": 84},
+    ]
+
+
+def test_pdf_ocr_merge_preserves_selected_run_settings() -> None:
+    from app.services.processing_helpers import _merge_pdf_ocr_pages
+
+    native = ParsedDocument(
+        "pdf",
+        [SourceBlock("Native text", {"kind": "pdf", "page": 1})],
+        {
+            "page_count": 2,
+            "pdf_page_map": [
+                {"page": 1, "classification": "native"},
+                {"page": 2, "classification": "ocr_candidate"},
+            ],
+        },
+    )
+    ocr = ParsedDocument(
+        "pdf",
+        [SourceBlock("Recognized text", {"kind": "pdf", "page": 2, "ocr": True})],
+        {
+            "ocr_language": "eng",
+            "ocr_dpi": 300,
+            "ocr_settings": {"language": "eng", "quality": "high", "dpi": 300},
+            "ocr_engine_version": "5.3.0",
+            "ocr_page_map": [{"page": 2, "classification": "ocr", "language": "eng", "dpi": 300}],
+        },
+    )
+
+    merged, _ = _merge_pdf_ocr_pages(native, ocr)
+
+    assert merged.metadata["ocr_settings"] == {"language": "eng", "quality": "high", "dpi": 300}
+    assert merged.metadata["ocr_language"] == "eng"
+    assert merged.metadata["ocr_dpi"] == 300

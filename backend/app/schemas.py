@@ -3,7 +3,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+class OcrReprocessIn(BaseModel):
+    language: Literal["rus", "eng", "rus+eng"] = "rus+eng"
+    quality: Literal["fast", "balanced", "high"] = "balanced"
+    pages: list[int] | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("pages")
+    @classmethod
+    def validate_pages(cls, pages: list[int] | None) -> list[int] | None:
+        if pages is not None and (any(page < 1 for page in pages) or len(set(pages)) != len(pages)):
+            raise ValueError("Укажите уникальные положительные номера страниц.")
+        return sorted(pages) if pages is not None else None
 
 
 class DocumentOut(BaseModel):

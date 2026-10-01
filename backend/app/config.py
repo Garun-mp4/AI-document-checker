@@ -19,9 +19,10 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_languages: str = "rus+eng"
     ocr_dpi: int = 200
-    ocr_max_pages: int = 100
+    ocr_max_pages: int = Field(default=100, ge=1, le=500)
     ocr_timeout_seconds: int = 90
     ocr_max_chars: int = 5_000_000
+    ocr_confidence_warning_threshold: float = Field(default=60, ge=0, le=100)
     archive_max_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
     archive_member_max_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     archive_max_entries: int = Field(default=5000, ge=1)
