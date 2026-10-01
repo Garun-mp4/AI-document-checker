@@ -10,12 +10,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -40,6 +42,9 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued", index=True)
     error_message: Mapped[str | None] = mapped_column(Text)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    next_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    input_checksum: Mapped[str | None] = mapped_column(String(64))
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict)
     markdown_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
     analysis_source: Mapped[str] = mapped_column(String(24), nullable=False, default="native_fallback")
@@ -68,10 +73,12 @@ class Document(Base):
 
 class Chunk(Base):
     __tablename__ = "chunks"
+    __table_args__ = (UniqueConstraint('document_id', 'version', 'ordinal', name='uq_chunks_version_ordinal'),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     text: Mapped[str] = mapped_column(Text, nullable=False)
     locator: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384))
@@ -113,14 +120,51 @@ class Message(Base):
 
 class Insight(Base):
     __tablename__ = "insights"
-    __table_args__ = (UniqueConstraint("document_id", "key", name="uq_insights_document_key"),)
+    __table_args__ = (UniqueConstraint('document_id', 'version', 'key', name='uq_insights_version_key'),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     key: Mapped[str] = mapped_column(String(40), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
 
     document: Mapped[Document] = relationship(back_populates="insights")
+
+
+class DocumentVersion(Base):
+    __tablename__ = 'document_versions'
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('documents.id', ondelete='CASCADE'), primary_key=True)
+    number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chunk_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default='staging')
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
+
+
+class ProcessingJob(Base):
+    __tablename__ = 'processing_jobs'
+    __table_args__ = (
+        Index('uq_jobs_active_document', 'document_id', unique=True,
+              postgresql_where=text("state IN ('queued','running','cancelling')")),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey('documents.id', ondelete='CASCADE'), nullable=False, index=True)
+    operation: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_version: Mapped[str | None] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default='queued', index=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default='queued')
+    progress: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    owner: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    error: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(40))
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

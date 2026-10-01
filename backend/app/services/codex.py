@@ -205,13 +205,20 @@ class CodexService:
         finally:
             self._status_cache = None
 
-    async def complete(self, payload: dict[str, Any], output_schema: dict[str, Any]) -> str:
-        await self.require_ready()
+    async def complete(self, payload: dict[str, Any], output_schema: dict[str, Any], *, model: str | None = None, reasoning_effort: str | None = None) -> str:
+        model = model or settings.codex_model
+        reasoning_effort = reasoning_effort or settings.codex_reasoning_effort
+        state = await self.status(refresh=True)
+        if not state['authenticated']:
+            raise CodexNeedsLogin('Сначала подключите аккаунт Codex.')
+        selected = next((entry for entry in state['models'] if entry['id'] == model), None)
+        if selected is None or reasoning_effort not in {item['value'] for item in selected['reasoning_efforts']}:
+            raise CodexModelUnavailable('Модель или уровень анализа задания больше не доступны.')
         assert self.client is not None
         thread = await self.client.thread_start(
             approval_mode=ApprovalMode.deny_all,
             ephemeral=True,
-            model=settings.codex_model,
+            model=model,
             cwd=self._work_dir,
             base_instructions=BASE_INSTRUCTIONS,
             sandbox=Sandbox.read_only,
@@ -223,8 +230,8 @@ class CodexService:
                 content=json.dumps(payload, ensure_ascii=False),
             ),
             approval_mode=ApprovalMode.deny_all,
-            model=settings.codex_model,
-            effort=settings.codex_reasoning_effort,
+            model=model,
+            effort=reasoning_effort,
             output_schema=output_schema,
             sandbox=Sandbox.read_only,
         )

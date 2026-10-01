@@ -15,13 +15,83 @@ from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlo
 _slots = asyncio.Semaphore(2)
 
 
-async def run_document_operation(operation: str, path: Path, *, timeout: float | None = None, **parameters):
+def _linux_descendants(root_pid: int) -> list[int]:
+    """Return descendants without relying on psutil inside the minimal image."""
+
+    if sys.platform == "win32":
+        return []
+    parent_by_pid: dict[int, int] = {}
+    proc = Path("/proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            # The process name in /proc/<pid>/stat may contain spaces, so split
+            # only after the closing ')' of the comm field. The remainder is
+            # indexed from state: ppid is the second field there.
+            stat = (entry / "stat").read_text(encoding="ascii")
+            _, remainder = stat.rsplit(")", 1)
+            fields = remainder.split()
+            parent_by_pid[int(entry.name)] = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    descendants: list[int] = []
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        children = [pid for pid, ppid in parent_by_pid.items() if ppid == parent]
+        descendants.extend(children)
+        pending.extend(children)
+    return descendants
+
+
+async def _stop_process_tree(process: asyncio.subprocess.Process) -> None:
+    """Stop children before their parent so subprocess.run can reap them."""
+
+    descendants = _linux_descendants(process.pid)
+    if sys.platform != "win32":
+        for pid in reversed(descendants):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if descendants:
+            try:
+                # Poppler/Tesseract can need a few seconds to unwind their
+                # pipes after SIGTERM. Give the worker enough time to reap
+                # those children before the leader is force-killed; otherwise
+                # they can survive as orphaned zombies under PID 1.
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+        if process.returncode is None:
+            try:
+                os.kill(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        # If the leader did not reap a stubborn descendant, kill its process
+        # group as a final fence. The normal path above makes the leader reap
+        # children before it exits, preventing orphaned zombies.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elif process.returncode is None:
+        process.kill()
+    await process.wait()
+
+
+async def run_document_operation(operation: str, path: Path, *, timeout: float | None = None, configuration: dict | None = None, **parameters):
     path = storage_path(path)
-    names = ('upload_dir', 'max_upload_bytes', 'archive_max_bytes', 'archive_member_max_bytes',
+    names = ('embedding_cache_dir', 'upload_dir', 'max_upload_bytes', 'archive_max_bytes', 'archive_member_max_bytes',
              'archive_max_entries', 'document_max_pages', 'document_max_chars', 'markdown_max_chars',
              'ocr_enabled', 'ocr_languages', 'ocr_dpi', 'ocr_max_pages', 'ocr_timeout_seconds', 'ocr_max_chars',
              'document_worker_memory_mb', 'document_worker_cpu_seconds', 'document_worker_max_output_bytes')
+    overrides = configuration or {}
+    if overrides.keys() - {'ocr_enabled', 'ocr_languages', 'ocr_dpi', 'ocr_max_pages'}:
+        raise ValueError('Unsupported processing configuration')
     configuration = {name: getattr(settings, name) for name in names}
+    configuration.update(overrides)
     configuration['upload_dir'] = str(Path(settings.upload_dir).resolve())
     payload = {'operation': operation, 'path': str(path), 'settings': configuration, **parameters}
     # Do not inherit database credentials, Codex auth or cloud tokens.
@@ -61,30 +131,26 @@ async def run_document_operation(operation: str, path: Path, *, timeout: float |
             except asyncio.TimeoutError as exc:
                 raise DocumentParsingError('Обработка остановлена: превышено допустимое время.') from exc
             finally:
-                # Kill the group even if its leader exited: Poppler/Tesseract
-                # must not outlive a cancelled request or timed-out conversion.
-                if sys.platform != 'win32':
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                elif process.returncode is None:
-                    process.kill()
-                await process.wait()
+                cleanup = asyncio.create_task(_stop_process_tree(process))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                    raise
 
 
 def parsed_result(result: dict) -> ParsedDocument:
     return ParsedDocument(result['file_type'], [SourceBlock(**block) for block in result['blocks']], result['metadata'])
 
 
-async def parse_uploaded(path: Path, filename: str) -> ParsedDocument:
-    return parsed_result(await run_document_operation('parse', path, filename=filename))
+async def parse_uploaded(path: Path, filename: str, **parameters) -> ParsedDocument:
+    return parsed_result(await run_document_operation('parse', path, filename=filename, **parameters))
 
 
-async def ocr_uploaded(path: Path):
+async def ocr_uploaded(path: Path, **parameters):
     from app.services.ocr import OCRProcessingError, OCRResult
     try:
-        result = await run_document_operation('ocr', path)
+        result = await run_document_operation('ocr', path, **parameters)
     except DocumentParsingError as exc:
         raise OCRProcessingError(str(exc)) from exc
     result['parsed'] = parsed_result(result['parsed'])

@@ -7,14 +7,12 @@ from uuid import uuid4
 
 import pytest
 
-from app.services import processing
 from app.services.codex import CodexModelUnavailable, CodexNeedsLogin, CodexUnavailable
 from app.services.embeddings import EmbeddingConfigurationError
 from app.services.markdown_mapping import MappedMarkdownBlock
 from app.services.markitdown_service import MarkdownConversionError, MarkdownResult
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
-from app.services.processing import (
-    DocumentProcessor,
+from app.services.processing_helpers import (
     _computed_blocks,
     _ocr_analysis_blocks,
 )
@@ -77,227 +75,170 @@ def test_computed_blocks_does_not_add_table_artifacts_for_non_tables(file_type: 
     ],
 )
 def test_processing_error_converts_internal_failures_to_user_messages(error: Exception, expected: str) -> None:
-    assert expected in DocumentProcessor._processing_error(error)
+    assert expected in engine.processing_error(error)
 
 
-@pytest.mark.parametrize(
-    ("raised", "status", "message"),
-    [
-        (CodexNeedsLogin("login"), "needs_auth", "login"),
-        (CodexModelUnavailable("model"), "model_unavailable", "model"),
-        (CodexUnavailable("service"), "error", "service"),
-        (RuntimeError("network"), "error", "Не удалось загрузить локальную модель"),
-    ],
-)
-def test_analyze_translates_codex_failures_to_document_state(
-    monkeypatch: pytest.MonkeyPatch,
-    raised: Exception,
-    status: str,
-    message: str,
-) -> None:
-    processor = DocumentProcessor(SimpleNamespace())
-    calls: list[tuple[object, ...]] = []
 
-    async def fail(*_args, **_kwargs):
-        raise raised
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
-    async def set_error(*args):
-        calls.append(args)
-
-    monkeypatch.setattr(processing, "analyze_document", fail)
-    monkeypatch.setattr(processor, "_set_error", set_error)
-
-    asyncio.run(processor._analyze(uuid4()))
-
-    assert calls
-    assert calls[0][1] == status
-    assert message in calls[0][2]
-    assert not processor._tasks
+from app.models import DocumentVersion
+from app.services import processing_engine as engine
+from app.services.processing_engine import ProcessingAttempt
 
 
-class _Result:
-    def __init__(self, value=None):
-        self.value = value
-
-    def scalar_one_or_none(self):
-        return self.value
-
-
-class _Session:
-    def __init__(self, document, *, existing_chat=None):
-        self.document = document
-        self.existing_chat = existing_chat
-        self.added: list[object] = []
-        self.added_batches: list[list[object]] = []
-        self.commits = 0
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return None
-
-    async def get(self, _model, _document_id):
-        return self.document
-
-    async def execute(self, _statement):
-        return _Result(self.existing_chat)
-
-    def add(self, item):
-        self.added.append(item)
-
-    def add_all(self, items):
-        batch = list(items)
-        self.added_batches.append(batch)
-        self.added.extend(batch)
-
-    async def commit(self):
-        self.commits += 1
-
-
-class _SessionFactory:
-    def __init__(self, sessions):
-        self.sessions = list(sessions)
-
-    def __call__(self):
-        return self.sessions.pop(0)
-
-
-def _processing_document(tmp_path: Path):
+def harness(monkeypatch, tmp_path, file_type='txt', status='queued'):
     document_id = uuid4()
-    path = tmp_path / "report.txt"
-    path.write_text("original", encoding="utf-8")
-    document = SimpleNamespace(
-        id=document_id,
-        filename=path.name,
-        storage_path=str(path),
-        status="queued",
-        error_message=None,
-        file_type="txt",
-        metadata_json={},
-        markdown_status="pending",
-        analysis_source="native_fallback",
-        markdown_path=None,
-        markdown_map_path=None,
-        markdown_error=None,
-        markdown_converter_version=None,
-        markdown_char_count=0,
-        markdown_line_count=0,
-        markdown_checksum=None,
-        markdown_mapping_json={},
-        chunk_count=0,
-    )
-    return document_id, path, document
+    original = tmp_path / f'{document_id}.{file_type}'
+    original.write_bytes('Автор: Алексей Пример'.encode('cp1251'))
+    monkeypatch.setattr(engine.settings, 'upload_dir', str(tmp_path))
+    document = SimpleNamespace(id=document_id, filename=original.name, storage_path=str(original),
+        file_type=file_type, status=status, input_checksum=None, chunk_count=0, active_version=0,
+        error_message=None)
+    job = SimpleNamespace(id=uuid4(), document_id=document_id, version=1, owner=uuid4(),
+                          input_version=None, state='running', stage='queued', progress={})
+    version = SimpleNamespace(state='staging', snapshot={}, chunk_version=1)
+    class Session:
+        def __init__(self):
+            self.added = []
+        async def get(self, model, key):
+            return version if model is DocumentVersion else document
+        async def scalar(self, statement):
+            return datetime.now(timezone.utc)
+        def add_all(self, rows):
+            self.added.extend(rows)
+    session = Session()
+    @asynccontextmanager
+    async def fenced(*args):
+        yield session, document, job
+    monkeypatch.setattr(engine, 'fenced', fenced)
+    async def enter(*args): return True
+    monkeypatch.setattr(engine, 'enter_analysis', enter)
+    async def analyze(*args, **kwargs): return []
+    monkeypatch.setattr(engine, 'analyze_document', analyze)
+    async def discard(*args): version.snapshot = {}
+    monkeypatch.setattr(engine, 'discard', discard)
+    async def vectors(operation, path):
+        import json
+        assert operation == 'embed'
+        return [[1.0]*384 for _ in json.loads(path.read_text(encoding='utf-8'))]
+    monkeypatch.setattr(engine, 'run_document_operation', vectors)
+    return ProcessingAttempt(job, SimpleNamespace()), document, original, version, session
 
 
-@pytest.mark.parametrize("file_type", ["txt", "md"])
-def test_process_persists_markdown_mapping_and_indexes_markdown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_type: str,
-) -> None:
-    document_id, _path, document = _processing_document(tmp_path)
-    upload_dir = tmp_path / "uploads"
-    upload_dir.mkdir()
-    original = upload_dir / f"{document_id}.{file_type}"
-    original.write_bytes("Автор: Алексей Пример".encode("cp1251"))
-    document.storage_path = str(original)
-    document.file_type = file_type
-    monkeypatch.setattr(processing.settings, "upload_dir", str(upload_dir))
-    native = SourceBlock("Original text", {"kind": "txt", "label": "Строка 1", "line_start": 1})
-    parsed = ParsedDocument("txt", [native], {"line_count": 1})
-    mapped = MappedMarkdownBlock(
-        "Original text", {"kind": "txt", "label": "Строка 1", "line_start": 1, "source_locators": [native.locator]},
-        line_start=3, line_end=3, char_start=10, char_end=23, confidence="exact",
-    )
-    sessions = [_Session(document), _Session(document), _Session(document), _Session(document)]
-    monkeypatch.setattr(processing, "SessionLocal", _SessionFactory(sessions))
-    async def parse(*_args):
-        return parsed
-    monkeypatch.setattr(processing, "parse_uploaded", parse)
-    processor = DocumentProcessor(SimpleNamespace())
-    async def convert(_path):
-        return MarkdownResult("# Report\n\nOriginal text\n", "Report")
-    processor.markitdown.convert = convert  # type: ignore[method-assign]
-    async def mapping(*_args):
-        return [mapped], {"quality": {"exact": 1}}
-    monkeypatch.setattr(processing, "map_uploaded", mapping)
-    monkeypatch.setattr(processing, "embed_passages", lambda texts, _cache: [[float(index)] for index, _ in enumerate(texts)])
-    analyzed: list[object] = []
-    async def fake_analyze(document_id_arg):
-        analyzed.append(document_id_arg)
-    monkeypatch.setattr(processor, "_analyze", fake_analyze)
+@pytest.mark.parametrize(('raised','status','message'), [
+    (CodexNeedsLogin('login'), 'needs_auth', 'login'),
+    (CodexModelUnavailable('model'), 'model_unavailable', 'model'),
+    (CodexUnavailable('service'), 'error', 'service'),
+    (RuntimeError('network'), 'error', 'Не удалось загрузить локальную модель'),
+])
+def test_analyze_translates_codex_failures_to_document_state(monkeypatch, tmp_path, raised, status, message):
+    attempt, document, _, version, _ = harness(monkeypatch, tmp_path)
+    version.state = 'indexed'
+    version.snapshot = {'file_type':'txt'}
+    async def fail(*args, **kwargs): raise raised
+    monkeypatch.setattr(engine, 'analyze_document', fail)
+    asyncio.run(attempt.run())
+    assert attempt.job.state == 'failed'
+    assert document.status == status
+    assert message in attempt.job.error
 
-    asyncio.run(processor._process(document_id))
 
-    assert analyzed == [document_id]
-    assert document.status == "indexing"
-    assert document.markdown_status == "ready"
-    assert document.analysis_source == "markitdown"
-    assert original.read_bytes() == "Автор: Алексей Пример".encode("cp1251")
+@pytest.mark.parametrize('file_type', ['txt', 'md'])
+def test_process_persists_markdown_mapping_and_indexes_markdown(monkeypatch, tmp_path, file_type):
+    attempt, document, original, version, session = harness(monkeypatch, tmp_path, file_type)
+    native = SourceBlock('Original text', {'kind':'txt', 'label':'Строка 1', 'line_start':1})
+    parsed = ParsedDocument('txt', [native], {'line_count':1})
+    mapped = MappedMarkdownBlock('Original text', {**native.locator, 'source_locators':[native.locator]},
+                                line_start=3,line_end=3,char_start=10,char_end=23,confidence='exact')
+    async def parse(*args, **kwargs): return parsed
+    async def convert(*args): return MarkdownResult('# Report\n\nOriginal text\n', 'Report')
+    async def mapping(*args): return [mapped], {'quality':{'exact':1}}
+    monkeypatch.setattr(engine, 'parse_uploaded', parse)
+    monkeypatch.setattr(engine, 'map_uploaded', mapping)
+    attempt.markitdown.convert = convert
+    asyncio.run(attempt.run())
+    assert attempt.job.state == 'succeeded'
+    assert document.status == 'ready'
+    assert document.active_version == 1
+    assert document.markdown_status == 'ready'
+    assert document.analysis_source == 'markitdown'
+    assert original.read_bytes() == 'Автор: Алексей Пример'.encode('cp1251')
     assert Path(document.markdown_path) != original
-    assert document.markdown_path and Path(document.markdown_path).read_text(encoding="utf-8") == "# Report\n\nOriginal text\n"
+    assert Path(document.markdown_path).read_text(encoding='utf-8') == '# Report\n\nOriginal text\n'
     assert document.markdown_line_count == 3
-    assert document.markdown_char_count == len("# Report\n\nOriginal text\n")
-    assert document.markdown_mapping_json == {"exact": 1}
-    assert sessions[2].added_batches[0][0].content_source == "markitdown"
-    assert sessions[2].added_batches[0][0].markdown_line_start == 3
-    assert sessions[3].added[0].document_id == document_id
+    assert document.markdown_char_count == len('# Report\n\nOriginal text\n')
+    assert document.markdown_mapping_json == {'exact':1}
+    assert session.added[0].content_source == 'markitdown'
+    assert session.added[0].markdown_line_start == 3
+    assert session.added[0].version == 1
+    assert version.state == 'ready'
 
 
-@pytest.mark.parametrize("file_type", ["txt", "md"])
-def test_process_falls_back_to_native_sources_when_markdown_conversion_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_type: str,
-) -> None:
-    document_id, _path, document = _processing_document(tmp_path)
-    upload_dir = tmp_path / "uploads"
-    upload_dir.mkdir()
-    original = upload_dir / f"{document_id}.{file_type}"
-    original.write_bytes(b"unchanged original")
-    document.storage_path = str(original)
-    document.file_type = file_type
-    monkeypatch.setattr(processing.settings, "upload_dir", str(upload_dir))
-    native = SourceBlock("Native source", {"kind": "txt", "label": "Строка 1", "line_start": 1})
-    parsed = ParsedDocument("txt", [native], {"line_count": 1})
-    sessions = [_Session(document), _Session(document), _Session(document), _Session(document)]
-    monkeypatch.setattr(processing, "SessionLocal", _SessionFactory(sessions))
-    async def parse(*_args):
-        return parsed
-    monkeypatch.setattr(processing, "parse_uploaded", parse)
-    processor = DocumentProcessor(SimpleNamespace())
-    async def fail(_path):
-        raise MarkdownConversionError("conversion failed")
-    processor.markitdown.convert = fail  # type: ignore[method-assign]
-    monkeypatch.setattr(processing, "embed_passages", lambda texts, _cache: [[1.0] for _ in texts])
-    monkeypatch.setattr(processor, "_analyze", lambda *_args: asyncio.sleep(0))
-
-    asyncio.run(processor._process(document_id))
-
-    assert document.markdown_status == "fallback"
-    assert original.read_bytes() == b"unchanged original"
-    assert document.analysis_source == "native_fallback"
-    assert document.markdown_error == "conversion failed"
+@pytest.mark.parametrize('file_type', ['txt','md'])
+def test_process_falls_back_to_native_sources_when_markdown_conversion_fails(monkeypatch,tmp_path,file_type):
+    attempt, document, original, _version, session = harness(monkeypatch,tmp_path,file_type)
+    native = SourceBlock('Native source', {'kind':'txt','label':'Строка 1','line_start':1})
+    async def parse(*args, **kwargs): return ParsedDocument('txt',[native],{'line_count':1})
+    async def fail(*args): raise MarkdownConversionError('conversion failed')
+    monkeypatch.setattr(engine,'parse_uploaded',parse)
+    attempt.markitdown.convert = fail
+    asyncio.run(attempt.run())
+    assert attempt.job.state == 'succeeded'
+    assert original.read_bytes() == 'Автор: Алексей Пример'.encode('cp1251')
+    assert document.markdown_status == 'fallback'
+    assert document.analysis_source == 'native_fallback'
+    assert document.markdown_error == 'conversion failed'
     assert document.markdown_path is None
-    assert sessions[2].added_batches[0][0].content_source == "native_fallback"
-    assert sessions[2].added_batches[0][0].locator["source_text"] == "Native source"
+    assert session.added[0].content_source == 'native_fallback'
+    assert session.added[0].locator['source_text'] == 'Native source'
 
 
-def test_process_translates_parser_failure_and_clears_task(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    document_id, _path, document = _processing_document(tmp_path)
-    document.storage_path = str(tmp_path / f'{document_id}.txt')
-    monkeypatch.setattr(processing.settings, 'upload_dir', str(tmp_path))
-    sessions = [_Session(document)]
-    monkeypatch.setattr(processing, "SessionLocal", _SessionFactory(sessions))
-    async def parse(*_args):
-        raise DocumentParsingError('Пустой файл')
-    monkeypatch.setattr(processing, "parse_uploaded", parse)
-    processor = DocumentProcessor(SimpleNamespace())
-    calls: list[tuple[object, ...]] = []
-    async def set_error(*args):
-        calls.append(args)
-    monkeypatch.setattr(processor, "_set_error", set_error)
+def test_process_translates_parser_failure_and_records_failed_job(monkeypatch,tmp_path):
+    attempt,document,_,_version,_ = harness(monkeypatch,tmp_path)
+    async def fail(*args, **kwargs): raise DocumentParsingError('Пустой файл')
+    monkeypatch.setattr(engine,'parse_uploaded',fail)
+    asyncio.run(attempt.run())
+    assert document.status == 'error'
+    assert document.error_message == 'Пустой файл'
+    assert attempt.job.state == 'failed'
 
-    asyncio.run(processor._process(document_id))
 
-    assert calls == [(document_id, "error", "Пустой файл")]
-    assert not processor._tasks
+def test_failed_replacement_preserves_active_result(monkeypatch,tmp_path):
+    attempt,document,_,_version,_ = harness(monkeypatch,tmp_path,status='ready')
+    document.active_version = 0
+    document.chunk_count = 10
+    document.markdown_path = 'previous-artifact'
+    async def fail(*args, **kwargs): raise DocumentParsingError('Пустой файл')
+    monkeypatch.setattr(engine,'parse_uploaded',fail)
+    asyncio.run(attempt.run())
+    assert document.status == 'ready'
+    assert document.active_version == 0
+    assert document.chunk_count == 10
+    assert document.markdown_path == 'previous-artifact'
+    assert attempt.job.state == 'failed'
+
+
+def test_changed_original_is_refused_before_parser(monkeypatch,tmp_path):
+    attempt,document,original,_,_ = harness(monkeypatch,tmp_path)
+    document.input_checksum = '0'*64
+    asyncio.run(attempt.run())
+    assert attempt.job.state == 'failed'
+    assert 'изменился' in attempt.job.error
+    assert original.exists()
+
+
+def test_lost_lease_does_not_write_failure_or_activate(monkeypatch,tmp_path):
+    from app.services.job_queue import LeaseLost
+    attempt,document,_,_,session = harness(monkeypatch,tmp_path)
+    @asynccontextmanager
+    async def expired(*args):
+        raise LeaseLost()
+        yield
+    monkeypatch.setattr(engine,'fenced',expired)
+    async def finish(): pass
+    monkeypatch.setattr(attempt, 'finish_cancel', finish)
+    asyncio.run(attempt.run())
+    assert not session.added
+    assert document.active_version == 0
+    assert attempt.job.state == 'running'

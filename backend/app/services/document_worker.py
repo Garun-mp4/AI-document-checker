@@ -55,8 +55,14 @@ def execute(payload: dict):
     path = Path(payload['path'])
     data = read_storage(path, settings.max_upload_bytes)
     filename = payload.get('filename', path.name)
-    validate_content(filename, data)
     operation = payload['operation']
+    if operation == 'embed':
+        from app.services.embeddings import embed_passages
+        texts = json.loads(data)
+        if not isinstance(texts, list) or len(texts) > 48 or not all(isinstance(t, str) for t in texts):
+            raise ValueError('Invalid embedding batch')
+        return embed_passages(texts, settings.embedding_cache_dir)
+    validate_content(filename, data)
     if operation == 'validate':
         return {'valid': True}
     if operation == 'parse':

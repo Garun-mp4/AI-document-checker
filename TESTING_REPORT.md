@@ -1,8 +1,29 @@
 # Отчёт о тестировании AI Document Checker
 
+## M03 — очередь задач, восстановление, отмена и версии обработки
+
+Дата: 1 октября 2026 года. M03 завершён. Реализация и эксплуатационные правила: [docs/M03_PROCESSING.md](docs/M03_PROCESSING.md).
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit | 198 passed, 7 integration deselected, 0 skipped |
+| Frontend contracts | 15 passed |
+| TypeScript / production build | Успешно (с штатным предупреждением Vite о размере bundle) |
+| PostgreSQL queue audit | 13 passed |
+| M03 queue acceptance | 8 passed: конкурентные заявки, restart OCR/indexing/analysis, fencing, cancel, delete и versioned replacement |
+| Полный Chromium E2E | 61 passed, 0 retries, 0 skipped |
+| Compose API integration | 7 passed, 198 unit deselected, 0 skipped |
+| Linux/HTTP/security audit | 10 passed |
+| Ruff `app` и `tests` | Успешно |
+| Unit statement coverage `app/` | 2273 / 3336, 68%; worker и E2E покрываются отдельными runtime-тестами |
+
+Проверено, что задания хранятся в PostgreSQL, захватываются через lease и fencing, восстанавливаются после истечения lease, а повторная заявка идемпотентна. Незавершённый локальный этап повторяется, прерванный внешний запрос получает явную ошибку и требует явного retry. Новая обработка создаёт версию и активируется атомарно; до этого готовая версия, оригинал, chunks, insights, citations и чат остаются доступны. Отмена OCR действительно завершает Poppler/Tesseract и удаляет только временную версию. Worker имеет отдельный Compose-сервис и healthcheck.
+
+Общий скрипт `scripts/test-e2e.ps1 -KeepRunning` завершился с exit code 0: 61 браузерный сценарий, 8 M03 acceptance-сценариев и 7 integration-тестов. Тестовые volumes изолированы проектом `document-checker-e2e`; рабочие документы и Codex-авторизация не используются. M04 и M05 в этом прогоне не реализовывались.
+
 ## M02 — безопасность загрузки и артефактов
 
-Дата: 1 октября 2026 года. M02 завершён. Полный `scripts/test-e2e.ps1 -KeepRunning` прошёл с exit code 0; после последнего уточнения безопасной ошибки конвертера повторены весь backend, Linux-аудит, 24 сценария ошибок/безопасности и API-интеграция. M03 не начат.
+Дата: 1 октября 2026 года. M02 завершён. Полный `scripts/test-e2e.ps1 -KeepRunning` прошёл с exit code 0; после последнего уточнения безопасной ошибки конвертера повторены весь backend, Linux-аудит, 24 сценария ошибок/безопасности и API-интеграция. M03 выполнен отдельным прогоном и описан выше.
 
 Реализованы потоковые ограничения HTTP/API, проверка MIME/сигнатуры/архивов, безопасные дескрипторы артефактов и привязка к UUID документа, ограниченные дочерние процессы parsing/MarkItDown/OCR/mapping/table, запрет сетевых syscalls worker, ограничения контейнера и приватные сообщения ошибок. Подробные границы и лимиты: [docs/M02_SECURITY.md](docs/M02_SECURITY.md).
 

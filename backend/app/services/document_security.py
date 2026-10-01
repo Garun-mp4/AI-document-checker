@@ -152,7 +152,8 @@ def storage_path(path: str | Path, root: str | Path | None = None) -> Path:
 def owned_storage(path: str | Path, document_id: object) -> Path:
     candidate = storage_path(path)
     suffixes = {*MIME_TYPES, '.markdown.md', '.map.json'}
-    if candidate.name not in {f'{document_id}{suffix}' for suffix in suffixes}:
+    if candidate.name not in {f'{document_id}{suffix}' for suffix in suffixes} and not re.fullmatch(
+            re.escape(str(document_id)) + r'\.v[1-9][0-9]*\.[0-9a-f]{32}\.(markdown\.md|map\.json|embedding\.json)', candidate.name):
         raise DocumentParsingError('Артефакт не принадлежит этому документу.')
     return candidate
 
@@ -183,7 +184,7 @@ def write_artifact(path: Path, text: str) -> None:
     data = text.encode('utf-8')
     if len(data) > settings.document_worker_max_output_bytes:
         raise DocumentParsingError('Производный артефакт превышает безопасный размер.')
-    fd, temporary = tempfile.mkstemp(prefix='.artifact-', dir=target.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.artifact-' + target.name + '.', dir=target.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)

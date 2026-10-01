@@ -8,6 +8,7 @@ import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -69,12 +70,19 @@ def test_page_and_text_limits(monkeypatch):
 
 
 def test_background_exception_is_observed_without_document_text(caplog):
-    from app.services.processing import DocumentProcessor
+    from types import SimpleNamespace
+
+    from app.worker import QueueWorker
     async def scenario():
-        async def broken(): raise RuntimeError('PRIVATE_DOCUMENT secret-token')
-        task = asyncio.create_task(broken())
-        await asyncio.gather(task, return_exceptions=True)
-        DocumentProcessor._observe_completion(task)
+        async def broken(*args): raise RuntimeError('PRIVATE_DOCUMENT secret-token')
+        from app.services import processing_engine
+        original = processing_engine.ProcessingAttempt.run
+        processing_engine.ProcessingAttempt.run = broken
+        try:
+            worker = QueueWorker(SimpleNamespace())
+            await worker.execute(SimpleNamespace(id=uuid4(), document_id=uuid4(), version=1, owner=uuid4(), parameters={}))
+        finally:
+            processing_engine.ProcessingAttempt.run = original
     asyncio.run(scenario())
     assert 'RuntimeError' in caplog.text
     assert 'PRIVATE_DOCUMENT' not in caplog.text
@@ -341,8 +349,8 @@ def test_streamed_http_limit_without_content_length_and_private_errors(tmp_path,
 @pytest.mark.parametrize('cancel_commit', [False, True])
 def test_upload_commit_failure_or_cancellation_preserves_consistency(tmp_path, monkeypatch, caplog, cancel_commit):
     monkeypatch.setattr(settings, 'upload_dir', str(tmp_path))
-    scheduled = []
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(processor=SimpleNamespace(schedule=scheduled.append))))
+    enqueued = []
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(processor=SimpleNamespace())))
     class Upload:
         filename = 'new.txt'
         content_type = 'text/plain'
@@ -357,6 +365,9 @@ def test_upload_commit_failure_or_cancellation_preserves_consistency(tmp_path, m
     keep.write_bytes(b'foreign')
     async def validate(*_args, **_kwargs): return {'valid': True}
     monkeypatch.setattr(api, 'run_document_operation', validate)
+    async def enqueue(session, document):
+        session.pending_job = document.id
+    monkeypatch.setattr(api, 'enqueue', enqueue)
     async def scenario():
         committing, finish = asyncio.Event(), asyncio.Event()
         class Session:
@@ -367,6 +378,7 @@ def test_upload_commit_failure_or_cancellation_preserves_consistency(tmp_path, m
                 committing.set()
                 if cancel_commit:
                     await finish.wait()
+                    enqueued.append(self.pending_job)
                 else:
                     raise RuntimeError('PRIVATE_DOCUMENT secret-token')
         monkeypatch.setattr(api, 'SessionLocal', Session)
@@ -385,10 +397,10 @@ def test_upload_commit_failure_or_cancellation_preserves_consistency(tmp_path, m
     assert keep.read_bytes() == b'foreign'
     uploads = [path for path in tmp_path.iterdir() if path != keep]
     if cancel_commit:
-        assert len(scheduled) == len(uploads) == 1
-        assert uploads[0].name == f'{scheduled[0]}.txt'
+        assert len(enqueued) == len(uploads) == 1
+        assert uploads[0].name == f'{enqueued[0]}.txt'
         assert uploads[0].read_bytes() == b'original'
     else:
-        assert not uploads and not scheduled
+        assert not uploads and not enqueued
     assert 'PRIVATE_DOCUMENT' not in caplog.text
     assert 'secret-token' not in caplog.text

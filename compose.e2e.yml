@@ -13,7 +13,7 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
-  api:
+  api: &backend
     mem_limit: 4g
     cpus: 2
     pids_limit: 512
@@ -31,6 +31,8 @@ services:
       UPLOAD_DIR: /data/uploads
       EMBEDDING_CACHE_DIR: /data/embeddings
       HF_HOME: /data/embeddings/huggingface
+      QUEUE_LEASE_SECONDS: '6'
+      QUEUE_HEARTBEAT_SECONDS: '1'
       OCR_ENABLED: 'true'
       OCR_LANGUAGES: rus+eng
       OPENBLAS_NUM_THREADS: '2'
@@ -49,6 +51,20 @@ services:
       timeout: 5s
       retries: 60
       start_period: 30s
+  worker:
+    <<: *backend
+    command: [python, /test_support/e2e_worker.py]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -m, app.worker, --healthcheck]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    stop_grace_period: 15s
+
   web:
     build: ./frontend
     ports: ['127.0.0.1:5174:80']

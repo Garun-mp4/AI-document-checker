@@ -7,16 +7,22 @@ from sqlalchemy import func, select
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Chunk
+from app.models import Chunk, Document
 from app.services.embeddings import embed_query
+from app.services.job_queue import active_chunk_version
 
 
-async def search_chunks(document_id: uuid.UUID, query: str, limit: int = 5) -> list[Chunk]:
+async def search_chunks(document_id: uuid.UUID, query: str, limit: int = 5, *, version: int | None = None) -> list[Chunk]:
     vector = await asyncio.to_thread(embed_query, query, settings.embedding_cache_dir)
     async with SessionLocal() as session:
+        if version is None:
+            document = await session.get(Document, document_id)
+            if document is None:
+                return []
+            version = await active_chunk_version(session, document)
         semantic = await session.execute(
             select(Chunk, Chunk.embedding.cosine_distance(vector).label("distance"))
-            .where(Chunk.document_id == document_id, Chunk.embedding.is_not(None), Chunk.is_derived.is_(False))
+            .where(Chunk.document_id == document_id, Chunk.version == version, Chunk.embedding.is_not(None), Chunk.is_derived.is_(False))
             .order_by(Chunk.embedding.cosine_distance(vector))
             .limit(limit * 3)
         )
@@ -25,7 +31,7 @@ async def search_chunks(document_id: uuid.UUID, query: str, limit: int = 5) -> l
         lexical = await session.execute(
             select(Chunk, func.ts_rank(full_text_vector, full_text_query).label("rank"))
             .where(
-                Chunk.document_id == document_id,
+                Chunk.document_id == document_id, Chunk.version == version,
                 Chunk.is_derived.is_(False),
                 full_text_vector.op("@@")(full_text_query),
             )

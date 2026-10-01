@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $taskPython = Join-Path $taskRoot 'backend/.venv/Scripts/python.exe'
 $taskPreviousBase = $env:AI_CHECKER_BASE_URL
+$taskPreviousAudit = $env:E2E_AUDIT_PROJECT
 $taskExit = 1
 function Run-Checked([string]$Command, [string[]]$Arguments) {
     & $Command @Arguments
@@ -38,6 +39,8 @@ try {
     Push-Location frontend
     try { Run-Checked npm @('run', 'test:e2e') }
     finally { Pop-Location }
+    $env:E2E_AUDIT_PROJECT = 'document-checker-e2e'
+    Run-Checked $taskPython @('backend/tests/e2e_support/queue_acceptance.py')
     Invoke-RestMethod -Method Post -Uri 'http://localhost:5174/api/v1/__e2e/provider' -ContentType 'application/json' -Body '{"mode":"disconnected"}' | Out-Null
     $env:AI_CHECKER_BASE_URL = 'http://localhost:5174'
     Push-Location backend
@@ -50,6 +53,7 @@ try {
     & docker compose -p document-checker-e2e -f compose.e2e.yml logs --no-color 2>&1 | Out-File -Encoding utf8 'e2e-artifacts/compose.log'
     if (-not $KeepRunning) { & docker compose -p document-checker-e2e -f compose.e2e.yml down -v --remove-orphans }
     $env:AI_CHECKER_BASE_URL = $taskPreviousBase
+    $env:E2E_AUDIT_PROJECT = $taskPreviousAudit
     Pop-Location
 }
 exit $taskExit

@@ -11,9 +11,8 @@ from fastapi import Request
 
 from app import main
 from app.config import settings
-from app.services.codex import CodexService
+from app.services.codex import CodexService, CodexUnavailable
 from app.services.codex_preferences import model_display_name
-from app.services.markitdown_service import MarkdownConversionError
 
 
 class DeterministicCodex(CodexService):
@@ -89,10 +88,26 @@ async def control(request: Request):
         provider.stream_release.clear()
     else:
         provider.stream_release.set()
-    converter = request.app.state.processor.markitdown
-    if not hasattr(converter, "_real_e2e_convert"):
-        converter._real_e2e_convert = converter.convert
-    async def failed_conversion(path):
-        raise MarkdownConversionError("Synthetic conversion failure")
-    converter.convert = failed_conversion if data.get("markdown_failure") else converter._real_e2e_convert
-    return {"mode": provider.mode}
+    app.state.markdown_failure = data.get('markdown_failure', False)
+    app.state.hold_stage = data.get('hold_stage')
+    app.state.hold_complete = data.get('hold_complete', False)
+    return {'mode': provider.mode}
+
+
+@app.get('/api/v1/__e2e/worker-control')
+async def worker_control():
+    return {'mode': app.state.codex.mode, 'markdown_failure': getattr(app.state, 'markdown_failure', False),
+            'hold_stage': getattr(app.state, 'hold_stage', None),
+            'complete_calls': getattr(app.state, 'complete_calls', 0)}
+
+
+@app.post('/api/v1/__e2e/complete')
+async def complete(request: Request):
+    data = await request.json()
+    app.state.complete_calls = getattr(app.state, 'complete_calls', 0) + 1
+    while getattr(app.state, 'hold_complete', False):
+        await asyncio.sleep(.1)
+    try:
+        return {'result': await app.state.codex.complete(data['payload'], data['schema'])}
+    except CodexUnavailable as exc:
+        return {'error': type(exc).__name__, 'message': str(exc)}

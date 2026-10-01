@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     document_worker_cpu_seconds: int = Field(default=90, ge=1)
     document_worker_timeout_seconds: int = Field(default=180, ge=1)
     document_worker_max_output_bytes: int = Field(default=64 * 1024 * 1024, ge=1024)
+    queue_concurrency: int = Field(default=2, ge=1, le=8)
+    analysis_concurrency: int = Field(default=1, ge=1, le=4)
+    queue_lease_seconds: int = Field(default=30, ge=6)
+    queue_heartbeat_seconds: float = Field(default=5, gt=0)
+    queue_poll_seconds: float = Field(default=0.5, gt=0)
 
 
 settings = Settings()

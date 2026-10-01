@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -25,7 +26,7 @@ def test_ocr_builds_page_locators_and_markdown(monkeypatch: pytest.MonkeyPatch, 
 
     class FakePdf:
         is_encrypted = False
-        pages = [object()]
+        pages: ClassVar = [object()]
 
     class FakeTesseract:
         TesseractNotFoundError = RuntimeError

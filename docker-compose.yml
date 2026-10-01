@@ -14,7 +14,7 @@ services:
       retries: 20
     restart: unless-stopped
 
-  api:
+  api: &backend
     mem_limit: 4g
     cpus: 2
     pids_limit: 512
@@ -59,6 +59,20 @@ services:
       retries: 15
       start_period: 40s
     restart: unless-stopped
+
+  worker:
+    <<: *backend
+    command: [python, -m, app.worker]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -m, app.worker, --healthcheck]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    stop_grace_period: 15s
 
   web:
     build:

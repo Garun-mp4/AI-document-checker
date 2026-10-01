@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class DocumentOut(BaseModel):
+    active_version: int = 0
     id: str
     filename: str
     file_type: str
@@ -145,3 +146,22 @@ class SendMessageIn(BaseModel):
 class CodexPreferencesIn(BaseModel):
     model: str = Field(min_length=1, max_length=100)
     reasoning_effort: str = Field(min_length=1, max_length=20)
+
+
+class ProcessingJobOut(BaseModel):
+    id: str
+    operation: Literal['process', 'analysis']
+    version: int
+    input_version: str | None
+    state: Literal['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed']
+    stage: str
+    progress: dict[str, Any]
+    attempts: int
+    max_attempts: int
+    heartbeat: datetime | None
+    lease_until: datetime | None
+    error: str | None
+    error_code: str | None
+    parameters: dict[str, Any]
+    created_at: datetime
+    finished_at: datetime | None

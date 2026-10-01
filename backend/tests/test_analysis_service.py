@@ -82,8 +82,9 @@ def _analysis_fixture(monkeypatch: pytest.MonkeyPatch, response: str):
     sessions = [first_session, final_session]
     monkeypatch.setattr(analysis, "SessionLocal", lambda: sessions.pop(0))
 
-    async def fake_search(_document_id, _question, limit=4):
+    async def fake_search(_document_id, _question, limit=4, *, version):
         assert limit == 4
+        assert version == 3
         return [source]
 
     monkeypatch.setattr(analysis, "search_chunks", fake_search)
@@ -99,32 +100,35 @@ def test_analyze_document_builds_source_scoped_insights_and_marks_ready(monkeypa
             "not_found": False,
         }],
     })
-    document_id, document, source, codex, final_session = _analysis_fixture(monkeypatch, response)
+    document_id, document, source, codex, _final_session = _analysis_fixture(monkeypatch, response)
 
-    asyncio.run(analyze_document(document_id, codex))
+    insights = asyncio.run(analyze_document(document_id, codex, version=3,
+        snapshot={"file_type":"txt", "metadata_json":{"line_count":3}}))
 
-    assert document.status == "ready"
-    assert document.error_message is None
+    # Preparing answers never mutates the active version; the worker activates atomically.
+    assert document.status == "queued"
+    assert document.error_message == "old error"
     assert codex.payloads[0]["sources"] == [{
         "label": "S01",
         "location": "Абзац 1",
         "excerpt": source.text,
     }]
     assert len(codex.payloads[0]["questions"]) == 7
-    assert len(final_session.insights) == 7
-    overview = next(item for item in final_session.insights if item.key == "overview")
+    assert len(insights) == 7
+    overview = next(item for item in insights if item.key == "overview")
     assert overview.answer == "Документ создан Алексееем 〔1〕."
     assert overview.citations == [str(source.id)]
-    assert all(item.answer == NO_EVIDENCE for item in final_session.insights if item.key != "overview")
+    assert all(item.answer == NO_EVIDENCE for item in insights if item.key != "overview")
 
 
 def test_analyze_document_rejects_invalid_model_json(monkeypatch: pytest.MonkeyPatch) -> None:
     document_id, document, _source, codex, _final_session = _analysis_fixture(monkeypatch, "not-json")
 
     with pytest.raises(RuntimeError, match="некорректный формат"):
-        asyncio.run(analyze_document(document_id, codex))
+        asyncio.run(analyze_document(document_id, codex, version=3,
+        snapshot={"file_type":"txt", "metadata_json":{"line_count":3}}))
 
-    assert document.status == "analyzing"
+    assert document.status == "queued"
 
 
 def test_analyze_document_fills_missing_answers_with_no_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,8 +146,9 @@ def test_analyze_document_fills_missing_answers_with_no_evidence(monkeypatch: py
     monkeypatch.setattr(analysis, "search_chunks", fake_search)
     codex = _Codex(json.dumps({"insights": []}))
 
-    asyncio.run(analyze_document(document_id, codex))
+    insights = asyncio.run(analyze_document(document_id, codex, version=3,
+        snapshot={"file_type":"txt", "metadata_json":{"line_count":3}}))
 
-    assert len(final.insights) == 7
-    assert all(item.answer == NO_EVIDENCE for item in final.insights)
-    assert all(item.citations == [] for item in final.insights)
+    assert len(insights) == 7
+    assert all(item.answer == NO_EVIDENCE for item in insights)
+    assert all(item.citations == [] for item in insights)

@@ -42,6 +42,6 @@ def test_search_chunks_merges_semantic_and_lexical_rankings(monkeypatch) -> None
     monkeypatch.setattr(retrieval, "embed_query", lambda *_args: [0.1, 0.2])
     monkeypatch.setattr(retrieval, "SessionLocal", lambda: session)
 
-    result = asyncio.run(retrieval.search_chunks(document_id, "важный вопрос", limit=3))
+    result = asyncio.run(retrieval.search_chunks(document_id, "важный вопрос", limit=3, version=2))
 
     assert [chunk.id for chunk in result] == [second.id, first.id, third.id]

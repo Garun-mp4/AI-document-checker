@@ -6,11 +6,11 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Chunk, Document, Insight
+from app.models import Chunk, Insight
 from app.services.citations import format_source_markers
 from app.services.retrieval import search_chunks
 
@@ -108,23 +108,17 @@ def _csv_metrics(metadata: dict[str, Any], derived: dict[str, uuid.UUID]) -> tup
     return answer, citations
 
 
-async def analyze_document(document_id: uuid.UUID, codex: CodexService) -> None:
-    async with SessionLocal() as session:
-        document = await session.get(Document, document_id)
-        if document is None:
-            return
-        document.status = "analyzing"
-        document.error_message = None
-        await session.commit()
-        file_type = document.file_type
-        metadata = dict(document.metadata_json or {})
+async def analyze_document(document_id: uuid.UUID, codex: CodexService, *, version: int,
+                           snapshot: dict, before_request=None) -> list[Insight]:
+    file_type = snapshot['file_type']
+    metadata = dict(snapshot.get('metadata_json') or snapshot.get('metadata') or {})
 
     questions = questions_for(file_type)
     search_questions = [question for question in questions if question["key"] != "metrics"]
     sources_by_question: dict[str, list[Chunk]] = {}
     unique_chunks: dict[uuid.UUID, Chunk] = {}
     for question in search_questions:
-        chunks = await search_chunks(document_id, question["question"], limit=4)
+        chunks = await search_chunks(document_id, question["question"], limit=4, version=version)
         sources_by_question[question["key"]] = chunks
         for chunk in chunks:
             unique_chunks.setdefault(chunk.id, chunk)
@@ -132,7 +126,7 @@ async def analyze_document(document_id: uuid.UUID, codex: CodexService) -> None:
     if file_type in {"csv", "xlsx", "xls"}:
         async with SessionLocal() as session:
             derived_rows = (await session.execute(
-                select(Chunk).where(Chunk.document_id == document_id, Chunk.is_derived.is_(True))
+                select(Chunk).where(Chunk.document_id == document_id, Chunk.is_derived.is_(True), Chunk.version == version)
             )).scalars().all()
         derived = {str(chunk.locator.get("column")): chunk.id for chunk in derived_rows if chunk.locator.get("column")}
         table_source = next((chunk.id for chunk in derived_rows if chunk.locator.get("column") is None), None)
@@ -185,6 +179,8 @@ async def analyze_document(document_id: uuid.UUID, codex: CodexService) -> None:
 
     model_rows: dict[str, dict[str, Any]] = {}
     if search_questions and sources:
+        if before_request:
+            await before_request()
         raw = await codex.complete(payload, ANALYSIS_SCHEMA)
         try:
             parsed = json.loads(raw)
@@ -220,11 +216,4 @@ async def analyze_document(document_id: uuid.UUID, codex: CodexService) -> None:
             citations=citations,
         ))
 
-    async with SessionLocal() as session:
-        await session.execute(delete(Insight).where(Insight.document_id == document_id))
-        session.add_all(insights)
-        document = await session.get(Document, document_id)
-        if document:
-            document.status = "ready"
-            document.error_message = None
-        await session.commit()
+    return insights

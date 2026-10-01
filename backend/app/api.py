@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -16,7 +17,15 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Chat, Chunk, Document, Insight, Message
+from app.models import (
+    Chat,
+    Chunk,
+    Document,
+    DocumentVersion,
+    Insight,
+    Message,
+    ProcessingJob,
+)
 from app.schemas import (
     ChatOut,
     ChatSummaryOut,
@@ -26,6 +35,7 @@ from app.schemas import (
     InsightOut,
     MarkdownOut,
     MessageOut,
+    ProcessingJobOut,
     SendMessageIn,
     SourceOut,
     TablePreviewOut,
@@ -47,6 +57,7 @@ from app.services.document_security import (
     validate_mime,
 )
 from app.services.isolated_documents import run_document_operation
+from app.services.job_queue import active_chunk_version, cancel, cleanup_files, enqueue
 from app.services.parsing import (
     SUPPORTED_EXTENSIONS,
     DocumentParsingError,
@@ -85,6 +96,7 @@ def document_media_type(file_type: str, filename: str) -> str:
 
 def _document_out(document: Document) -> DocumentOut:
     return DocumentOut(
+        active_version=getattr(document, "active_version", 0),
         id=str(document.id),
         filename=document.filename,
         file_type=document.file_type,
@@ -230,6 +242,7 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
     created = False
     try:
         size = 0
+        digest = hashlib.sha256()
         fd = os.open(storage_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         created = True
         with os.fdopen(fd, 'wb') as destination:
@@ -237,6 +250,7 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
                 size += len(piece)
                 if size > settings.max_upload_bytes:
                     raise HTTPException(status_code=413, detail='Файл превышает максимальный размер загрузки.')
+                digest.update(piece)
                 destination.write(piece)
         if not size:
             raise HTTPException(status_code=400, detail='Файл пустой.')
@@ -249,23 +263,24 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
             file_size=size,
             status="queued",
             metadata_json={},
+            input_checksum=digest.hexdigest(),
+            active_version=0, next_version=1,
         )
         async with SessionLocal() as session:
             session.add(document)
             # Create the durable conversation before processing starts so a
             # queued or failed upload is still visible in the chat library.
             session.add(Chat(document_id=document_id))
+            await enqueue(session, document)
             commit_task = asyncio.create_task(session.commit())
             try:
                 await asyncio.shield(commit_task)
             except asyncio.CancelledError:
                 await commit_task
                 committed = True
-                request.app.state.processor.schedule(document_id)
                 raise
             committed = True
             await session.refresh(document)
-        request.app.state.processor.schedule(document_id)
         return _document_out(document)
     except DocumentParsingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -293,9 +308,13 @@ async def get_document(document_id: uuid.UUID) -> DocumentOut:
 
 
 @router.post("/documents/{document_id}/retry", response_model=DocumentOut, status_code=202)
-async def retry_document(document_id: uuid.UUID, request: Request) -> DocumentOut:
+async def retry_document(document_id: uuid.UUID, request: Request, operation: str = "retry") -> DocumentOut:
     try:
-        await request.app.state.processor.retry(document_id)
+        if operation not in {"retry", "analysis", "process"}:
+            raise HTTPException(status_code=422, detail="Неизвестная операция.")
+        await request.app.state.processor.retry(document_id, operation)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Документ не найден.") from exc
     async with SessionLocal() as session:
@@ -306,18 +325,33 @@ async def retry_document(document_id: uuid.UUID, request: Request) -> DocumentOu
 
 @router.delete("/documents/{document_id}", status_code=204)
 async def delete_document(document_id: uuid.UUID, request: Request) -> None:
-    processor = request.app.state.processor
-    task = processor._tasks.get(document_id)
-    if task and not task.done():
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    try:
+        await cancel(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Документ не найден.') from exc
+    # Wait for child teardown. Lease fencing still prevents writes if the worker died.
+    deadline = asyncio.get_running_loop().time() + settings.queue_heartbeat_seconds + 2
+    while asyncio.get_running_loop().time() < deadline:
+        async with SessionLocal() as session:
+            active = await session.scalar(select(ProcessingJob.id).where(
+                ProcessingJob.document_id == document_id, ProcessingJob.state == 'cancelling'))
+        if active is None:
+            break
+        await asyncio.sleep(0.1)
     async with SessionLocal() as session:
-        document = await session.get(Document, document_id)
+        document = await session.get(Document, document_id, with_for_update=True)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
+        versions = (await session.execute(select(DocumentVersion).where(DocumentVersion.document_id == document_id))).scalars().all()
+        snapshots = [version.snapshot for version in versions]
         path = document.storage_path
         await session.delete(document)
         await session.commit()
+    for snapshot in snapshots:
+        try:
+            cleanup_files(snapshot, document_id)
+        except (OSError, ValueError, DocumentParsingError):
+            logger.warning("Refused unsafe or unavailable version artifact deletion")
     for artifact in (path, document.markdown_path, document.markdown_map_path):
         if artifact:
             try:
@@ -332,10 +366,11 @@ async def list_chunks(document_id: uuid.UUID, offset: int = 0, limit: int = 50) 
         raise HTTPException(status_code=400, detail="offset не может быть отрицательным.")
     limit = max(1, min(limit, 200))
     async with SessionLocal() as session:
-        if await session.get(Document, document_id) is None:
+        document = await session.get(Document, document_id)
+        if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
         chunks = (await session.execute(
-            select(Chunk).where(Chunk.document_id == document_id).order_by(Chunk.ordinal).offset(offset).limit(limit)
+            select(Chunk).where(Chunk.document_id == document_id, Chunk.version == await active_chunk_version(session, document)).order_by(Chunk.ordinal).offset(offset).limit(limit)
         )).scalars().all()
         return [SourceOut(
             id=str(chunk.id), text=str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500], locator=chunk.locator,
@@ -353,7 +388,7 @@ async def document_preview(document_id: uuid.UUID) -> DocumentPreviewOut:
             raise HTTPException(status_code=404, detail="Документ не найден.")
         chunks = (await session.execute(
             select(Chunk)
-            .where(Chunk.document_id == document_id)
+            .where(Chunk.document_id == document_id, Chunk.version == await active_chunk_version(session, document))
             .order_by(Chunk.ordinal)
             .limit(MAX_PREVIEW_BLOCKS + 1)
         )).scalars().all()
@@ -471,27 +506,23 @@ async def download_document_markdown(document_id: uuid.UUID, request: Request) -
 
 @router.post("/documents/{document_id}/markdown/rebuild", response_model=DocumentOut, status_code=202)
 async def rebuild_document_markdown(document_id: uuid.UUID, request: Request) -> DocumentOut:
+    try:
+        await request.app.state.processor.retry(document_id, 'process')
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Документ не найден.') from exc
     async with SessionLocal() as session:
         document = await session.get(Document, document_id)
-        if document is None:
-            raise HTTPException(status_code=404, detail="Документ не найден.")
-        document.status = "queued"
-        document.error_message = None
-        document.markdown_status = "pending"
-        document.markdown_error = None
-        await session.commit()
-        await session.refresh(document)
-    request.app.state.processor.schedule(document_id)
-    return _document_out(document)
+        return _document_out(document)
 
 
 @router.get("/documents/{document_id}/insights", response_model=list[InsightOut])
 async def document_insights(document_id: uuid.UUID) -> list[InsightOut]:
     async with SessionLocal() as session:
-        if await session.get(Document, document_id) is None:
+        document = await session.get(Document, document_id)
+        if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
         insights = (await session.execute(
-            select(Insight).where(Insight.document_id == document_id).order_by(Insight.created_at, Insight.id)
+            select(Insight).where(Insight.document_id == document_id, Insight.version == document.active_version).order_by(Insight.created_at, Insight.id)
         )).scalars().all()
         return [InsightOut(
             id=str(item.id), key=item.key, question=item.question, answer=item.answer,
@@ -561,7 +592,7 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
     ):
         async with SessionLocal() as session:
             derived = (await session.execute(
-                select(Chunk).where(Chunk.document_id == document_id, Chunk.is_derived.is_(True)).order_by(Chunk.ordinal)
+                select(Chunk).where(Chunk.document_id == document_id, Chunk.is_derived.is_(True), Chunk.version == await active_chunk_version(session, document)).order_by(Chunk.ordinal)
             )).scalars().all()
         table_summary = next((chunk for chunk in derived if not chunk.locator.get("column")), None)
         numeric_sources = [chunk for chunk in derived if chunk.locator.get("column")]
@@ -651,3 +682,26 @@ def codex_error_message(exc: Exception) -> str:
     if isinstance(exc, CodexUnavailable):
         return str(exc)
     return "Не удалось получить ответ от Codex. Проверьте состояние входа и интернета, затем повторите вопрос."
+
+
+@router.get('/documents/{document_id}/jobs', response_model=list[ProcessingJobOut])
+async def document_jobs(document_id: uuid.UUID):
+    async with SessionLocal() as session:
+        if await session.get(Document, document_id) is None:
+            raise HTTPException(status_code=404, detail='Документ не найден.')
+        jobs = (await session.execute(select(ProcessingJob).where(ProcessingJob.document_id == document_id)
+                .order_by(ProcessingJob.created_at.desc()).limit(100))).scalars().all()
+        return [ProcessingJobOut(id=str(j.id), operation=j.operation, version=j.version, input_version=j.input_version,
+                     state=j.state, stage=j.stage, progress=j.progress, attempts=j.attempts,
+                     heartbeat=j.heartbeat, lease_until=j.lease_until, max_attempts=j.max_attempts,
+                     error=j.error, error_code=j.error_code,
+                     parameters=j.parameters, created_at=j.created_at, finished_at=j.finished_at) for j in jobs]
+
+
+@router.post('/documents/{document_id}/cancel', status_code=202)
+async def cancel_processing(document_id: uuid.UUID):
+    try:
+        await cancel(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Документ не найден.') from exc
+    return {'status': 'accepted'}
