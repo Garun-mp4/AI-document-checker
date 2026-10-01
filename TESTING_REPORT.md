@@ -13,7 +13,7 @@
 | TypeScript / production build | **PASS**; остаётся предупреждение Vite о крупном JS bundle с PDF.js |
 | Chromium search E2E | **4 passed**: полный TXT/Markdown поиск и пагинация, stale/error handling, citation preservation, OCR PDF + CSV/XLSX cells + PPTX slide + EPUB chapter |
 | Citation regression E2E | **PASS** для PDF после разведения сброса поиска и выбранного источника |
-| Isolated Compose | API, DB, worker и web прошли health-check; search сценарии работали с реальными парсерами/OCR и тестовым provider |
+| Isolated Compose | API, DB и worker прошли health-check; web отвечает HTTP 200 и проверен Playwright. Search сценарии работали с реальными парсерами/OCR и тестовым provider |
 
 В viewer добавлена буквальная строка поиска с отдельными областями «Оригинал» и «Markdown», дебаунсом, отменой устаревших запросов, полным счётчиком, пагинацией и переходом по Enter/Shift+Enter; Escape и кнопка очищают запрос. Сервер выполняет полный поиск, возвращая точные source/Markdown ranges. PDF OCR ограничивает подсветку совпавшими word boxes; таблицы ищутся в ячейках с локаторами строк, колонок и листов; DOCX/PDF/PPTX/EPUB сохраняют свои paragraph/page/slide/chapter locator’ы. Выбор citation очищает активную строку поиска, но оставляет citation источником текущей подсветки.
 
