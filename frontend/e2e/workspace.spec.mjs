@@ -82,11 +82,10 @@ for (const [width, height] of [[1440,900], [1280,720], [1024,768], [768,1024], [
     await expect.poll(() => page.locator('#chat-library').evaluate(element => Math.round(element.getBoundingClientRect().width))).toBe(width < 600 ? 300 : 240)
     if (width < 600) await page.getByRole('button', { name: 'Закрыть открытые панели', exact: true }).click({ position: { x: width - 5, y: 150 } })
     await originalVisible(page, 'docx')
-    const fit = await page.locator('.docx-render-host').evaluate(host => {
+    await expect.poll(() => page.locator('.docx-render-host').evaluate(host => {
       const sheet = host.querySelector('section.docx-preview').getBoundingClientRect()
-      return { width: sheet.width, available: host.clientWidth }
-    })
-    expect(fit.width).toBeLessThanOrEqual(fit.available + 2)
+      return sheet.width <= host.clientWidth + 2
+    }), { message: 'DOCX page fits the viewer after its responsive scale is applied' }).toBeTruthy()
     const toggle = page.locator('.chat-visibility-toggle')
     await toggle.click()
     await expect(toggle).toBeVisible()

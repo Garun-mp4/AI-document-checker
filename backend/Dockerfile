@@ -1,12 +1,19 @@
 FROM python:3.12-slim
 
+ARG APP_BUILD_ID=unverified
+ARG APP_BUILD_COMMIT=unknown
+ARG APP_BUILD_TIME=unknown
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     CODEX_HOME=/data/codex \
     HF_HOME=/data/embeddings/huggingface \
     EMBEDDING_CACHE_DIR=/data/embeddings \
-    UPLOAD_DIR=/data/uploads
+    UPLOAD_DIR=/data/uploads \
+    APP_BUILD_ID=${APP_BUILD_ID} \
+    APP_BUILD_COMMIT=${APP_BUILD_COMMIT} \
+    APP_BUILD_TIME=${APP_BUILD_TIME}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 libseccomp2 poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \

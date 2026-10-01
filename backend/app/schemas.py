@@ -159,9 +159,23 @@ class ProcessingJobOut(BaseModel):
     attempts: int
     max_attempts: int
     heartbeat: datetime | None
+    queued_at: datetime
+    started_at: datetime | None
+    stage_started_at: datetime | None
     lease_until: datetime | None
+    queue_position: int | None
+    queue_wait_seconds: int | None
+    stage_elapsed_seconds: int | None
     error: str | None
     error_code: str | None
     parameters: dict[str, Any]
     created_at: datetime
     finished_at: datetime | None
+
+
+class AppVersionOut(BaseModel):
+    service: Literal['api'] = 'api'
+    version: str
+    build_id: str
+    commit: str
+    built_at: str

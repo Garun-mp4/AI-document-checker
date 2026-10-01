@@ -86,6 +86,12 @@ class QueueAcceptance(unittest.TestCase):
         self.control(hold_stage='extracting')
         id = self.upload()
         self.wait(lambda: self.job(id)['stage'] == 'extracting')
+        active = self.job(id)
+        self.assertIsNotNone(active['queued_at'])
+        self.assertIsNotNone(active['started_at'])
+        self.assertIsNotNone(active['stage_started_at'])
+        self.assertGreaterEqual(active['queue_wait_seconds'], 0)
+        self.assertGreaterEqual(active['stage_elapsed_seconds'], 0)
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             responses = list(pool.map(lambda _: self.client.post(f'/documents/{id}/retry'), range(8)))
         self.assertTrue(all(r.status_code == 202 for r in responses))
@@ -99,6 +105,22 @@ class QueueAcceptance(unittest.TestCase):
         self.assertNotEqual(old['id'], self.job(id)['id'])
         self.assertEqual(self.client.get(f'/documents/{id}/file').content,
                          'Цель — проверить очередь. Ответственный — Иван Пример. Срок — 2026 год.'.encode())
+
+    def test_01b_queued_jobs_report_stable_positions_and_wait_time(self):
+        compose('stop', 'worker')
+        first = self.upload()
+        second = self.upload()
+        first_job = self.job(first)
+        second_job = self.job(second)
+        self.assertEqual((first_job['state'], first_job['queue_position']), ('queued', 1))
+        self.assertEqual((second_job['state'], second_job['queue_position']), ('queued', 2))
+        self.assertIsNone(first_job['started_at'])
+        self.assertIsNone(second_job['started_at'])
+        self.assertGreaterEqual(first_job['queue_wait_seconds'], 0)
+        self.assertGreaterEqual(second_job['queue_wait_seconds'], 0)
+        compose('start', 'worker')
+        self.ready(first)
+        self.ready(second)
 
     def test_02_restart_partial_index_preserves_previous_version_chat_and_citations(self):
         id = self.upload()

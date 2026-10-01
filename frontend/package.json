@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --test tests/*.test.mjs",
+    "smoke:deployed": "node scripts/deploy-smoke.mjs",
     "test:e2e": "playwright test",
     "test:e2e:live": "playwright test --config=playwright.live.config.mjs"
   },

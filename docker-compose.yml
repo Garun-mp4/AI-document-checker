@@ -24,6 +24,10 @@ services:
     tmpfs: ['/tmp:size=256m,mode=1777']
     build:
       context: ./backend
+      args:
+        APP_BUILD_ID: ${APP_BUILD_ID:-unverified}
+        APP_BUILD_COMMIT: ${APP_BUILD_COMMIT:-unknown}
+        APP_BUILD_TIME: ${APP_BUILD_TIME:-unknown}
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-document_checker}:${POSTGRES_PASSWORD:-document-checker-local}@db:5432/${POSTGRES_DB:-document_checker}
       CODEX_HOME: /data/codex
@@ -42,6 +46,9 @@ services:
       OCR_MAX_PAGES: ${OCR_MAX_PAGES:-100}
       OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-90}
       OCR_MAX_CHARS: ${OCR_MAX_CHARS:-5000000}
+      APP_BUILD_ID: ${APP_BUILD_ID:-unverified}
+      APP_BUILD_COMMIT: ${APP_BUILD_COMMIT:-unknown}
+      APP_BUILD_TIME: ${APP_BUILD_TIME:-unknown}
       PYTHONUNBUFFERED: "1"
       OPENBLAS_NUM_THREADS: "2"
       OMP_NUM_THREADS: "2"
@@ -77,6 +84,10 @@ services:
   web:
     build:
       context: ./frontend
+      args:
+        APP_BUILD_ID: ${APP_BUILD_ID:-unverified}
+        APP_BUILD_COMMIT: ${APP_BUILD_COMMIT:-unknown}
+        APP_BUILD_TIME: ${APP_BUILD_TIME:-unknown}
     ports:
       - "127.0.0.1:${WEB_PORT:-5173}:80"
     depends_on:

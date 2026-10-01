@@ -68,7 +68,9 @@ class ProcessingAttempt:
         return Path(settings.upload_dir).resolve() / f'{self.prefix}.{suffix}'
 
     async def stage(self, name, **progress):
-        async with fenced(self.job.id, self.job.owner) as (_session, document, job):
+        async with fenced(self.job.id, self.job.owner) as (session, document, job):
+            if job.stage != name:
+                job.stage_started_at = await session.scalar(select(func.clock_timestamp()))
             job.stage = name
             job.progress = progress
             if document.status != 'ready':
@@ -112,8 +114,14 @@ class ProcessingAttempt:
         markdown_engine_version: str | None = None
         ocr_metadata: dict[str, object] = {}
         if parsed.metadata.get("ocr_required"):
-            await self.stage("ocr")
-            ocr_result = await ocr_uploaded(path, configuration=self.configuration)
+            total_pages = parsed.metadata.get('page_count')
+            await self.stage('ocr', processed_pages=0, total_pages=total_pages)
+
+            async def report_ocr_progress(processed_pages: int, total: int) -> None:
+                await self.stage('ocr', processed_pages=processed_pages, total_pages=total)
+
+            ocr_result = await ocr_uploaded(path, configuration=self.configuration,
+                                            progress_callback=report_ocr_progress)
             parsed = ocr_result.parsed
             markdown_text = ocr_result.markdown
             analysis_blocks, markdown_mapping = _ocr_analysis_blocks(parsed, markdown_text)

@@ -6,13 +6,63 @@ import os
 import signal
 import sys
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.config import settings
 from app.services.document_security import storage_path
+from app.services.job_queue import LeaseLost
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
 
 _slots = asyncio.Semaphore(2)
+_PROGRESS_PREFIX = b'\x1eDOC_PROGRESS '
+
+
+async def _consume_progress(
+    stderr: asyncio.StreamReader,
+    progress_callback: Callable[[int, int], Awaitable[None]] | None,
+    max_pages: int,
+) -> None:
+    """Drain child diagnostics and forward bounded page progress while the lease is valid."""
+    line = bytearray()
+    oversized = False
+    report_progress = progress_callback is not None
+
+    async def handle(candidate: bytes) -> None:
+        nonlocal report_progress
+        if not report_progress or progress_callback is None or not candidate.startswith(_PROGRESS_PREFIX):
+            return
+        try:
+            event = json.loads(candidate[len(_PROGRESS_PREFIX):])
+            processed, total = event.get('processed_pages'), event.get('total_pages')
+        except (ValueError, TypeError, AttributeError):
+            return
+        if (isinstance(processed, int) and not isinstance(processed, bool)
+                and isinstance(total, int) and not isinstance(total, bool)
+                and 0 <= processed <= total <= max_pages):
+            try:
+                await progress_callback(processed, total)
+            except LeaseLost:
+                # Cancellation or lease recovery makes further progress writes stale.
+                report_progress = False
+
+    while chunk := await stderr.read(4096):
+        offset = 0
+        while offset < len(chunk):
+            end = chunk.find(b'\n', offset)
+            segment = chunk[offset:] if end < 0 else chunk[offset:end]
+            if not oversized:
+                if len(line) + len(segment) <= 512:
+                    line.extend(segment)
+                else:
+                    oversized = True
+            if end < 0:
+                break
+            if not oversized:
+                await handle(bytes(line))
+            line.clear()
+            oversized = False
+            offset = end + 1
 
 
 def _linux_descendants(root_pid: int) -> list[int]:
@@ -81,7 +131,10 @@ async def _stop_process_tree(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
-async def run_document_operation(operation: str, path: Path, *, timeout: float | None = None, configuration: dict | None = None, **parameters):
+async def run_document_operation(operation: str, path: Path, *, timeout: float | None = None,
+                                 configuration: dict | None = None,
+                                 progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+                                 **parameters):
     path = storage_path(path)
     names = ('embedding_cache_dir', 'upload_dir', 'max_upload_bytes', 'archive_max_bytes', 'archive_member_max_bytes',
              'archive_max_entries', 'document_max_pages', 'document_max_chars', 'markdown_max_chars',
@@ -104,9 +157,10 @@ async def run_document_operation(operation: str, path: Path, *, timeout: float |
             environment.update(TMPDIR=temporary, TEMP=temporary, TMP=temporary)
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-m', 'app.services.document_worker', cwd=temporary, env=environment,
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=sys.platform != 'win32',
             )
+
             async def exchange():
                 process.stdin.write(json.dumps(payload).encode('utf-8'))
                 await process.stdin.drain()
@@ -126,6 +180,7 @@ async def run_document_operation(operation: str, path: Path, *, timeout: float |
                 if 'error' in response:
                     raise DocumentParsingError(response['error'])
                 return response['result']
+            progress_task = asyncio.create_task(_consume_progress(process.stderr, progress_callback, settings.ocr_max_pages))
             try:
                 return await asyncio.wait_for(exchange(), timeout or settings.document_worker_timeout_seconds)
             except asyncio.TimeoutError as exc:
@@ -136,7 +191,15 @@ async def run_document_operation(operation: str, path: Path, *, timeout: float |
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
                     await cleanup
+                    if not progress_task.done():
+                        progress_task.cancel()
+                    await asyncio.gather(progress_task, return_exceptions=True)
                     raise
+                if progress_task.done():
+                    progress_task.result()
+                else:
+                    progress_task.cancel()
+                    await asyncio.gather(progress_task, return_exceptions=True)
 
 
 def parsed_result(result: dict) -> ParsedDocument:
@@ -147,10 +210,10 @@ async def parse_uploaded(path: Path, filename: str, **parameters) -> ParsedDocum
     return parsed_result(await run_document_operation('parse', path, filename=filename, **parameters))
 
 
-async def ocr_uploaded(path: Path, **parameters):
+async def ocr_uploaded(path: Path, *, progress_callback=None, **parameters):
     from app.services.ocr import OCRProcessingError, OCRResult
     try:
-        result = await run_document_operation('ocr', path, **parameters)
+        result = await run_document_operation('ocr', path, progress_callback=progress_callback, **parameters)
     except DocumentParsingError as exc:
         raise OCRProcessingError(str(exc)) from exc
     result['parsed'] = parsed_result(result['parsed'])

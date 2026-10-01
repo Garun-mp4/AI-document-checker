@@ -31,10 +31,13 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, MarkdownDocument, SourceRef, StreamCitation } from './types'
+import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
 import { ChatMarkdown } from './components/ChatMarkdown'
+import { ProcessingStatusPanel } from './components/ProcessingStatusPanel'
+import { BuildVersionNotice } from './components/BuildVersionNotice'
+import { useBuildVersion } from './useBuildVersion'
 
 const API = '/api/v1'
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
@@ -68,6 +71,7 @@ function statusLabel(status: DocumentRecord['status']): string {
     ocr: 'Распознаю скан',
     indexing: 'Создаю индекс',
     analyzing: 'Готовлю ответы',
+    cancelled: 'Обработка отменена',
     ready: 'Готово',
     needs_auth: 'Нужен вход Codex',
     model_unavailable: 'Модель недоступна',
@@ -175,6 +179,8 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
   const [newChatOpen, setNewChatOpen] = useState(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true')
   const [document, setDocument] = useState<DocumentRecord | null>(null)
+  const [processingJob, setProcessingJob] = useState<ProcessingJob | null>(null)
+  const [processingActionPending, setProcessingActionPending] = useState(false)
   const [insights, setInsights] = useState<Insight[]>([])
   const [chat, setChat] = useState<ChatRecord | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -221,6 +227,7 @@ function App() {
   const [markdownRebuilding, setMarkdownRebuilding] = useState(false)
   const [markdownLoadingMore, setMarkdownLoadingMore] = useState(false)
   const [previewPage, setPreviewPage] = useState(1)
+  const { check: buildVersionCheck, recheck: recheckBuildVersion } = useBuildVersion()
   const fileInput = useRef<HTMLInputElement>(null)
   const chatInputRef = useRef<HTMLTextAreaElement>(null)
   const workArea = useRef<HTMLElement>(null)
@@ -316,6 +323,7 @@ function App() {
   useEffect(() => {
     if (!selectedId) {
       setDocument(null)
+      setProcessingJob(null)
       setInsights([])
       setDocumentPreview(null)
       setMarkdownDocument(null)
@@ -326,6 +334,7 @@ function App() {
     let active = true
     let loadedVersion: string | null = null
     setDocument(null)
+    setProcessingJob(null)
     setInsights([])
     setDocumentPreview(null)
     setMarkdownDocument(null)
@@ -335,9 +344,13 @@ function App() {
     setSelectedSourceId(null)
     setSelectedSource(null)
     const refresh = async () => {
-      try {
-        const result = await api<DocumentRecord>(`${API}/documents/${selectedId}`)
-        if (!active) return
+      const [documentResult, jobsResult] = await Promise.allSettled([
+        api<DocumentRecord>(`${API}/documents/${selectedId}`),
+        api<ProcessingJob[]>(`${API}/documents/${selectedId}/jobs`),
+      ])
+      if (!active) return
+      if (documentResult.status === 'fulfilled') {
+        const result = documentResult.value
         setDocument(result)
         updateDocumentInLibrary(result)
         // A rebuild can finish between two polls. Reload derived data when
@@ -346,8 +359,16 @@ function App() {
           loadedVersion = result.updated_at
           await loadReadyData(selectedId)
         }
-      } catch (error) {
-        if (active) showToast(error instanceof Error ? error.message : 'Не удалось открыть документ.')
+      } else {
+        showToast(documentResult.reason instanceof Error ? documentResult.reason.message : 'Не удалось открыть документ.')
+      }
+      if (jobsResult.status === 'fulfilled') {
+        const jobs = jobsResult.value
+        setProcessingJob(jobs.find((job) => ['queued', 'running', 'cancelling'].includes(job.state)) ?? jobs[0] ?? null)
+      } else {
+        // Older API builds may not expose the job endpoint yet. The build
+        // version notice handles that deployment mismatch without hiding the document.
+        setProcessingJob(null)
       }
     }
     void refresh()
@@ -556,15 +577,38 @@ function App() {
   }, [codex, saveCodexPreferences])
 
   const retryDocument = useCallback(async () => {
-    if (!document) return
+    if (!document || processingActionPending) return
+    setProcessingActionPending(true)
     try {
       const updated = await api<DocumentRecord>(`${API}/documents/${document.id}/retry`, { method: 'POST' })
       setDocument(updated)
+      setProcessingJob(null)
       updateDocumentInLibrary(updated)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось повторить обработку.')
+    } finally {
+      setProcessingActionPending(false)
     }
-  }, [document, showToast, updateDocumentInLibrary])
+  }, [document, processingActionPending, showToast, updateDocumentInLibrary])
+
+  const cancelProcessing = useCallback(async () => {
+    if (!selectedId || processingActionPending) return
+    setProcessingActionPending(true)
+    try {
+      await api<{ status: string }>(`${API}/documents/${selectedId}/cancel`, { method: 'POST' })
+      const [updatedDocument, jobs] = await Promise.all([
+        api<DocumentRecord>(`${API}/documents/${selectedId}`),
+        api<ProcessingJob[]>(`${API}/documents/${selectedId}/jobs`),
+      ])
+      setDocument(updatedDocument)
+      updateDocumentInLibrary(updatedDocument)
+      setProcessingJob(jobs.find((job) => ['queued', 'running', 'cancelling'].includes(job.state)) ?? jobs[0] ?? null)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось отменить обработку.')
+    } finally {
+      setProcessingActionPending(false)
+    }
+  }, [selectedId, processingActionPending, showToast, updateDocumentInLibrary])
 
   const rebuildMarkdown = useCallback(async () => {
     if (!document || markdownRebuilding) return
@@ -795,6 +839,7 @@ function App() {
   const currentListItem = chats.find((item) => item.document_id === selectedId)
   const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
   const activeStatus = visibleStatus ? ['queued', 'extracting', 'ocr', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
+  const replacementFailure = visibleStatus?.status === 'ready' && processingJob?.state === 'failed'
   const mainClasses = [
     'app-shell',
     sidebarCollapsed ? 'library-manual-collapsed' : '',
@@ -872,6 +917,7 @@ function App() {
       </aside>
 
       <main id="main-content" tabIndex={-1} className={`workspace ${!selectedId || !visibleStatus ? 'workspace-empty' : ''} ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
+        <BuildVersionNotice check={buildVersionCheck} busy={isUploading || isSending} onReload={() => window.location.reload()} onRetry={recheckBuildVersion} />
         <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} aria-label="Выберите документ" onChange={(event) => void uploadFile(event.target.files?.[0])} />
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
 
@@ -898,23 +944,25 @@ function App() {
               </div>
             </div>
 
-            {activeStatus && (
-              <div className="processing-banner" role="status" aria-live="polite">
-                <div className="processing-spinner"><LoaderCircle size={19} className="spin" /></div>
-                <div><strong>{statusLabel(visibleStatus.status)}</strong><span>{processingDescription(visibleStatus.status)}</span></div>
-                <span className="processing-step">{visibleStatus.status === 'queued' ? '01' : visibleStatus.status === 'extracting' ? '02' : visibleStatus.status === 'ocr' ? '03' : visibleStatus.status === 'indexing' ? '04' : '05'} / 05</span>
-              </div>
-            )}
+            {(activeStatus || replacementFailure) && <ProcessingStatusPanel
+              job={processingJob}
+              status={visibleStatus.status}
+              fallbackDescription={processingDescription(visibleStatus.status)}
+              replacementFailure={replacementFailure}
+              actionPending={processingActionPending}
+              onCancel={processingJob && ['queued', 'running'].includes(processingJob.state) ? () => void cancelProcessing() : undefined}
+              onRetry={replacementFailure ? () => void retryDocument() : undefined}
+            />}
 
             {document?.ocr_status === 'ready' && document.analysis_source === 'ocr' && (
               <div className="ocr-notice" role="status"><BookOpen size={16} /><span>Это сканированный PDF. Текст распознан локально ({document.ocr_language || 'rus+eng'}), а оригинальные страницы сохранены без изменений.</span></div>
             )}
 
-            {(visibleStatus.status === 'needs_auth' || visibleStatus.status === 'model_unavailable' || visibleStatus.status === 'error') && (
+            {(visibleStatus.status === 'needs_auth' || visibleStatus.status === 'model_unavailable' || visibleStatus.status === 'error' || visibleStatus.status === 'cancelled') && (
               <div className={`issue-banner ${visibleStatus.status === 'error' ? 'issue-error' : ''}`} role="alert">
                 <CircleHelp size={19} />
-                <div className="issue-copy"><strong>{visibleStatus.status === 'needs_auth' ? 'Подключите Codex, чтобы получить ответы' : visibleStatus.status === 'model_unavailable' ? 'Выбранная модель недоступна' : visibleStatus.ocr_status === 'failed' ? 'Не удалось распознать скан' : 'Не удалось обработать документ'}</strong><span>{visibleStatus.error_message ?? visibleStatus.ocr_error ?? 'Проверьте настройки и повторите действие.'}</span></div>
-                {visibleStatus.status === 'needs_auth' ? <button className="button button-dark" onClick={() => setAuthOpen(true)}>Подключить</button> : <button className="button button-light" onClick={() => void retryDocument()}><RotateCw size={15} /> Повторить</button>}
+                <div className="issue-copy"><strong>{visibleStatus.status === 'needs_auth' ? 'Подключите Codex, чтобы получить ответы' : visibleStatus.status === 'model_unavailable' ? 'Выбранная модель недоступна' : visibleStatus.status === 'cancelled' ? 'Обработка отменена' : visibleStatus.ocr_status === 'failed' ? 'Не удалось распознать скан' : 'Не удалось обработать документ'}</strong><span>{visibleStatus.error_message ?? visibleStatus.ocr_error ?? (visibleStatus.status === 'cancelled' ? 'Можно запустить обработку повторно.' : 'Проверьте настройки и повторите действие.')}</span></div>
+                {visibleStatus.status === 'needs_auth' ? <button className="button button-dark" onClick={() => setAuthOpen(true)}>Подключить</button> : <button className="button button-light" onClick={() => void retryDocument()} disabled={processingActionPending}><RotateCw size={15} /> Повторить</button>}
               </div>
             )}
 
@@ -1190,6 +1238,7 @@ function processingDescription(status: DocumentRecord['status']): string {
     ready: 'Документ проиндексирован и готов к вопросам.',
     needs_auth: 'Подключите аккаунт Codex, чтобы создать карточки и начать чат.',
     model_unavailable: 'Проверьте доступность выбранной модели для этого аккаунта.',
+    cancelled: 'Обработка отменена. Можно запустить её повторно.',
     error: 'Можно проверить файл или повторить обработку.',
   }[status]
 }

@@ -11,9 +11,18 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import settings
 from app.database import SessionLocal
@@ -27,6 +36,7 @@ from app.models import (
     ProcessingJob,
 )
 from app.schemas import (
+    AppVersionOut,
     ChatOut,
     ChatSummaryOut,
     CodexPreferencesIn,
@@ -691,11 +701,34 @@ async def document_jobs(document_id: uuid.UUID):
             raise HTTPException(status_code=404, detail='Документ не найден.')
         jobs = (await session.execute(select(ProcessingJob).where(ProcessingJob.document_id == document_id)
                 .order_by(ProcessingJob.created_at.desc()).limit(100))).scalars().all()
+        now = await session.scalar(select(func.clock_timestamp()))
+        queued_positions = (await session.execute(
+            select(
+                ProcessingJob.id,
+                func.row_number().over(order_by=(ProcessingJob.created_at, ProcessingJob.id)).label('position'),
+            ).where(ProcessingJob.state == 'queued')
+        )).all()
+        positions = {job_id: int(position) for job_id, position in queued_positions}
         return [ProcessingJobOut(id=str(j.id), operation=j.operation, version=j.version, input_version=j.input_version,
                      state=j.state, stage=j.stage, progress=j.progress, attempts=j.attempts,
-                     heartbeat=j.heartbeat, lease_until=j.lease_until, max_attempts=j.max_attempts,
+                     heartbeat=j.heartbeat, queued_at=j.queued_at, started_at=j.started_at, stage_started_at=j.stage_started_at,
+                     lease_until=j.lease_until, queue_position=positions.get(j.id),
+                     queue_wait_seconds=max(0, int(((now if j.state == 'queued' else (j.started_at or j.finished_at)) - j.queued_at).total_seconds())) if j.state == 'queued' or j.started_at or j.finished_at else None,
+                     stage_elapsed_seconds=max(0, int((now - j.stage_started_at).total_seconds())) if j.stage_started_at and j.state in {'running', 'cancelling'} else None,
+                     max_attempts=j.max_attempts,
                      error=j.error, error_code=j.error_code,
                      parameters=j.parameters, created_at=j.created_at, finished_at=j.finished_at) for j in jobs]
+
+
+@router.get('/version', response_model=AppVersionOut)
+async def app_version(request: Request, response: Response) -> AppVersionOut:
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    return AppVersionOut(
+        version=request.app.version,
+        build_id=settings.app_build_id,
+        commit=settings.app_build_commit,
+        built_at=settings.app_build_time,
+    )
 
 
 @router.post('/documents/{document_id}/cancel', status_code=202)

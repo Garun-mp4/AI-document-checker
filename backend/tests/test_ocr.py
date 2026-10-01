@@ -50,13 +50,15 @@ def test_ocr_builds_page_locators_and_markdown(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(ocr, "pytesseract", FakeTesseract)
     monkeypatch.setattr(ocr, "Output", SimpleNamespace(DICT="dict"))
 
-    result = OCRService(upload_dir).process(path)
+    progress: list[tuple[int, int]] = []
+    result = OCRService(upload_dir).process(path, progress_callback=lambda completed, total: progress.append((completed, total)))
 
     assert result.parsed.metadata["ocr_used"] is True
     assert result.parsed.blocks[0].locator["page"] == 1
     assert result.parsed.blocks[0].locator["line_start"] == 1
     assert "Проверка OCR" in result.markdown
     assert result.confidence == pytest.approx((96 + 94 + 91) / 3, abs=0.01)
+    assert progress == [(1, 1)]
 
 
 def test_ocr_reports_unreadable_scan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

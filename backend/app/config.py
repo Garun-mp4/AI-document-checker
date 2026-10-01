@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     queue_lease_seconds: int = Field(default=30, ge=6)
     queue_heartbeat_seconds: float = Field(default=5, gt=0)
     queue_poll_seconds: float = Field(default=0.5, gt=0)
+    app_build_id: str = 'unverified'
+    app_build_commit: str = 'unknown'
+    app_build_time: str = 'unknown'
 
 
 settings = Settings()

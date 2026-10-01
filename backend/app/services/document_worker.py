@@ -42,7 +42,7 @@ def restrict_process(memory_mb: int, cpu_seconds: int, output_bytes: int) -> Non
         seccomp.seccomp_release(context)
 
 
-def execute(payload: dict):
+def execute(payload: dict, progress_callback=None):
     from pathlib import Path
 
     from app.config import settings
@@ -92,7 +92,7 @@ def execute(payload: dict):
         from app.services.ocr import OCRService
         snapshot = Path.cwd() / 'original.pdf'
         snapshot.write_bytes(data)
-        return dataclasses.asdict(OCRService(Path.cwd()).process(snapshot))
+        return dataclasses.asdict(OCRService(Path.cwd()).process(snapshot, progress_callback=progress_callback))
     if operation == 'table':
         from app.services.preview import read_csv_table, read_spreadsheet_table
         if payload['file_type'] == 'csv':
@@ -107,7 +107,14 @@ def main() -> None:
     from app.services.parsing import DocumentParsingError
     try:
         payload = json.loads(sys.stdin.buffer.read(65536))
-        result = execute(payload)
+        def report_progress(processed_pages: int, total_pages: int) -> None:
+            sys.stderr.write('\x1eDOC_PROGRESS ' + json.dumps({
+                'processed_pages': processed_pages,
+                'total_pages': total_pages,
+            }) + '\n')
+            sys.stderr.flush()
+
+        result = execute(payload, progress_callback=report_progress if payload.get('operation') == 'ocr' else None)
         response = {'result': result}
     except DocumentParsingError as exc:
         response = {'error': str(exc), 'expected': True}

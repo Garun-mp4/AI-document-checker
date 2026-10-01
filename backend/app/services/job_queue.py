@@ -117,6 +117,7 @@ async def recover() -> None:
             ProcessingJob, ProcessingJob.document_id == Document.id
         ).where(ProcessingJob.state.in_(('running', 'cancelling')),
                 ProcessingJob.lease_until < func.clock_timestamp()).with_for_update(of=Document, skip_locked=True))).scalars().all()
+        now = await session.scalar(select(func.clock_timestamp()))
         for document in documents:
             job = (await session.execute(select(ProcessingJob).where(
                 ProcessingJob.document_id == document.id, ProcessingJob.state.in_(('running', 'cancelling')),
@@ -131,7 +132,7 @@ async def recover() -> None:
             job.lease_until = None
             if cancelled or interrupted or exhausted:
                 job.state = 'cancelled' if cancelled else 'failed'
-                job.finished_at = await session.scalar(select(func.clock_timestamp()))
+                job.finished_at = now
                 job.error_code = 'cancelled' if cancelled else ('analysis_interrupted' if interrupted else 'attempts_exhausted')
                 job.error = ('Обработка отменена.' if cancelled else
                              'Запрос к модели был прерван. Повторите анализ явно; автоматический повтор отключён.' if interrupted else
@@ -142,6 +143,9 @@ async def recover() -> None:
             else:
                 job.state = 'queued'
                 job.stage = 'queued'
+                job.queued_at = now
+                job.started_at = None
+                job.stage_started_at = None
                 job.error_code = 'worker_recovered'
                 if document.status != 'ready':
                     document.status = 'queued'
@@ -157,7 +161,7 @@ async def claim() -> ProcessingJob | None:
             return None
         document = (await session.execute(select(Document).join(
             ProcessingJob, ProcessingJob.document_id == Document.id
-        ).where(ProcessingJob.state == 'queued').order_by(ProcessingJob.created_at)
+        ).where(ProcessingJob.state == 'queued').order_by(ProcessingJob.created_at, ProcessingJob.id)
            .with_for_update(of=Document, skip_locked=True).limit(1))).scalar_one_or_none()
         if document is None:
             return None
@@ -169,6 +173,8 @@ async def claim() -> ProcessingJob | None:
         job.owner = uuid.uuid4()
         job.attempts += 1
         job.heartbeat = now
+        job.started_at = now
+        job.stage_started_at = now
         job.lease_until = now + timedelta(seconds=settings.queue_lease_seconds)
     return job
 
@@ -212,7 +218,11 @@ async def enter_analysis(job_id, owner) -> bool:
             ProcessingJob.state == 'running', ProcessingJob.stage == 'analysis_request',
             ProcessingJob.lease_until > func.clock_timestamp(), ProcessingJob.id != job_id))
         if count >= settings.analysis_concurrency:
-            job.stage = 'waiting_analysis'
+            if job.stage != 'waiting_analysis':
+                job.stage = 'waiting_analysis'
+                job.stage_started_at = await session.scalar(select(func.clock_timestamp()))
             return False
-        job.stage = 'analysis_request'
+        if job.stage != 'analysis_request':
+            job.stage = 'analysis_request'
+            job.stage_started_at = await session.scalar(select(func.clock_timestamp()))
         return True

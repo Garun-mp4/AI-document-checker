@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -78,7 +79,7 @@ class OCRService:
         except (pytesseract.TesseractNotFoundError, RuntimeError, OSError) as exc:
             raise OCRProcessingError("OCR недоступен: в контейнере не найден Tesseract.") from exc
 
-    def process(self, path: Path) -> OCRResult:
+    def process(self, path: Path, progress_callback: Callable[[int, int], None] | None = None) -> OCRResult:
         if not self.enabled:
             raise OCRProcessingError("OCR отключён настройками приложения.")
         safe_path = self._safe_path(path)
@@ -158,6 +159,8 @@ class OCRService:
             page_lines = [line for line in page_lines if line]
             page_text = "\n".join(page_lines)
             if not page_text:
+                if progress_callback:
+                    progress_callback(page_number, page_count)
                 continue
             total_chars += len(page_text)
             if total_chars > self.max_chars:
@@ -174,6 +177,8 @@ class OCRService:
                 locator["ocr_confidence"] = round(confidence, 2)
             blocks.append(SourceBlock(page_text, locator))
             markdown_parts.extend([f"## Страница {page_number}\n", page_text, "\n\n"])
+            if progress_callback:
+                progress_callback(page_number, page_count)
 
         if not blocks:
             raise OCRProcessingError("OCR не нашёл читаемого текста. Попробуйте более чёткий скан или PDF с текстовым слоем.")

@@ -29,7 +29,8 @@ from app.services.document_security import (
     validate_package,
     write_artifact,
 )
-from app.services.isolated_documents import run_document_operation
+from app.services.isolated_documents import _consume_progress, run_document_operation
+from app.services.job_queue import LeaseLost
 from app.services.parsing import DocumentParsingError, parse_document
 from app.upload_limits import UploadBodyLimitMiddleware
 
@@ -265,6 +266,26 @@ def test_worker_real_parse_and_output_bound(tmp_path, monkeypatch):
     path.write_bytes(b'word ' * 500)
     with pytest.raises(DocumentParsingError, match='размер'):
         asyncio.run(run_document_operation('parse', path, filename='source.txt'))
+
+
+def test_progress_reader_stops_writing_after_queue_lease_is_lost():
+    async def scenario():
+        reader = asyncio.StreamReader()
+        reader.feed_data(
+            b'\x1eDOC_PROGRESS {"processed_pages":1,"total_pages":2}\n'
+            b'\x1eDOC_PROGRESS {"processed_pages":2,"total_pages":2}\n'
+        )
+        reader.feed_eof()
+        events = []
+
+        async def stale_callback(processed, total):
+            events.append((processed, total))
+            raise LeaseLost()
+
+        await _consume_progress(reader, stale_callback, max_pages=10)
+        assert events == [(1, 2)]
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize('cancel', [False, True])

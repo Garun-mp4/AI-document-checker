@@ -1,5 +1,27 @@
 # Отчёт о тестировании AI Document Checker
 
+## M04 — прогресс обработки и проверка версии приложения
+
+Дата: 1 октября 2026 года. M04 реализован; M05 не начинался. Реализация и эксплуатационный запуск: [docs/M04_PROGRESS_VERSION.md](docs/M04_PROGRESS_VERSION.md).
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit | 199 passed, 7 integration deselected |
+| Frontend contracts | 17 passed |
+| TypeScript / production build | Успешно; штатное предупреждение Vite о размере JS bundle |
+| Ruff `app` и `tests` | Успешно |
+| PostgreSQL queue audit | 13 passed |
+| Queue acceptance | 9 passed; OCR cancel test повторно прошёл после исправления reader прогресса |
+| Compose API integration | 7 passed, 198 unit deselected; синтетический provider отключён, live Codex не использовался |
+| Полный Chromium E2E | 63 passed; единственный сбой был гонкой мгновенного измерения fit-to-width. После перевода проверки на ожидание применённого масштаба все 6 responsive-вариантов прошли |
+| M04 Chromium E2E | 3 passed: cache/version manifest, stale-build notice, progress restore/cancel/retry |
+
+После отмены OCR на устаревшем lease reader перестаёт отправлять прогресс, но продолжает читать stderr до остановки изолированного worker. Это убирает необработанное исключение из журнала и сохраняет очистку дочерних OCR-процессов. Регрессионный unit и реальный Compose OCR-cancel сценарии прошли после исправления.
+
+Полный первоначальный браузерный прогон завершился с одним нестабильным измерением страницы DOCX до следующего animation frame. Условие теста теперь ожидает фактическую подгонку листа. На разрешениях 1440×900, 1280×720, 1024×768, 768×1024, 430×932 и 390×844 повторно прошёл responsive-сценарий; весь 64-тестовый набор после этой тестовой поправки целиком не перезапускался.
+
+API deployment smoke и проверка рабочей сборки выполняются отдельной командой `scripts/deploy-compose.ps1` после коммита, чтобы build ID/commit/time соответствовали закоммиченному коду. Рабочие Compose volumes сохраняются.
+
 ## M03 — очередь задач, восстановление, отмена и версии обработки
 
 Дата: 1 октября 2026 года. M03 завершён. Реализация и эксплуатационные правила: [docs/M03_PROCESSING.md](docs/M03_PROCESSING.md).

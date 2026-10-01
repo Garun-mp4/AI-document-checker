@@ -80,19 +80,40 @@ def test_compose_serves_frontend_assets_with_browser_mime_types(compose_client: 
     page = compose_client.get("/")
     assert page.status_code == 200, page.text
     assert page.headers.get("content-type", "").startswith("text/html"), page.headers
+    assert "no-store" in page.headers.get("cache-control", ""), page.headers
     assert page.text.lstrip().lower().startswith("<!doctype html>")
+
+    manifest_response = compose_client.get("/build-info.json")
+    assert manifest_response.status_code == 200, manifest_response.text
+    assert "no-store" in manifest_response.headers.get("cache-control", ""), manifest_response.headers
+    manifest = manifest_response.json()
+    assert manifest["build_id"]
+    assert manifest["commit"]
+    assert manifest["built_at"]
+    assert any("pdf.worker" in asset and asset.endswith(".mjs") for asset in manifest["assets"])
+
+    version_response = compose_client.get("/api/v1/version")
+    assert version_response.status_code == 200, version_response.text
+    assert "no-store" in version_response.headers.get("cache-control", ""), version_response.headers
+    version = version_response.json()
+    assert version["service"] == "api"
+    assert {key: version[key] for key in ("build_id", "commit", "built_at")} == {
+        key: manifest[key] for key in ("build_id", "commit", "built_at")
+    }
 
     bundle_match = re.search(r'<script[^>]+src="([^"]+\.js)"', page.text)
     assert bundle_match, page.text
     bundle = compose_client.get(bundle_match.group(1))
     assert bundle.status_code == 200, bundle.text[:500]
     assert bundle.headers.get("content-type", "").startswith("application/javascript"), bundle.headers
+    assert "immutable" in bundle.headers.get("cache-control", ""), bundle.headers
 
     worker_match = re.search(r'(/assets/[^"`]+\.mjs)', bundle.text)
     assert worker_match, "PDF.js worker is not present in the production bundle"
     worker = compose_client.get(f"{worker_match.group(1)}?v=pdfjs-4")
     assert worker.status_code == 200, worker.text[:500]
     assert worker.headers.get("content-type", "").startswith("application/javascript"), worker.headers
+    assert "immutable" in worker.headers.get("cache-control", ""), worker.headers
 
 
 @pytest.mark.integration

@@ -88,4 +88,4 @@ backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt -r b
 pwsh -File scripts/test-e2e.ps1
 ```
 
-Подробности запуска, диагностика и отдельная opt-in проверка живого Codex: [docs/E2E_TESTING.md](docs/E2E_TESTING.md). Покрытие требований и ограничения: [docs/M01_ACCEPTANCE_MATRIX.md](docs/M01_ACCEPTANCE_MATRIX.md). Фактические результаты: [TESTING_REPORT.md](TESTING_REPORT.md).
+Подробности запуска, диагностика и отдельная opt-in проверка живого Codex: [docs/E2E_TESTING.md](docs/E2E_TESTING.md). Покрытие требований и ограничения: [docs/M01_ACCEPTANCE_MATRIX.md](docs/M01_ACCEPTANCE_MATRIX.md). Прогресс обработки, проверка версии и безопасная сборка Compose: [docs/M04_PROGRESS_VERSION.md](docs/M04_PROGRESS_VERSION.md). Фактические результаты: [TESTING_REPORT.md](TESTING_REPORT.md).

@@ -7,7 +7,28 @@ export type DocumentStatus =
   | 'ready'
   | 'needs_auth'
   | 'model_unavailable'
+  | 'cancelled'
   | 'error'
+
+export interface ProcessingJob {
+  id: string
+  operation: 'process' | 'analysis'
+  version: number
+  state: 'queued' | 'running' | 'cancelling' | 'cancelled' | 'succeeded' | 'failed'
+  stage: string
+  progress: Record<string, number>
+  attempts: number
+  max_attempts: number
+  queued_at: string
+  started_at: string | null
+  stage_started_at: string | null
+  queue_position: number | null
+  queue_wait_seconds: number | null
+  stage_elapsed_seconds: number | null
+  error: string | null
+  created_at: string
+  finished_at: string | null
+}
 
 export interface DocumentRecord {
   id: string

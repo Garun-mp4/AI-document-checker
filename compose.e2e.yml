@@ -21,7 +21,12 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     tmpfs: ['/tmp:size=256m,mode=1777']
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        APP_BUILD_ID: e2e
+        APP_BUILD_COMMIT: synthetic
+        APP_BUILD_TIME: '2026-10-01T00:00:00Z'
     command: [sh, -c, "alembic upgrade head && uvicorn e2e_app:app --host 0.0.0.0 --port 8000"]
     environment:
       DATABASE_URL: postgresql+asyncpg://e2e:synthetic-test-only@db:5432/e2e
@@ -37,6 +42,9 @@ services:
       OCR_LANGUAGES: rus+eng
       OPENBLAS_NUM_THREADS: '2'
       OMP_NUM_THREADS: '2'
+      APP_BUILD_ID: e2e
+      APP_BUILD_COMMIT: synthetic
+      APP_BUILD_TIME: '2026-10-01T00:00:00Z'
     volumes:
       - ./backend/tests/e2e_support:/test_support:ro
       - documents:/data/uploads
@@ -66,7 +74,12 @@ services:
     stop_grace_period: 15s
 
   web:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        APP_BUILD_ID: e2e
+        APP_BUILD_COMMIT: synthetic
+        APP_BUILD_TIME: '2026-10-01T00:00:00Z'
     ports: ['127.0.0.1:5174:80']
     depends_on:
       api:
