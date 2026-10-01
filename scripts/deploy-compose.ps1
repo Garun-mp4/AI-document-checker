@@ -30,8 +30,19 @@ try {
     foreach ($field in @('build_id', 'commit', 'built_at')) {
         # APP_BUILD_TIME maps to built_at; APP_BUILD_COMMIT maps to commit.
         $expected = switch ($field) { 'build_id' { $env:APP_BUILD_ID } 'commit' { $env:APP_BUILD_COMMIT } 'built_at' { $env:APP_BUILD_TIME } }
-        if ($manifest.$field -ne $expected) { throw "Frontend build metadata mismatch for $field." }
-        if ($manifest.$field -ne $api.$field) { throw "Frontend and API builds do not match for $field." }
+        if ($field -eq 'built_at') {
+            # Invoke-RestMethod parses ISO timestamps as DateTime, while the
+            # environment variable remains a string. Compare both as UTC instants.
+            $expectedValue = [DateTimeOffset]::Parse([string]$expected, [Globalization.CultureInfo]::InvariantCulture).UtcTicks
+            $manifestValue = ([DateTimeOffset]$manifest.$field).UtcTicks
+            $apiValue = ([DateTimeOffset]$api.$field).UtcTicks
+        } else {
+            $expectedValue = [string]$expected
+            $manifestValue = [string]$manifest.$field
+            $apiValue = [string]$api.$field
+        }
+        if ($manifestValue -ne $expectedValue) { throw "Frontend build metadata mismatch for $field." }
+        if ($manifestValue -ne $apiValue) { throw "Frontend and API builds do not match for $field." }
     }
     if (-not ($manifest.assets | Where-Object { $_ -match 'pdf\.worker.*\.mjs$' })) { throw 'Build manifest does not list the PDF.js module worker.' }
 
