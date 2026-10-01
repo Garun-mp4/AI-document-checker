@@ -59,6 +59,15 @@ function sourceQuery(source: ViewerSource | null): string {
   return source.text.replace(/\s+/g, ' ').trim()
 }
 
+function renderCellMatch(value: string, start: number | null, end: number | null) {
+  if (start === null || end === null || start < 0 || end <= start) return value || '—'
+  const characters = Array.from(value)
+  const from = Math.min(start, characters.length)
+  const to = Math.min(end, characters.length)
+  if (to <= from) return value || '—'
+  return <>{characters.slice(0, from).join('')}<mark className="document-search-highlight" data-search-match="true">{characters.slice(from, to).join('')}</mark>{characters.slice(to).join('')}</>
+}
+
 type MatchQuality = 'exact' | 'approximate' | 'page_only' | 'not_found' | 'calculation'
 
 interface NormalizedRange {
@@ -326,9 +335,14 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
     const nodes = Array.from(linesRef.current.querySelectorAll<HTMLElement>('[data-line]'))
     const starts = lineOffsetsFor(text)
     let target: HTMLElement | undefined
-    const range = charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
+    const exactSearchRange = selectedSource.locator.search_match === true
+      ? charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
+        ? { start: charStart, end: charEnd }
+        : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null
+      : null
+    const range = exactSearchRange || (charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
       ? { start: charStart, end: charEnd }
-      : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null
+      : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null)
     for (const node of nodes) {
       const number = Number(node.dataset.line)
       if (!target && lineStart !== null && number >= lineStart && number <= (lineEnd ?? lineStart)) target = node
@@ -356,9 +370,14 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
   const rawCharEnd = typeof selectedSource?.locator.char_end === 'number' ? selectedSource.locator.char_end : null
   const charStart = rawCharStart === null ? null : codePointOffsetToUtf16(text, rawCharStart)
   const charEnd = rawCharEnd === null ? null : codePointOffsetToUtf16(text, rawCharEnd)
-  const exactRange = charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
+  const exactSearchRange = selectedSource?.locator.search_match === true
+    ? charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
+      ? { start: charStart, end: charEnd }
+      : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null
+    : null
+  const exactRange = exactSearchRange || (charStart !== null && charEnd !== null && charStart >= 0 && charEnd > charStart && charEnd <= text.length
     ? { start: charStart, end: charEnd }
-    : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null
+    : queries.map((query) => normalizedRange(text, query, charStart ?? 0)).find(Boolean) || null)
   return (
     <div className="original-text-viewer" ref={linesRef}>
       {lines.map((line, index) => {
@@ -370,7 +389,7 @@ function TextOriginalViewer({ preview, originalUrl, selectedSource, onMatch, onE
         const hasExactText = start >= 0 && end > start
         const match = queries.some((query) => normalizedIncludes(line, query))
         const content = hasExactText
-          ? <>{line.slice(0, start)}<mark>{line.slice(start, end)}</mark>{line.slice(end) || (!line.slice(start, end) ? ' ' : '')}</>
+          ? <>{line.slice(0, start)}<mark className="document-search-highlight" data-search-match="true">{line.slice(start, end)}</mark>{line.slice(end) || (!line.slice(start, end) ? ' ' : '')}</>
           : match || (inRange && selectedSource) ? <mark>{line || ' '}</mark> : line || ' '
         return <div className={`source-text-line ${inRange ? 'source-line-range' : ''}`} data-line={number} key={number}>
           <span className="source-line-number">{number}</span>
@@ -701,6 +720,18 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
     }
     navigatedSourceRef.current = selectedSource.id
     if (start === null) { onMatch(derived ? 'calculation' : 'not_found'); return }
+    const selectedColumn = typeof selectedSource.locator.column === 'string' ? selectedSource.locator.column : null
+    const selectedColumnIndex = typeof selectedSource.locator.column_index === 'number'
+      ? selectedSource.locator.column_index
+      : selectedColumn ? table.columns.indexOf(selectedColumn) : -1
+    if (start === 1) {
+      const header = selectedColumnIndex >= 0
+        ? tableRef.current?.querySelector(`thead [data-column-index="${selectedColumnIndex}"]`)
+        : null
+      onMatch(derived ? 'calculation' : header ? 'exact' : 'not_found')
+      if (header) navigateToSource(header)
+      return
+    }
     const end = typeof selectedSource.locator.row_end === 'number' ? selectedSource.locator.row_end : start
     const loaded = table.rows.some((row) => row.number >= start && row.number <= end)
     if (!loaded && start > 1 && start - 2 < table.total_rows) { void load(Math.max(0, start - 2), false, table.sheet || undefined); return }
@@ -714,16 +745,28 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   const start = typeof selectedSource?.locator.row_start === 'number' ? selectedSource.locator.row_start : null
   const end = typeof selectedSource?.locator.row_end === 'number' ? selectedSource.locator.row_end : start
   const selectedColumn = typeof selectedSource?.locator.column === 'string' ? selectedSource.locator.column : null
-  const selectedColumnIndex = selectedColumn ? table.columns.indexOf(selectedColumn) : -1
+  const selectedColumnIndex = typeof selectedSource?.locator.column_index === 'number'
+    ? selectedSource.locator.column_index
+    : selectedColumn ? table.columns.indexOf(selectedColumn) : -1
+  const selectedHeader = start === 1
+  const rawSearchRange = selectedSource?.locator.search_range
+  const searchRange = selectedSource?.locator.search_match === true && typeof rawSearchRange === 'object' && rawSearchRange !== null
+    ? rawSearchRange as { coordinate_space?: unknown; start?: unknown; end?: unknown }
+    : null
+  const searchStart = searchRange?.coordinate_space === 'table-cell-text' && typeof searchRange.start === 'number' ? searchRange.start : null
+  const searchEnd = searchRange?.coordinate_space === 'table-cell-text' && typeof searchRange.end === 'number' ? searchRange.end : null
   return <div className="csv-original-viewer" ref={tableRef}>
     {table.available_sheets.length > 1 && <div className="csv-sheet-toolbar"><label htmlFor={`csv-sheet-${preview.document_id}`}>Лист</label><select id={`csv-sheet-${preview.document_id}`} aria-label="Лист исходного файла" value={table.sheet || ''} onChange={(event) => void load(0, false, event.target.value)}>
       {table.available_sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
     </select></div>}
     <div className="csv-table-scroll">
-      <table className="original-csv-table"><thead><tr><th scope="col">№</th>{table.columns.map((column) => <th scope="col" key={column}>{column}</th>)}</tr></thead>
+      <table className="original-csv-table"><thead><tr><th scope="col">№</th>{table.columns.map((column, index) => <th scope="col" data-column-index={index} className={selectedHeader && selectedColumnIndex === index ? 'source-cell-match' : ''} key={index}>{selectedHeader && selectedColumnIndex === index ? renderCellMatch(column, searchStart, searchEnd) : column}</th>)}</tr></thead>
         <tbody>{table.rows.map((row) => {
           const inRange = start !== null && row.number >= start && row.number <= (end ?? start)
-          return <tr data-row-number={row.number} className={inRange ? 'source-row-match' : ''} key={row.number}><td className="csv-row-number">{row.number}</td>{row.cells.map((cell, index) => <td className={inRange && selectedColumnIndex === index ? 'source-cell-match' : ''} key={`${row.number}-${index}`}>{cell || '—'}</td>)}</tr>
+          return <tr data-row-number={row.number} className={inRange ? 'source-row-match' : ''} key={row.number}><td className="csv-row-number">{row.number}</td>{row.cells.map((cell, index) => {
+            const selectedCell = inRange && selectedColumnIndex === index
+            return <td className={selectedCell ? 'source-cell-match' : ''} key={`${row.number}-${index}`}>{selectedCell ? renderCellMatch(cell, searchStart, searchEnd) : cell || '—'}</td>
+          })}</tr>
         })}</tbody>
       </table>
     </div>
@@ -731,20 +774,35 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   </div>
 }
 
+function mappedStructuredLocatorMatches(blockLocator: Record<string, unknown>, sourceLocator: Record<string, unknown>): boolean {
+  const linked = Array.isArray(blockLocator.source_locators)
+    ? blockLocator.source_locators.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    : []
+  return [blockLocator, ...linked].some((candidate) => {
+    if (typeof sourceLocator.slide === 'number' && typeof sourceLocator.shape === 'number') {
+      return candidate.slide === sourceLocator.slide && candidate.shape === sourceLocator.shape
+    }
+    if (typeof sourceLocator.chapter === 'number' && typeof sourceLocator.path === 'string') {
+      if (candidate.chapter !== sourceLocator.chapter || candidate.path !== sourceLocator.path) return false
+      const sourceStart = sourceLocator.char_start
+      const sourceEnd = sourceLocator.char_end
+      if (typeof sourceStart === 'number' && typeof sourceEnd === 'number') {
+        return candidate.char_start === sourceStart && candidate.char_end === sourceEnd
+      }
+      if (typeof sourceLocator.element === 'string' && typeof candidate.element === 'string') {
+        return candidate.element === sourceLocator.element
+      }
+      return true
+    }
+    return false
+  })
+}
+
 function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void }) {
   const viewerRef = useRef<HTMLDivElement>(null)
   const selectedId = selectedSource?.id
   const selectedBlock = selectedSource && !isCalculation(selectedSource)
-    ? preview.blocks.find((block) => block.source_id === selectedSource.id) || preview.blocks.find((block) => {
-      const locator = selectedSource.locator
-      if (typeof locator.slide === 'number' && typeof locator.shape === 'number') {
-        return block.locator.slide === locator.slide && block.locator.shape === locator.shape
-      }
-      if (typeof locator.chapter === 'number' && typeof locator.path === 'string') {
-        return block.locator.chapter === locator.chapter && block.locator.path === locator.path
-      }
-      return false
-    })
+    ? preview.blocks.find((block) => block.source_id === selectedSource.id) || preview.blocks.find((block) => mappedStructuredLocatorMatches(block.locator, selectedSource.locator))
     : undefined
   const selectedBlockId = selectedBlock?.source_id
   useEffect(() => {
@@ -752,15 +810,22 @@ function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview
     if (isCalculation(selectedSource)) { onMatch('calculation'); return }
     const target = Array.from(viewerRef.current?.querySelectorAll<HTMLElement>('[data-source-id]') || []).find((element) => element.dataset.sourceId === selectedBlockId)
     const hasAnchor = typeof selectedSource.locator.slide === 'number' || typeof selectedSource.locator.chapter === 'number'
-    onMatch(target ? 'approximate' : hasAnchor ? 'page_only' : 'not_found')
+    const exactSearchRange = selectedSource.locator.search_match === true && selectedBlock
+      ? normalizedRange(selectedBlock.text, sourceQuery(selectedSource))
+      : null
+    onMatch(exactSearchRange ? 'exact' : target ? 'approximate' : hasAnchor ? 'page_only' : 'not_found')
     navigateToSource(target || viewerRef.current?.querySelector('.source-map-fallback'))
   }, [preview.blocks, selectedBlockId, selectedId, selectedSource, onMatch])
   return <div className="source-map-original-viewer" ref={viewerRef}>
     {preview.blocks.map((block) => {
       const active = block.source_id === selectedBlockId
+      const match = active && selectedSource?.locator.search_match === true ? normalizedRange(block.text, sourceQuery(selectedSource)) : null
+      const blockText = match
+        ? <>{block.text.slice(0, match.start)}<mark className="document-search-highlight" data-search-match="true">{block.text.slice(match.start, match.end)}</mark>{block.text.slice(match.end)}</>
+        : block.text
       return <article className={`preview-block ${active ? 'source-match' : ''}`} data-source-id={block.source_id} key={block.id}>
         <div className="preview-block-meta"><span>{locatorLabel(block)}</span></div>
-        <p>{block.text}</p>
+        <p>{blockText}</p>
       </article>
     })}
     {selectedSource && !isCalculation(selectedSource) && !selectedBlock && <article className="preview-block source-match source-map-fallback" data-source-id={selectedId}>

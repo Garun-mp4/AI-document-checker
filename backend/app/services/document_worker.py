@@ -106,6 +106,15 @@ def execute(payload: dict, progress_callback=None):
             data, payload['file_type'], offset=payload['offset'], limit=payload['limit'],
             sheet=payload.get('sheet'),
         )
+    if operation == 'search_table':
+        from app.services.document_search import search_table_bytes
+        return search_table_bytes(
+            data,
+            payload['file_type'],
+            payload['query'],
+            offset=payload['offset'],
+            limit=payload['limit'],
+        )
     raise ValueError('Unknown worker operation')
 
 

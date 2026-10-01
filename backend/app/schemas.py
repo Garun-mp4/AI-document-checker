@@ -91,11 +91,35 @@ class MarkdownOut(BaseModel):
     markdown: str
     offset: int
     limit: int
+    line_offset: int
     total_chars: int
     total_lines: int
     checksum: str | None
     mapping_quality: dict[str, int]
     error: str | None
+
+
+class DocumentSearchMatchOut(BaseModel):
+    id: str
+    text: str
+    snippet: str
+    locator: dict[str, Any]
+    ordinal: int
+    is_derived: bool = False
+    match_start: int | None = None
+    match_end: int | None = None
+    markdown_start: int | None = None
+    markdown_end: int | None = None
+
+
+class DocumentSearchOut(BaseModel):
+    document_id: str
+    scope: Literal["original", "markdown"]
+    query: str
+    total: int
+    offset: int
+    limit: int
+    matches: list[DocumentSearchMatchOut]
 
 
 class TablePreviewRowOut(BaseModel):

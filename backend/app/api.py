@@ -9,7 +9,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -42,6 +42,7 @@ from app.schemas import (
     CodexPreferencesIn,
     DocumentOut,
     DocumentPreviewOut,
+    DocumentSearchOut,
     InsightOut,
     MarkdownOut,
     MessageOut,
@@ -60,6 +61,11 @@ from app.services.codex import (
     CodexPreferenceError,
     CodexUnavailable,
 )
+from app.services.document_search import (
+    original_search_source_cache,
+    search_markdown,
+    search_source_blocks,
+)
 from app.services.document_security import (
     download_name,
     owned_storage,
@@ -72,6 +78,7 @@ from app.services.job_queue import active_chunk_version, cancel, cleanup_files, 
 from app.services.parsing import (
     SUPPORTED_EXTENSIONS,
     DocumentParsingError,
+    _decode_text_with_encoding,
     safe_filename,
 )
 from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview
@@ -414,6 +421,7 @@ async def delete_document(document_id: uuid.UUID, request: Request) -> None:
         path = document.storage_path
         await session.delete(document)
         await session.commit()
+    original_search_source_cache.remove_document(str(document_id))
     for snapshot in snapshots:
         try:
             cleanup_files(snapshot, document_id)
@@ -552,12 +560,169 @@ async def document_markdown(
             markdown=text[offset:offset + limit],
             offset=offset,
             limit=limit,
+            line_offset=text.count("\n", 0, min(offset, len(text))) + 1,
             total_chars=total_chars,
             total_lines=total_lines,
             checksum=document.markdown_checksum,
             mapping_quality={str(key): int(value) for key, value in (document.markdown_mapping_json or {}).items() if isinstance(value, (int, float))},
             error=document.markdown_error,
         )
+
+
+@router.get("/documents/{document_id}/search", response_model=DocumentSearchOut)
+async def search_document(
+    document_id: uuid.UUID,
+    q: str = Query(min_length=1, max_length=256),
+    scope: Literal["original", "markdown"] = Query(default="original"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> DocumentSearchOut:
+    """Search original content or the complete Markdown artifact without invoking Codex."""
+    if not q.strip():
+        raise HTTPException(status_code=422, detail="Введите текст для поиска.")
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.status != "ready":
+            raise HTTPException(status_code=409, detail="Поиск станет доступен после обработки документа.")
+        version = await active_chunk_version(session, document)
+        document_id_text = str(document.id)
+        document_filename = document.filename
+        file_type = document.file_type
+        storage_path = document.storage_path
+        input_checksum = document.input_checksum or document.storage_path
+        markdown_path_value = document.markdown_path
+        markdown_status = document.markdown_status
+        markdown_available = bool(markdown_path_value and markdown_status == "ready")
+        chunk_rows = []
+        if scope == "markdown" or file_type == "pdf":
+            chunk_query = select(
+                Chunk.id, Chunk.ordinal, Chunk.text, Chunk.locator, Chunk.is_derived,
+                Chunk.markdown_char_start, Chunk.markdown_char_end,
+            ).where(Chunk.document_id == document_id, Chunk.version == version).order_by(Chunk.ordinal)
+            chunk_rows = (await session.execute(chunk_query)).all()
+
+    if scope == "markdown":
+        if not markdown_available:
+            raise HTTPException(status_code=409, detail="Markdown недоступен для этого документа.")
+        try:
+            markdown_path = owned_storage(markdown_path_value, document_id)
+            markdown_bytes = await asyncio.to_thread(
+                read_storage, markdown_path, settings.document_worker_max_output_bytes,
+            )
+            markdown_text = markdown_bytes.decode("utf-8")
+        except (OSError, UnicodeError, DocumentParsingError) as exc:
+            raise HTTPException(status_code=404, detail="Файл Markdown недоступен.") from exc
+        result = await asyncio.to_thread(
+            search_markdown,
+            markdown_text,
+            q,
+            chunks=chunk_rows,
+            document_id=document_id_text,
+            processing_version=version,
+            file_type=file_type,
+            offset=offset,
+            limit=limit,
+        )
+    elif file_type in {"csv", "xlsx", "xls"}:
+        try:
+            original_path = owned_storage(storage_path, document_id)
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=404, detail="Исходный файл недоступен.") from exc
+        try:
+            result = await run_document_operation(
+                "search_table", original_path, file_type=file_type, query=q,
+                offset=offset, limit=limit,
+            )
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        for match in result["matches"]:
+            match["locator"] = versioned_source_locator(
+                match["locator"],
+                document_id=document_id_text,
+                processing_version=version,
+                file_type=file_type,
+            )
+    elif file_type == "pdf" and any(isinstance(row.locator, dict) and row.locator.get("ocr") is True for row in chunk_rows):
+        # Keep mixed/scanned PDF search on the active OCR source map so the
+        # returned range and word boxes always refer to the same OCR version.
+        from types import SimpleNamespace
+        sources = [SimpleNamespace(**row._mapping) for row in chunk_rows]
+        result = await asyncio.to_thread(
+            search_source_blocks,
+            sources,
+            q,
+            file_type=file_type,
+            document_id=document_id_text,
+            processing_version=version,
+            offset=offset,
+            limit=limit,
+        )
+    else:
+        try:
+            original_path = owned_storage(storage_path, document_id)
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=404, detail="Исходный файл недоступен.") from exc
+        cache_key = (document_id_text, version, input_checksum)
+        sources = original_search_source_cache.get(cache_key)
+        if sources is None:
+            try:
+                if file_type in {"txt", "md", "xml", "json", "html", "htm"}:
+                    original_bytes = await asyncio.to_thread(read_storage, original_path, settings.max_upload_bytes)
+                    original_text, _ = await asyncio.to_thread(_decode_text_with_encoding, original_bytes)
+                    if len(original_text) > settings.document_max_chars:
+                        raise DocumentParsingError("Текст документа превышает безопасный предел.")
+                    from types import SimpleNamespace
+                    sources = (SimpleNamespace(
+                        id="original:0",
+                        ordinal=0,
+                        text=original_text,
+                        locator={
+                            "kind": file_type,
+                            "char_start": 0,
+                            "char_end": len(original_text),
+                            "line_start": 1,
+                            "line_end": original_text.count("\n") + 1,
+                        },
+                        is_derived=False,
+                    ),)
+                else:
+                    from app.services.isolated_documents import parse_uploaded
+                    parsed = await parse_uploaded(original_path, document_filename)
+                    from types import SimpleNamespace
+                    sources = tuple(SimpleNamespace(
+                        id=f"native:{index}",
+                        ordinal=index,
+                        text=block.text,
+                        locator=block.locator,
+                        is_derived=block.derived,
+                    ) for index, block in enumerate(parsed.blocks))
+                original_search_source_cache.put(cache_key, sources)
+            except (DocumentParsingError, OSError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            result = await asyncio.to_thread(
+                search_source_blocks,
+                sources,
+                q,
+                file_type=file_type,
+                document_id=document_id_text,
+                processing_version=version,
+                offset=offset, limit=limit,
+            )
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return DocumentSearchOut(
+        document_id=document_id_text,
+        scope=scope,
+        query=q,
+        total=result["total"],
+        offset=result["offset"],
+        limit=result["limit"],
+        matches=result["matches"],
+    )
 
 
 @router.get("/documents/{document_id}/markdown/download")

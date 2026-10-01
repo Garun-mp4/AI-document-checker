@@ -122,11 +122,37 @@ export interface MarkdownDocument {
   markdown: string
   offset: number
   limit: number
+  line_offset: number
   total_chars: number
   total_lines: number
   checksum: string | null
   mapping_quality: Record<string, number>
   error: string | null
+}
+
+export type DocumentSearchScope = 'original' | 'markdown'
+
+export interface DocumentSearchMatch {
+  id: string
+  text: string
+  snippet: string
+  locator: SourceRef['locator']
+  ordinal: number
+  is_derived: boolean
+  match_start: number | null
+  match_end: number | null
+  markdown_start: number | null
+  markdown_end: number | null
+}
+
+export interface DocumentSearchResponse {
+  document_id: string
+  scope: DocumentSearchScope
+  query: string
+  total: number
+  offset: number
+  limit: number
+  matches: DocumentSearchMatch[]
 }
 
 export interface TablePreviewRow {

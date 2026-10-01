@@ -31,10 +31,11 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
+import { DocumentSearchToolbar } from './components/DocumentSearchToolbar'
 import { ChatMarkdown } from './components/ChatMarkdown'
 import { ProcessingStatusPanel } from './components/ProcessingStatusPanel'
 import { BuildVersionNotice } from './components/BuildVersionNotice'
@@ -223,6 +224,9 @@ function App() {
   const [toast, setToast] = useState('')
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
   const [selectedSource, setSelectedSource] = useState<SourceRef | StreamCitation | null>(null)
+  const [searchScope, setSearchScope] = useState<DocumentSearchScope>('original')
+  const [searchSelection, setSearchSelection] = useState<DocumentSearchMatch | null>(null)
+  const [searchResetKey, setSearchResetKey] = useState(0)
   const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null)
   const [markdownDocument, setMarkdownDocument] = useState<MarkdownDocument | null>(null)
   const [previewTab, setPreviewTab] = useState<'original' | 'markdown'>('original')
@@ -238,6 +242,13 @@ function App() {
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
   const reasoningTriggerRef = useRef<HTMLButtonElement>(null)
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null)
+  const searchNavigationRef = useRef(0)
+  const selectedIdRef = useRef(selectedId)
+  const documentRef = useRef(document)
+  const markdownDocumentRef = useRef(markdownDocument)
+  selectedIdRef.current = selectedId
+  documentRef.current = document
+  markdownDocumentRef.current = markdownDocument
 
   const showToast = useCallback((message: string) => {
     setToast(message)
@@ -314,6 +325,9 @@ function App() {
       setDocumentPreview(previewData)
       setMarkdownDocument(markdownData)
       setPreviewTab('original')
+      setSearchScope('original')
+      setSearchSelection(null)
+      setSearchResetKey((key) => key + 1)
       setPreviewPage(1)
       const savedMessages = await api<ChatMessage[]>(`${API}/chats/${chatData.id}/messages`)
       setMessages(savedMessages)
@@ -341,6 +355,9 @@ function App() {
     setDocumentPreview(null)
     setMarkdownDocument(null)
     setPreviewTab('original')
+    setSearchScope('original')
+    setSearchSelection(null)
+    setSearchResetKey((key) => key + 1)
     setChat(null)
     setMessages([])
     setSelectedSourceId(null)
@@ -512,6 +529,9 @@ function App() {
     setStreamSources([])
     setSelectedSourceId(null)
     setSelectedSource(null)
+    setSearchSelection(null)
+    setSearchScope('original')
+    setSearchResetKey((key) => key + 1)
     setChatOpen(true)
     setChatFull(false)
     setMobileLibraryOpen(false)
@@ -520,8 +540,12 @@ function App() {
 
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
     if (!document) return
+    searchNavigationRef.current += 1
+    setSearchResetKey((key) => key + 1)
     setPreviewOpen(true)
     setPreviewTab('original')
+    setSearchScope('original')
+    setSearchSelection(null)
     setSelectedSourceId(source.id)
     setSelectedSource(source)
     const page = source.locator.page
@@ -531,6 +555,63 @@ function App() {
     })
     setMobileChatOpen(false)
   }, [document])
+
+  const clearDocumentSearch = useCallback(() => {
+    searchNavigationRef.current += 1
+    setSearchSelection(null)
+    setSelectedSourceId(null)
+    setSelectedSource(null)
+  }, [])
+
+  const changeDocumentSearchScope = useCallback((scope: DocumentSearchScope) => {
+    setSearchScope(scope)
+    setPreviewTab(scope)
+    clearDocumentSearch()
+  }, [clearDocumentSearch])
+
+  const navigateDocumentSearch = useCallback(async (match: DocumentSearchMatch, scope: DocumentSearchScope) => {
+    const currentDocument = documentRef.current
+    if (!currentDocument || selectedIdRef.current !== currentDocument.id) return
+    const navigation = ++searchNavigationRef.current
+    const source: SourceRef = {
+      id: match.id,
+      text: match.text,
+      locator: match.locator,
+      ordinal: match.ordinal,
+      is_derived: false,
+    }
+    setPreviewOpen(true)
+    setSearchScope(scope)
+    setPreviewTab(scope)
+    setSelectedSourceId(match.id)
+    setSelectedSource(source)
+    setSearchSelection(scope === 'markdown' ? match : null)
+    const page = match.locator.page
+    if (scope === 'original' && typeof page === 'number' && page > 0) setPreviewPage(page)
+
+    if (scope === 'markdown' && match.markdown_start !== null && match.markdown_end !== null) {
+      const currentMarkdown = markdownDocumentRef.current
+      const loadedStart = currentMarkdown?.offset ?? 0
+      const loadedEnd = loadedStart + (currentMarkdown ? Array.from(currentMarkdown.markdown).length : 0)
+      if (!currentMarkdown || match.markdown_start < loadedStart || match.markdown_end > loadedEnd) {
+        const offset = Math.max(0, match.markdown_start - 25_000)
+        const segment = await api<MarkdownDocument>(API + '/documents/' + currentDocument.id + '/markdown?offset=' + offset + '&limit=100000')
+        if (navigation !== searchNavigationRef.current || selectedIdRef.current !== currentDocument.id) return
+        setMarkdownDocument(segment)
+      }
+    }
+    window.requestAnimationFrame(() => {
+      if (navigation !== searchNavigationRef.current || selectedIdRef.current !== currentDocument.id) return
+      scrollIntoViewRespectingMotion(window.document.getElementById('document-original-viewer'))
+      if (scope === 'markdown') {
+        window.requestAnimationFrame(() => {
+          if (navigation === searchNavigationRef.current) {
+            scrollIntoViewRespectingMotion(window.document.querySelector('[data-search-match="true"]'))
+          }
+        })
+      }
+    })
+  }, [])
 
   const beginLogin = useCallback(async () => {
     try {
@@ -654,6 +735,7 @@ function App() {
         markdown: '',
         offset: 0,
         limit: 0,
+        line_offset: 1,
         total_chars: updated.markdown_char_count,
         total_lines: updated.markdown_line_count,
         checksum: updated.markdown_checksum,
@@ -681,6 +763,7 @@ function App() {
         markdown: current.markdown + next.markdown,
         offset: 0,
         limit: current.limit + next.limit,
+        line_offset: current.line_offset,
       } : next)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось загрузить продолжение Markdown.')
@@ -1026,14 +1109,22 @@ function App() {
                       ) : (
                         <>
                           <div className="preview-tabs" role="tablist" aria-label="Представление документа">
-                            <button type="button" role="tab" aria-selected={previewTab === 'original'} className={`preview-tab ${previewTab === 'original' ? 'is-active' : ''}`} onClick={() => setPreviewTab('original')}>Оригинал</button>
-                            <button type="button" role="tab" aria-selected={previewTab === 'markdown'} className={`preview-tab ${previewTab === 'markdown' ? 'is-active' : ''}`} onClick={() => setPreviewTab('markdown')}>Markdown</button>
+                            <button type="button" role="tab" aria-selected={previewTab === 'original'} className={`preview-tab ${previewTab === 'original' ? 'is-active' : ''}`} onClick={() => { setSearchScope('original'); setPreviewTab('original') }}>Оригинал</button>
+                            <button type="button" role="tab" aria-selected={previewTab === 'markdown'} className={`preview-tab ${previewTab === 'markdown' ? 'is-active' : ''}`} onClick={() => { setSearchScope('markdown'); setPreviewTab('markdown') }}>Markdown</button>
                             {markdownDocument?.status === 'ready' && <a className="preview-download" href={`${API}/documents/${document.id}/markdown/download`} download>Скачать .md</a>}
                           </div>
+                          <DocumentSearchToolbar
+                            documentId={document.id}
+                            resetKey={searchResetKey}
+                            scope={searchScope}
+                            onScopeChange={changeDocumentSearchScope}
+                            onNavigate={navigateDocumentSearch}
+                            onClear={clearDocumentSearch}
+                          />
                           {previewTab === 'original' ? (
                             documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} onReprocess={reprocessDocumentOCR} reprocessing={processingActionPending || Boolean(processingJob && ['queued', 'running', 'cancelling'].includes(processingJob.state))} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>
                           ) : markdownDocument ? (
-                            <MarkdownViewer data={markdownDocument} selectedSource={selectedSource} onRebuild={() => void rebuildMarkdown()} rebuilding={markdownRebuilding} onLoadMore={() => void loadMoreMarkdown()} loadingMore={markdownLoadingMore} />
+                            <MarkdownViewer data={markdownDocument} selectedSource={selectedSource} searchMatch={searchSelection && searchSelection.markdown_start !== null ? searchSelection : null} onRebuild={() => void rebuildMarkdown()} rebuilding={markdownRebuilding} onLoadMore={() => void loadMoreMarkdown()} loadingMore={markdownLoadingMore} />
                           ) : <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю Markdown…</div>}
                         </>
                       )}

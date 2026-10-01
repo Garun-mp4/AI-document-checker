@@ -1,5 +1,24 @@
 # Отчёт о тестировании AI Document Checker
 
+## M08 — поиск по оригиналу и Markdown
+
+Дата: 2 октября 2026 года. M08 реализован и проверен; M09 не начинался.
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit/parser/API | **262 passed, 9 integration deselected** |
+| M08 backend search tests | **20 passed**; ranges, OCR boxes, Markdown offsets, CSV/XLS/XLSX locators, format-specific source mapping and bounds |
+| Ruff изменённых backend-файлов | **PASS** |
+| Frontend contract tests | **19 passed** |
+| TypeScript / production build | **PASS**; остаётся предупреждение Vite о крупном JS bundle с PDF.js |
+| Chromium search E2E | **4 passed**: полный TXT/Markdown поиск и пагинация, stale/error handling, citation preservation, OCR PDF + CSV/XLSX cells + PPTX slide + EPUB chapter |
+| Citation regression E2E | **PASS** для PDF после разведения сброса поиска и выбранного источника |
+| Isolated Compose | API, DB, worker и web прошли health-check; search сценарии работали с реальными парсерами/OCR и тестовым provider |
+
+В viewer добавлена буквальная строка поиска с отдельными областями «Оригинал» и «Markdown», дебаунсом, отменой устаревших запросов, полным счётчиком, пагинацией и переходом по Enter/Shift+Enter; Escape и кнопка очищают запрос. Сервер выполняет полный поиск, возвращая точные source/Markdown ranges. PDF OCR ограничивает подсветку совпавшими word boxes; таблицы ищутся в ячейках с локаторами строк, колонок и листов; DOCX/PDF/PPTX/EPUB сохраняют свои paragraph/page/slide/chapter locator’ы. Выбор citation очищает активную строку поиска, но оставляет citation источником текущей подсветки.
+
+Первый широкий E2E запуск обнаружил именно эту регрессию citation/search; исправление подтверждено браузерным тестом. Дополнительный mixed-format тест выявил два неточных перехода: PPTX объединял несколько shape locator’ов в одном блоке, EPUB содержал несколько блоков на одну главу. Viewer теперь сопоставляет вложенные source locator’ы PPTX и точные символные диапазоны EPUB; повторный OCR/table/slide/chapter сценарий прошёл. Полная несвязанная E2E матрица из `documents.spec.mjs` в этом M08 прогоне не запускалась целиком; отдельно повторно прошёл PDF citation сценарий. Тестовый Compose-проект изолирован от рабочего приложения.
+
 ## M07 — единый механизм citations и точная подсветка
 
 Дата: 1 октября 2026 года. M07 реализован и проверен; M08 не начинался.
