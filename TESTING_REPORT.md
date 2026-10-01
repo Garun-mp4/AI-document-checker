@@ -15,12 +15,13 @@
 | Compose API integration | 7 passed, 198 unit deselected; синтетический provider отключён, live Codex не использовался |
 | Полный Chromium E2E | 63 passed; единственный сбой был гонкой мгновенного измерения fit-to-width. После перевода проверки на ожидание применённого масштаба все 6 responsive-вариантов прошли |
 | M04 Chromium E2E | 3 passed: cache/version manifest, stale-build notice, progress restore/cancel/retry |
+| Production Compose deploy smoke | **PASS**: DB/API/worker healthy; frontend доступен, build metadata и cache headers согласованы; Chromium desktop/mobile smoke прошёл. Build ID: `5a1edd8b942d-20261001140028`; volumes сохранены |
 
 После отмены OCR на устаревшем lease reader перестаёт отправлять прогресс, но продолжает читать stderr до остановки изолированного worker. Это убирает необработанное исключение из журнала и сохраняет очистку дочерних OCR-процессов. Регрессионный unit и реальный Compose OCR-cancel сценарии прошли после исправления.
 
 Полный первоначальный браузерный прогон завершился с одним нестабильным измерением страницы DOCX до следующего animation frame. Условие теста теперь ожидает фактическую подгонку листа. На разрешениях 1440×900, 1280×720, 1024×768, 768×1024, 430×932 и 390×844 повторно прошёл responsive-сценарий; весь 64-тестовый набор после этой тестовой поправки целиком не перезапускался.
 
-API deployment smoke и проверка рабочей сборки выполняются отдельной командой `scripts/deploy-compose.ps1` после коммита, чтобы build ID/commit/time соответствовали закоммиченному коду. Рабочие Compose volumes сохраняются.
+В deployment-скрипте устранено ложное несовпадение `built_at`: PowerShell автоматически преобразует ISO-строку из JSON в `DateTime`, поэтому время теперь сравнивается как UTC-момент. После исправления `scripts/deploy-compose.ps1` успешно пересобрал рабочий Compose, проверил метаданные frontend/API и HTTP cache headers, дождался health checks, проверил доступность сайта и прошёл браузерный smoke на desktop и mobile. Build ID работающей сборки — `5a1edd8b942d-20261001140028`; именованные volumes сохранены.
 
 ## M03 — очередь задач, восстановление, отмена и версии обработки
 

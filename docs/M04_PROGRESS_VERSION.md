@@ -13,3 +13,5 @@ Build and deploy the current committed version with:
 ```
 
 The script refuses to stamp uncommitted code, builds and waits for healthy Compose services, checks metadata and HTTP cache headers for HTML, hashed assets and the PDF.js worker, then runs a browser smoke check at desktop and mobile widths. It does not remove or recreate named data volumes.
+
+The build timestamp comparison normalizes PowerShell's parsed JSON `DateTime` values to UTC instants before matching the manifest, API response, and build environment. The production deployment smoke passed for build `5a1edd8b942d-20261001140028`; the database, API, and worker were healthy, the frontend was reachable, and named volumes were preserved.
