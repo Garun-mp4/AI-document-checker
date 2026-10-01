@@ -34,6 +34,7 @@ try {
     # These volumes belong only to the explicitly named test project.
     Run-Checked docker @('compose', '-p', 'document-checker-e2e', '-f', 'compose.e2e.yml', 'down', '-v', '--remove-orphans')
     Run-Checked docker @('compose', '-p', 'document-checker-e2e', '-f', 'compose.e2e.yml', 'up', '--build', '-d', '--wait', '--wait-timeout', '300')
+    Run-Checked docker @('compose', '-p', 'document-checker-e2e', '-f', 'compose.e2e.yml', 'exec', '-T', '-e', 'E2E_AUDIT_PROJECT=document-checker-e2e', 'api', 'python', '/test_support/security_audit.py')
     Push-Location frontend
     try { Run-Checked npm @('run', 'test:e2e') }
     finally { Pop-Location }

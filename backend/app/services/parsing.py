@@ -140,11 +140,16 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         if reader.is_encrypted:
             raise DocumentParsingError("PDF защищён паролем. Зашифрованные документы пока не поддерживаются.")
         pages = list(reader.pages)
+        from app.config import settings
+        if len(pages) > settings.document_max_pages:
+            raise DocumentParsingError('В PDF превышен безопасный предел страниц.')
         blocks: list[SourceBlock] = []
         extracted_chars = 0
         for page_number, page in enumerate(pages, start=1):
             page_text = "" if "/Contents" not in page else page.extract_text(extraction_mode="layout") or page.extract_text() or ""
             extracted_chars += len(page_text.strip())
+            if extracted_chars > settings.document_max_chars:
+                raise DocumentParsingError('Текст PDF превышает безопасный предел.')
             blocks.extend(_split_long_text(page_text, {
                 "kind": "pdf", "page": page_number, "label": f"Страница {page_number}",
                 "char_start": 0, "char_end": len(page_text),
@@ -517,6 +522,7 @@ class _HtmlBlockParser(HTMLParser):
         self._parts: list[str] = []
         self._tag = "body"
         self._start_line = 1
+        self._ignored: list[str] = []
 
     def _flush(self) -> None:
         text = re.sub(r"\s+", " ", " ".join(self._parts)).strip()
@@ -525,6 +531,10 @@ class _HtmlBlockParser(HTMLParser):
         self._parts = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {'script', 'style', 'iframe', 'object', 'noscript'}:
+            self._ignored.append(tag.lower())
+        if self._ignored:
+            return
         if tag.lower() in self._BLOCK_TAGS and self._parts:
             self._flush()
         if tag.lower() in self._BLOCK_TAGS:
@@ -532,11 +542,15 @@ class _HtmlBlockParser(HTMLParser):
             self._start_line = self.getpos()[0]
 
     def handle_endtag(self, tag: str) -> None:
+        if self._ignored:
+            if tag.lower() == self._ignored[-1]:
+                self._ignored.pop()
+            return
         if tag.lower() in self._BLOCK_TAGS:
             self._flush()
 
     def handle_data(self, data: str) -> None:
-        if data.strip():
+        if data.strip() and not self._ignored:
             self._parts.append(data)
 
     def close(self) -> None:
@@ -642,6 +656,11 @@ def _parse_xlsx(data: bytes) -> ParsedDocument:
     except Exception as exc:
         raise DocumentParsingError("XLSX повреждён или имеет неверную структуру.") from exc
     try:
+        if len(workbook.worksheets) > 200 or any(
+            (sheet.max_row or 0) > SPREADSHEET_MAX_ROWS or (sheet.max_column or 0) > SPREADSHEET_MAX_COLUMNS
+            for sheet in workbook.worksheets
+        ):
+            raise DocumentParsingError('Размер таблицы превышает безопасный предел строк, столбцов или листов.')
         rows = ((sheet.title, [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]) for sheet in workbook.worksheets)
         return _spreadsheet_blocks(rows, "xlsx")
     finally:
@@ -658,11 +677,14 @@ def _parse_xls(data: bytes) -> ParsedDocument:
         raise DocumentParsingError("XLS повреждён или имеет неверную структуру.") from exc
     rows = []
     for sheet in workbook.sheets():
+        if sheet.nrows > SPREADSHEET_MAX_ROWS or sheet.ncols > SPREADSHEET_MAX_COLUMNS or workbook.nsheets > 200:
+            raise DocumentParsingError('Размер таблицы превышает безопасный предел строк, столбцов или листов.')
         rows.append((sheet.name, [["" if value is None else str(value) for value in sheet.row_values(index)] for index in range(sheet.nrows)]))
     return _spreadsheet_blocks(rows, "xls")
 
 
 def _parse_pptx(data: bytes) -> ParsedDocument:
+    from app.config import settings
     try:
         from pptx import Presentation
     except ImportError as exc:
@@ -672,6 +694,8 @@ def _parse_pptx(data: bytes) -> ParsedDocument:
     except Exception as exc:
         raise DocumentParsingError("PPTX повреждён или имеет неверную структуру.") from exc
     blocks: list[SourceBlock] = []
+    if len(presentation.slides) > settings.document_max_pages:
+        raise DocumentParsingError('В презентации слишком много слайдов.')
     for slide_number, slide in enumerate(presentation.slides, start=1):
         for shape_number, shape in enumerate(slide.shapes, start=1):
             text = ""
@@ -744,6 +768,8 @@ def parse_document(filename: str, data: bytes) -> ParsedDocument:
         raise DocumentParsingError(f"Формат {extension or 'без расширения'} не поддерживается. Допустимы: {supported}.")
     if not data:
         raise DocumentParsingError("Файл пустой.")
+    from app.services.document_security import validate_content
+    validate_content(filename, data)
     if extension == ".pdf":
         return _parse_pdf(data)
     if extension == ".docx":

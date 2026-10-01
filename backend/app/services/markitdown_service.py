@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,9 +40,12 @@ class MarkItDownService:
         return self._converter
 
     def convert_local(self, path: Path) -> MarkdownResult:
-        resolved = path.resolve()
-        if not resolved.is_relative_to(self.upload_root):
-            raise MarkdownConversionError("Путь к документу находится за пределами хранилища.")
+        from app.services.document_security import storage_path
+        from app.services.parsing import DocumentParsingError
+        try:
+            resolved = storage_path(path, self.upload_root)
+        except DocumentParsingError as exc:
+            raise MarkdownConversionError('Путь к документу находится за пределами хранилища.') from exc
         if not resolved.is_file():
             raise MarkdownConversionError("Исходный файл документа недоступен.")
         try:
@@ -60,13 +62,12 @@ class MarkItDownService:
         return MarkdownResult(markdown=markdown, title=getattr(result, "title", None))
 
     async def convert(self, path: Path) -> MarkdownResult:
+        from app.services.isolated_documents import run_document_operation
+        from app.services.parsing import DocumentParsingError
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self.convert_local, path),
-                timeout=settings.markdown_timeout_seconds,
-            )
-        except asyncio.TimeoutError as exc:
-            raise MarkdownConversionError("Обработка Markdown заняла слишком много времени.") from exc
+            return MarkdownResult(**await run_document_operation('markdown', path, timeout=settings.markdown_timeout_seconds))
+        except DocumentParsingError as exc:
+            raise MarkdownConversionError(str(exc)) from exc
 
     @staticmethod
     def _normalize(value: str | None) -> str:

@@ -210,12 +210,16 @@ def test_process_persists_markdown_mapping_and_indexes_markdown(
     )
     sessions = [_Session(document), _Session(document), _Session(document), _Session(document)]
     monkeypatch.setattr(processing, "SessionLocal", _SessionFactory(sessions))
-    monkeypatch.setattr(processing, "parse_document", lambda *_args: parsed)
+    async def parse(*_args):
+        return parsed
+    monkeypatch.setattr(processing, "parse_uploaded", parse)
     processor = DocumentProcessor(SimpleNamespace())
     async def convert(_path):
         return MarkdownResult("# Report\n\nOriginal text\n", "Report")
     processor.markitdown.convert = convert  # type: ignore[method-assign]
-    monkeypatch.setattr(processing, "map_markdown", lambda *_args: ([mapped], {"quality": {"exact": 1}}))
+    async def mapping(*_args):
+        return [mapped], {"quality": {"exact": 1}}
+    monkeypatch.setattr(processing, "map_uploaded", mapping)
     monkeypatch.setattr(processing, "embed_passages", lambda texts, _cache: [[float(index)] for index, _ in enumerate(texts)])
     analyzed: list[object] = []
     async def fake_analyze(document_id_arg):
@@ -255,7 +259,9 @@ def test_process_falls_back_to_native_sources_when_markdown_conversion_fails(
     parsed = ParsedDocument("txt", [native], {"line_count": 1})
     sessions = [_Session(document), _Session(document), _Session(document), _Session(document)]
     monkeypatch.setattr(processing, "SessionLocal", _SessionFactory(sessions))
-    monkeypatch.setattr(processing, "parse_document", lambda *_args: parsed)
+    async def parse(*_args):
+        return parsed
+    monkeypatch.setattr(processing, "parse_uploaded", parse)
     processor = DocumentProcessor(SimpleNamespace())
     async def fail(_path):
         raise MarkdownConversionError("conversion failed")
@@ -278,9 +284,13 @@ def test_process_translates_parser_failure_and_clears_task(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     document_id, _path, document = _processing_document(tmp_path)
+    document.storage_path = str(tmp_path / f'{document_id}.txt')
+    monkeypatch.setattr(processing.settings, 'upload_dir', str(tmp_path))
     sessions = [_Session(document)]
     monkeypatch.setattr(processing, "SessionLocal", _SessionFactory(sessions))
-    monkeypatch.setattr(processing, "parse_document", lambda *_args: (_ for _ in ()).throw(DocumentParsingError("Пустой файл")))
+    async def parse(*_args):
+        raise DocumentParsingError('Пустой файл')
+    monkeypatch.setattr(processing, "parse_uploaded", parse)
     processor = DocumentProcessor(SimpleNamespace())
     calls: list[tuple[object, ...]] = []
     async def set_error(*args):

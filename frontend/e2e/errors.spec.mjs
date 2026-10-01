@@ -4,10 +4,11 @@ import { test, expect, upload, provider, fixtures, originalVisible } from './hel
 
 test.beforeEach(async ({ request }) => provider(request))
 
-for (const [name, status] of [['empty.txt', 400], ['unsupported.exe', 415], ['oversized.txt', 413]]) {
+for (const [name, status] of [['empty.txt', 400], ['unsupported.exe', 415], ['oversized.txt', 413],
+  ['corrupt.docx', 422], ['wrong.pdf', 422], ['dangerous.xml', 422]]) {
   test(`Rejected upload: ${name}`, async ({ page }) => {
     await page.goto('/')
-    const response = name === 'empty.txt' ? page.waitForResponse(r => r.url().endsWith('/api/v1/documents') && r.request().method() === 'POST') : null
+    const response = !['unsupported.exe', 'oversized.txt'].includes(name) ? page.waitForResponse(r => r.url().endsWith('/api/v1/documents') && r.request().method() === 'POST') : null
     await page.getByLabel('Выберите документ', { exact: true }).setInputFiles(path.join(fixtures, name))
     if (response) expect((await response).status()).toBe(status)
     await expect(page.locator('.toast-message')).toBeVisible()
@@ -17,7 +18,7 @@ for (const [name, status] of [['empty.txt', 400], ['unsupported.exe', 415], ['ov
   })
 }
 
-for (const name of ['corrupt.pdf', 'corrupt.docx', 'wrong.pdf', 'encrypted.pdf', 'dangerous.xml', 'unreadable.pdf']) {
+for (const name of ['corrupt.pdf', 'encrypted.pdf', 'unreadable.pdf']) {
   test(`Processing failure is recoverable: ${name}`, async ({ page }) => {
     const doc = await upload(page, name, 'error')
     const state = await (await page.request.get(`/api/v1/documents/${doc.id}`)).json()
@@ -36,6 +37,12 @@ test('HTML is source text: no script, handler or external resource runs', async 
   await expect(page.locator('.original-text-viewer')).toContainText('<script>')
   expect(await page.evaluate(() => window.__unsafeExecuted)).toBeUndefined()
   expect(external).toEqual([])
+  const doc = await (await page.request.get('/api/v1/documents')).json()
+  const current = doc.find(item => item.filename === 'unsafe.html')
+  const original = await page.request.get(`/api/v1/documents/${current.id}/file`)
+  expect(original.headers()['content-type']).toContain('text/plain')
+  expect(original.headers()['x-content-type-options']).toBe('nosniff')
+  expect(original.headers()['content-security-policy']).toContain("default-src 'none'")
 })
 
 for (const extension of ['pdf', 'docx']) {

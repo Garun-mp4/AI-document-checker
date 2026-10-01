@@ -14,6 +14,13 @@ services:
       timeout: 5s
       retries: 30
   api:
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 512
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    tmpfs: ['/tmp:size=256m,mode=1777']
     build: ./backend
     command: [sh, -c, "alembic upgrade head && uvicorn e2e_app:app --host 0.0.0.0 --port 8000"]
     environment:
@@ -26,6 +33,8 @@ services:
       HF_HOME: /data/embeddings/huggingface
       OCR_ENABLED: 'true'
       OCR_LANGUAGES: rus+eng
+      OPENBLAS_NUM_THREADS: '2'
+      OMP_NUM_THREADS: '2'
     volumes:
       - ./backend/tests/e2e_support:/test_support:ro
       - documents:/data/uploads

@@ -4,13 +4,14 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import re
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app.config import settings
@@ -29,6 +30,7 @@ from app.schemas import (
     SourceOut,
     TablePreviewOut,
 )
+from app.services.artifact_response import artifact_response
 from app.services.chat_library import build_chat_summary
 from app.services.citations import format_source_markers
 from app.services.codex import (
@@ -37,12 +39,20 @@ from app.services.codex import (
     CodexPreferenceError,
     CodexUnavailable,
 )
+from app.services.document_security import (
+    download_name,
+    owned_storage,
+    read_storage,
+    remove_storage,
+    validate_mime,
+)
+from app.services.isolated_documents import run_document_operation
 from app.services.parsing import (
     SUPPORTED_EXTENSIONS,
     DocumentParsingError,
     safe_filename,
 )
-from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview, read_table_file
+from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview
 from app.services.retrieval import search_chunks
 
 logger = logging.getLogger(__name__)
@@ -207,24 +217,30 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
     if extension not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=415, detail=f"Формат не поддерживается. Допустимы: {', '.join(sorted(SUPPORTED_EXTENSIONS))}.")
 
-    pieces: list[bytes] = []
-    size = 0
-    while piece := await file.read(1024 * 1024):
-        size += len(piece)
-        if size > settings.max_upload_bytes:
-            raise HTTPException(status_code=413, detail="Файл превышает максимальный размер 25 MiB.")
-        pieces.append(piece)
-    await file.close()
-    if not size:
-        raise HTTPException(status_code=400, detail="Файл пустой.")
-
+    try:
+        validate_mime(filename, file.content_type)
+    except DocumentParsingError as exc:
+        await file.close()
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
     document_id = uuid.uuid4()
     root = Path(settings.upload_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     storage_path = root / f"{document_id}{extension}"
-    content = b"".join(pieces)
+    committed = False
+    created = False
     try:
-        await asyncio.to_thread(storage_path.write_bytes, content)
+        size = 0
+        fd = os.open(storage_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        created = True
+        with os.fdopen(fd, 'wb') as destination:
+            while piece := await file.read(1024 * 1024):
+                size += len(piece)
+                if size > settings.max_upload_bytes:
+                    raise HTTPException(status_code=413, detail='Файл превышает максимальный размер загрузки.')
+                destination.write(piece)
+        if not size:
+            raise HTTPException(status_code=400, detail='Файл пустой.')
+        await run_document_operation('validate', storage_path, filename=filename)
         document = Document(
             id=document_id,
             filename=filename,
@@ -239,14 +255,32 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
             # Create the durable conversation before processing starts so a
             # queued or failed upload is still visible in the chat library.
             session.add(Chat(document_id=document_id))
-            await session.commit()
+            commit_task = asyncio.create_task(session.commit())
+            try:
+                await asyncio.shield(commit_task)
+            except asyncio.CancelledError:
+                await commit_task
+                committed = True
+                request.app.state.processor.schedule(document_id)
+                raise
+            committed = True
             await session.refresh(document)
-    except Exception:
-        storage_path.unlink(missing_ok=True)
-        logger.exception("Could not persist uploaded file")
-        raise HTTPException(status_code=500, detail="Не удалось сохранить файл локально.")
-    request.app.state.processor.schedule(document_id)
-    return _document_out(document)
+        request.app.state.processor.schedule(document_id)
+        return _document_out(document)
+    except DocumentParsingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception('Could not persist upload (%s)', type(exc).__name__, exc_info=False)
+        raise HTTPException(status_code=500, detail='Не удалось сохранить файл локально.') from None
+    finally:
+        await file.close()
+        if created and not committed:
+            try:
+                remove_storage(storage_path)
+            except (OSError, DocumentParsingError):
+                logger.warning('Could not clean incomplete upload')
 
 
 @router.get("/documents/{document_id}", response_model=DocumentOut)
@@ -276,21 +310,20 @@ async def delete_document(document_id: uuid.UUID, request: Request) -> None:
     task = processor._tasks.get(document_id)
     if task and not task.done():
         task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     async with SessionLocal() as session:
         document = await session.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
-        path = Path(document.storage_path).resolve()
-        upload_root = Path(settings.upload_dir).resolve()
+        path = document.storage_path
         await session.delete(document)
         await session.commit()
-    if path.is_relative_to(upload_root):
-        path.unlink(missing_ok=True)
-        for artifact in (document.markdown_path, document.markdown_map_path):
-            if artifact:
-                artifact_path = Path(artifact).resolve()
-                if artifact_path.is_relative_to(upload_root):
-                    artifact_path.unlink(missing_ok=True)
+    for artifact in (path, document.markdown_path, document.markdown_map_path):
+        if artifact:
+            try:
+                remove_storage(owned_storage(artifact, document_id))
+            except (OSError, DocumentParsingError):
+                logger.warning('Refused unsafe or unavailable artifact deletion')
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[SourceOut])
@@ -336,7 +369,7 @@ async def document_preview(document_id: uuid.UUID) -> DocumentPreviewOut:
 
 
 @router.get("/documents/{document_id}/file")
-async def document_file(document_id: uuid.UUID) -> FileResponse:
+async def document_file(document_id: uuid.UUID, request: Request) -> StreamingResponse:
     """Serve the locally stored original for the native PDF viewer.
 
     The path is checked against the configured upload directory before the
@@ -347,16 +380,14 @@ async def document_file(document_id: uuid.UUID) -> FileResponse:
         document = await session.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
-        path = Path(document.storage_path).resolve()
-        upload_root = Path(settings.upload_dir).resolve()
-        if not path.is_relative_to(upload_root) or not path.is_file():
-            raise HTTPException(status_code=404, detail="Исходный файл документа недоступен.")
         media_type = document_media_type(document.file_type, document.filename)
-        return FileResponse(
-            path,
-            media_type=media_type,
-            headers={"Content-Disposition": "inline"},
-        )
+        if document.file_type in {'html', 'htm', 'xml'}:
+            media_type = 'text/plain'
+        try:
+            path = owned_storage(document.storage_path, document_id)
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=404, detail='Исходный файл недоступен.') from exc
+        return artifact_response(path, request, media_type, document.filename)
 
 
 @router.get("/documents/{document_id}/preview/table", response_model=TablePreviewOut)
@@ -377,12 +408,12 @@ async def document_preview_table(
             raise HTTPException(status_code=404, detail="Документ не найден.")
         if document.file_type not in {"csv", "xlsx", "xls"}:
             raise HTTPException(status_code=400, detail="Табличный просмотр доступен только для CSV, XLSX и XLS.")
-        path = Path(document.storage_path).resolve()
-        upload_root = Path(settings.upload_dir).resolve()
-        if not path.is_relative_to(upload_root) or not path.is_file():
-            raise HTTPException(status_code=404, detail="Исходный файл документа недоступен.")
+        try:
+            path = owned_storage(document.storage_path, document_id)
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=404, detail='Исходный файл недоступен.') from exc
     try:
-        payload = await asyncio.to_thread(read_table_file, path, document.file_type, offset=offset, limit=limit)
+        payload = await run_document_operation('table', path, file_type=document.file_type, offset=offset, limit=limit)
     except DocumentParsingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return TablePreviewOut.model_validate(payload)
@@ -400,13 +431,10 @@ async def document_markdown(
             raise HTTPException(status_code=404, detail="Документ не найден.")
         text = ""
         if document.markdown_path:
-            path = Path(document.markdown_path).resolve()
-            root = Path(settings.upload_dir).resolve()
-            if path.is_relative_to(root) and path.is_file():
-                try:
-                    text = await asyncio.to_thread(path.read_text, "utf-8")
-                except (OSError, UnicodeError):
-                    text = ""
+            try:
+                text = read_storage(owned_storage(document.markdown_path, document_id), settings.document_worker_max_output_bytes).decode('utf-8')
+            except (OSError, UnicodeError, DocumentParsingError):
+                text = ''
         total_chars = len(text)
         total_lines = len(text.splitlines())
         return MarkdownOut(
@@ -426,19 +454,19 @@ async def document_markdown(
 
 
 @router.get("/documents/{document_id}/markdown/download")
-async def download_document_markdown(document_id: uuid.UUID) -> FileResponse:
+async def download_document_markdown(document_id: uuid.UUID, request: Request) -> StreamingResponse:
     async with SessionLocal() as session:
         document = await session.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
         if not document.markdown_path:
             raise HTTPException(status_code=404, detail="Markdown для этого документа ещё не создан.")
-        path = Path(document.markdown_path).resolve()
-        root = Path(settings.upload_dir).resolve()
-        if not path.is_relative_to(root) or not path.is_file():
-            raise HTTPException(status_code=404, detail="Markdown-файл недоступен.")
-        safe_name = f"{Path(document.filename).stem[:180] or 'document'}.md"
-        return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=safe_name)
+        try:
+            path = owned_storage(document.markdown_path, document_id)
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=404, detail='Markdown недоступен.') from exc
+        return artifact_response(path, request, 'text/markdown; charset=utf-8',
+                                 download_name(document.filename, '.md'), attachment=True)
 
 
 @router.post("/documents/{document_id}/markdown/rebuild", response_model=DocumentOut, status_code=202)
@@ -608,7 +636,7 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Chat answer failed for %s", chat_id)
+            logger.exception("Chat answer failed for %s (%s)", chat_id, type(exc).__name__, exc_info=False)
             message = codex_error_message(exc)
             yield _sse("error", {"message": message})
 

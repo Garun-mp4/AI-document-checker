@@ -67,8 +67,8 @@ class CodexService:
             self.client = AsyncCodex()
             await self.client.__aenter__()
         except (CodexError, OSError, RuntimeError) as exc:
-            self.startup_error = str(exc)
-            logger.exception("Codex SDK could not start")
+            self.startup_error = self._friendly_error(exc)
+            logger.error("Codex SDK could not start (%s)", type(exc).__name__)
 
     async def close(self) -> None:
         if self._login_task and not self._login_task.done():
@@ -121,7 +121,7 @@ class CodexService:
                     result["error"] = None
         except (CodexError, OSError, TimeoutError) as exc:
             result["error"] = self._friendly_error(exc)
-            logger.warning("Could not read Codex account/model status: %s", exc)
+            logger.warning("Could not read Codex account/model status (%s)", type(exc).__name__)
         self._status_cache = (loop.time(), result.copy())
         return result
 
@@ -148,7 +148,7 @@ class CodexService:
         try:
             write_preferences(self._preferences_file, selected_model, selected_effort)
         except OSError as exc:
-            logger.exception("Could not persist Codex preferences")
+            logger.error("Could not persist Codex preferences")
             raise CodexPreferenceError("Не удалось сохранить настройки модели локально.") from exc
         settings.codex_model = selected_model
         settings.codex_reasoning_effort = selected_effort
@@ -201,7 +201,7 @@ class CodexService:
         except (CodexError, OSError, TimeoutError) as exc:
             self.login_state = "failed"
             self.login_error = self._friendly_error(exc)
-            logger.warning("Codex device login did not complete: %s", exc)
+            logger.warning("Codex device login did not complete (%s)", type(exc).__name__)
         finally:
             self._status_cache = None
 
@@ -253,7 +253,7 @@ class CodexService:
                     sandbox=Sandbox.read_only,
                 )
             except (CodexError, OSError) as exc:
-                logger.info("Could not resume Codex chat thread %s: %s", existing_thread_id, exc)
+                logger.info("Could not resume Codex chat thread (%s)", type(exc).__name__)
         if thread is None:
             thread = await self.client.thread_start(
                 approval_mode=ApprovalMode.deny_all,
@@ -299,4 +299,4 @@ class CodexService:
             return "Достигнут лимит Codex. Проверьте состояние аккаунта и повторите позже."
         if any(term in lowered for term in ("connection", "network", "timed out", "timeout")):
             return "Не удалось связаться с Codex. Проверьте подключение к интернету."
-        return message[:500] or "Не удалось получить ответ от Codex."
+        return "Не удалось получить ответ от Codex. Проверьте подключение аккаунта и повторите запрос."

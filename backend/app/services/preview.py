@@ -177,6 +177,9 @@ def read_spreadsheet_table(data: bytes, file_type: str, *, offset: int = 0, limi
             from openpyxl import load_workbook
             workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
             sheet = workbook.worksheets[0]
+            if (sheet.max_row or 0) > 100_000 or (sheet.max_column or 0) > 500:
+                workbook.close()
+                raise DocumentParsingError('Размер таблицы превышает безопасный предел строк или столбцов.')
             rows = [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]
             sheet_name = sheet.title
             workbook.close()
@@ -184,6 +187,8 @@ def read_spreadsheet_table(data: bytes, file_type: str, *, offset: int = 0, limi
             import xlrd
             workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
             sheet = workbook.sheet_by_index(0)
+            if sheet.nrows > 100_000 or sheet.ncols > 500:
+                raise DocumentParsingError('Размер таблицы превышает безопасный предел строк или столбцов.')
             rows = [["" if value is None else str(value) for value in sheet.row_values(index)] for index in range(sheet.nrows)]
             sheet_name = sheet.name
     except ImportError as exc:

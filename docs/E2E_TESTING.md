@@ -12,7 +12,7 @@ backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt -r b
 pwsh -File scripts/test-e2e.ps1
 ```
 
-Команда генерирует 37 синтетических файлов, запускает backend unit с coverage, frontend contracts/build, production Compose `document-checker-e2e` на **5174**, Chromium E2E и семь API-интеграционных тестов. У проекта собственные PostgreSQL, оригиналы, Markdown, preferences и embeddings volumes. Скрипт очищает только volumes этого явно названного тестового проекта перед/после прогона. Рабочий проект на 5173 не затрагивается.
+Команда генерирует 47 синтетических файлов, запускает backend unit с coverage, frontend contracts/build, production Compose `document-checker-e2e` на **5174**, Linux-аудит защит, Chromium E2E и семь API-интеграционных тестов. У проекта собственные PostgreSQL, оригиналы, Markdown, preferences и embeddings volumes. Скрипт очищает только volumes этого явно названного тестового проекта перед/после прогона. Рабочий проект на 5173 не затрагивается.
 
 `-KeepRunning` оставляет окружение для диагностики; следующий запуск всё равно начинает с чистой тестовой базы. Первый запуск скачивает Chromium и локальную multilingual embedding model. OCR работает настоящими Poppler/Tesseract rus+eng. Текст документов не передаётся в облако.
 

@@ -3,7 +3,7 @@ import importlib.util
 import json
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
 from openpyxl import Workbook
@@ -82,6 +82,35 @@ def generate():
     contents["multichapter.epub"] = stream.getvalue()
     contents["unsafe.html"] = '<html><body><h1>Тестовый проект</h1><script>window.__unsafeExecuted=true</script><img src="https://example.invalid/tracker" onerror="window.__unsafeExecuted=true"><p>Автор: Алексей Пример.</p></body></html>'.encode()
     contents["dangerous.xml"] = b'<!DOCTYPE x [<!ENTITY secret SYSTEM "file:///etc/passwd">]><x>&secret;</x>'
+    # Synthetic hostile archives remain small on disk; none contains user data.
+    for extension in ('docx', 'xlsx', 'pptx', 'epub'):
+        stream = BytesIO()
+        with ZipFile(BytesIO(contents[f'sample.{extension}'])) as original, ZipFile(stream, 'w', ZIP_DEFLATED) as target:
+            for item in original.infolist():
+                target.writestr(item, original.read(item.filename))
+            target.writestr('../outside.txt', 'must not be extracted')
+        contents[f'traversal.{extension}'] = stream.getvalue()
+    for name, target_url in [('remote.docx', 'https://example.invalid/image.png'), ('unsafe-link.docx', 'file:///etc/passwd')]:
+        stream = BytesIO()
+        with ZipFile(BytesIO(contents['sample.docx'])) as original, ZipFile(stream, 'w', ZIP_DEFLATED) as target:
+            for item in original.infolist():
+                if item.filename != 'word/_rels/document.xml.rels':
+                    target.writestr(item, original.read(item.filename))
+            target.writestr('word/_rels/document.xml.rels', f'<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target_url}" TargetMode="External"/></Relationships>')
+        contents[name] = stream.getvalue()
+    for name, extension, extra in [
+        ('zip-bomb.docx', 'docx', [('big.bin', b'x' * (32 * 1024 * 1024 + 1))]),
+        ('many-parts.epub', 'epub', [(f'part{i}.bin', b'') for i in range(5001)]),
+        ('entity.xlsx', 'xlsx', [('evil.xml', b'<!DOCTYPE x [<!ENTITY s SYSTEM "file:///etc/passwd">]><x>&s;</x>')]),
+    ]:
+        stream = BytesIO()
+        with ZipFile(BytesIO(contents[f'sample.{extension}'])) as original, ZipFile(stream, 'w', ZIP_DEFLATED) as target:
+            for item in original.infolist():
+                target.writestr(item, original.read(item.filename))
+            for member, value in extra:
+                target.writestr(member, value)
+        contents[name] = stream.getvalue()
+    contents['binary.txt'] = b'MZ disguised executable'
     contents["empty.txt"] = b""
     contents["corrupt.pdf"] = b"%PDF-1.7\ncorrupt"
     contents["corrupt.docx"] = b"PK\x03\x04corrupt"

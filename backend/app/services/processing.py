@@ -18,15 +18,16 @@ from app.services.codex import (
     CodexService,
     CodexUnavailable,
 )
+from app.services.document_security import owned_storage, remove_storage, write_artifact
 from app.services.embeddings import EmbeddingConfigurationError, embed_passages
-from app.services.markdown_mapping import map_markdown, serialize_map
+from app.services.isolated_documents import map_uploaded, ocr_uploaded, parse_uploaded
+from app.services.markdown_mapping import serialize_map
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
 from app.services.ocr import OCRProcessingError, OCRService
 from app.services.parsing import (
     DocumentParsingError,
     ParsedDocument,
     SourceBlock,
-    parse_document,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,7 @@ class DocumentProcessor:
             if state["authenticated"] and state["model_available"] and state["reasoning_available"]:
                 await self.schedule_pending_analysis()
         except Exception:
-            logger.exception("Could not resume pending document analysis")
+            logger.exception("Could not resume pending document analysis", exc_info=False)
 
     async def stop(self) -> None:
         tasks = list(self._tasks.values())
@@ -139,6 +140,14 @@ class DocumentProcessor:
         if task and not task.done():
             return
         self._tasks[document_id] = asyncio.create_task(self._process(document_id))
+        self._tasks[document_id].add_done_callback(self._observe_completion)
+
+    @staticmethod
+    def _observe_completion(task: asyncio.Task) -> None:
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                logger.error('Background processing failed (%s)', type(error).__name__)
 
     async def schedule_pending_analysis(self) -> None:
         async with SessionLocal() as session:
@@ -153,6 +162,7 @@ class DocumentProcessor:
         if task and not task.done():
             return
         self._tasks[document_id] = asyncio.create_task(self._analyze(document_id))
+        self._tasks[document_id].add_done_callback(self._observe_completion)
 
     async def retry(self, document_id: uuid.UUID) -> None:
         async with SessionLocal() as session:
@@ -176,14 +186,13 @@ class DocumentProcessor:
                 document = await session.get(Document, document_id)
                 if document is None:
                     return
-                path = Path(document.storage_path)
+                path = owned_storage(document.storage_path, document_id)
                 filename = document.filename
                 document.status = "extracting"
                 document.error_message = None
                 await session.commit()
 
-            content = await asyncio.to_thread(path.read_bytes)
-            parsed = await asyncio.to_thread(parse_document, filename, content)
+            parsed = await parse_uploaded(path, filename)
             # The original Markdown upload is already named <id>.md. Use a
             # separate artifact name so conversion/fallback cannot overwrite
             # or unlink the immutable original (including its encoding).
@@ -200,7 +209,7 @@ class DocumentProcessor:
             ocr_metadata: dict[str, object] = {}
             if parsed.metadata.get("ocr_required"):
                 await self._set_ocr_state(document_id, "processing", None)
-                ocr_result = await asyncio.to_thread(self.ocr.process, path)
+                ocr_result = await ocr_uploaded(path)
                 parsed = ocr_result.parsed
                 markdown_text = ocr_result.markdown
                 analysis_blocks, markdown_mapping = _ocr_analysis_blocks(parsed, markdown_text)
@@ -211,19 +220,19 @@ class DocumentProcessor:
                 markdown_engine_version = ocr_result.engine_version
                 ocr_metadata = parsed.metadata
                 markdown_checksum = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
-                await asyncio.to_thread(markdown_path.write_text, markdown_text, "utf-8")
-                await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
+                write_artifact(markdown_path, markdown_text)
+                write_artifact(markdown_map_path, serialize_map(markdown_mapping))
             else:
                 if not parsed.blocks:
                     raise DocumentParsingError("Не удалось извлечь текст из файла.")
                 try:
                     markdown_result = await self.markitdown.convert(path)
                     markdown_text = markdown_result.markdown
-                    mapped_blocks, markdown_mapping = map_markdown(markdown_result.markdown, parsed.blocks)
+                    write_artifact(markdown_path, markdown_result.markdown)
+                    mapped_blocks, markdown_mapping = await map_uploaded(path, filename, markdown_path)
                     if not mapped_blocks or not any(block.locator.get("source_locators") for block in mapped_blocks):
                         raise MarkdownConversionError("MarkItDown не смог связать Markdown с исходными местами документа.")
-                    await asyncio.to_thread(markdown_path.write_text, markdown_result.markdown, "utf-8")
-                    await asyncio.to_thread(markdown_map_path.write_text, serialize_map(markdown_mapping), "utf-8")
+                    write_artifact(markdown_map_path, serialize_map(markdown_mapping))
                     markdown_checksum = hashlib.sha256(markdown_result.markdown.encode("utf-8")).hexdigest()
                     analysis_blocks = [(
                         block.text,
@@ -242,9 +251,9 @@ class DocumentProcessor:
                     markdown_error = str(exc) or "MarkItDown не смог сохранить результат преобразования."
                     for artifact in (markdown_path, markdown_map_path):
                         try:
-                            artifact.unlink(missing_ok=True)
-                        except OSError:
-                            logger.warning("Could not remove failed Markdown artifact %s", artifact, exc_info=True)
+                            remove_storage(artifact)
+                        except (OSError, DocumentParsingError):
+                            logger.warning("Could not remove failed Markdown artifact")
                     analysis_blocks = [(
                         block.text,
                         {**block.locator, "source_text": block.text},
@@ -347,7 +356,7 @@ class DocumentProcessor:
         except CodexModelUnavailable as exc:
             await self._set_error(document_id, "model_unavailable", str(exc))
         except Exception as exc:
-            logger.exception("Document processing failed for %s", document_id)
+            logger.exception("Document processing failed for %s (%s)", document_id, type(exc).__name__, exc_info=False)
             await self._set_error(document_id, "error", self._processing_error(exc))
         finally:
             self._tasks.pop(document_id, None)
@@ -364,7 +373,7 @@ class DocumentProcessor:
         except CodexUnavailable as exc:
             await self._set_error(document_id, "error", str(exc))
         except Exception as exc:
-            logger.exception("Insight generation failed for %s", document_id)
+            logger.exception("Insight generation failed for %s (%s)", document_id, type(exc).__name__, exc_info=False)
             await self._set_error(document_id, "error", self._processing_error(exc))
         finally:
             self._tasks.pop(document_id, None)

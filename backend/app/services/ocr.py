@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader
+
 try:  # Optional in the host test venv; the production Docker image installs both.
     from pdf2image import convert_from_path
     from pdf2image.exceptions import (
@@ -59,9 +60,11 @@ class OCRService:
         self.max_chars = max(10_000, settings.ocr_max_chars)
 
     def _safe_path(self, path: Path) -> Path:
-        resolved = path.resolve()
-        if not resolved.is_relative_to(self.upload_root):
-            raise OCRProcessingError("OCR разрешён только для сохранённого файла документа.")
+        from app.services.document_security import storage_path
+        try:
+            resolved = storage_path(path, self.upload_root)
+        except DocumentParsingError as exc:
+            raise OCRProcessingError("OCR разрешён только для сохранённого файла документа.") from exc
         if not resolved.is_file():
             raise OCRProcessingError("Оригинальный PDF недоступен для OCR.")
         return resolved
@@ -93,26 +96,37 @@ class OCRService:
             raise OCRProcessingError(f"В PDF {page_count} страниц. Для OCR поддерживается не более {self.max_pages} страниц.")
         if convert_from_path is None or pytesseract is None or Output is None:
             raise OCRProcessingError("OCR недоступен: зависимости не установлены в backend-контейнере.")
-        try:
-            images = convert_from_path(
-                str(safe_path), dpi=self.dpi, first_page=1, last_page=page_count,
-                fmt="png", thread_count=1, timeout=self.timeout,
-            )
-        except (
-            PDFInfoNotInstalledError,
-            PDFPageCountError,
-            PDFPopplerTimeoutError,
-            PopplerNotInstalledError,
-            TimeoutError,
-            OSError,
-        ) as exc:
-            raise OCRProcessingError("Не удалось подготовить страницы PDF для OCR. Проверьте файл и повторите попытку.") from exc
+        def page_images():
+            for page_number, page in enumerate(reader.pages, start=1):
+                box = getattr(page, 'mediabox', None)
+                if box is not None:
+                    import math
+                    pixels = float(box.width) * float(box.height) * (self.dpi / 72) ** 2
+                    if not math.isfinite(pixels) or pixels <= 0 or pixels > 20_000_000:
+                        raise OCRProcessingError('Размер страницы PDF превышает безопасный предел OCR.')
+                try:
+                    images = convert_from_path(
+                        str(safe_path), dpi=self.dpi, first_page=page_number, last_page=page_number,
+                        fmt='png', thread_count=1, timeout=self.timeout,
+                    )
+                except (PDFInfoNotInstalledError, PDFPageCountError, PDFPopplerTimeoutError,
+                        PopplerNotInstalledError, TimeoutError, OSError) as exc:
+                    raise OCRProcessingError('Не удалось подготовить страницу PDF для OCR.') from exc
+                try:
+                    for image in images:
+                        yield page_number, image
+                finally:
+                    for image in images:
+                        if hasattr(image, 'close'):
+                            image.close()
 
         blocks: list[SourceBlock] = []
         page_confidences: list[float] = []
         markdown_parts: list[str] = []
         total_chars = 0
-        for page_number, image in enumerate(images, start=1):
+        page_dimensions = None
+        for page_number, image in page_images():
+            page_dimensions = page_dimensions or (float(image.width), float(image.height))
             try:
                 data: dict[str, list[Any]] = pytesseract.image_to_data(
                     image, lang=self.languages, config="--psm 3", output_type=Output.DICT, timeout=self.timeout,
@@ -169,9 +183,8 @@ class OCRService:
             "ocr_page_count": len(blocks), "ocr_char_count": total_chars,
             "ocr_confidence": round(average_confidence, 2) if average_confidence is not None else None,
         }
-        if images:
-            metadata["page_width"] = float(images[0].width)
-            metadata["page_height"] = float(images[0].height)
+        if page_dimensions:
+            metadata['page_width'], metadata['page_height'] = page_dimensions
         return OCRResult(
             parsed=ParsedDocument("pdf", blocks, metadata), markdown="".join(markdown_parts).rstrip() + "\n",
             engine_version=engine_version, language=self.languages, confidence=metadata["ocr_confidence"],
