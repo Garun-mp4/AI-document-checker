@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from docx import Document as DocxDocument
@@ -110,21 +111,36 @@ def test_pdf_text_is_extracted_with_page_locator() -> None:
     assert "Team Alpha" in parsed.blocks[0].text
 
 
-def test_scanned_pdf_is_marked_for_ocr_and_encrypted_pdf_still_fails() -> None:
+def test_empty_pdf_page_is_not_mistaken_for_a_scan_and_encrypted_pdf_still_fails() -> None:
     writer = PdfWriter()
     writer.add_blank_page(width=300, height=300)
     stream = BytesIO()
     writer.write(stream)
     parsed = parse_document("scan.pdf", stream.getvalue())
     assert parsed.blocks == []
-    assert parsed.metadata["ocr_required"] is True
+    assert parsed.metadata["ocr_required"] is False
     assert parsed.metadata["page_count"] == 1
+    assert parsed.metadata["pdf_page_map"][0]["classification"] == "blank"
 
     writer.encrypt("password")
     encrypted = BytesIO()
     writer.write(encrypted)
     with pytest.raises(DocumentParsingError, match="паролем"):
         parse_document("locked.pdf", encrypted.getvalue())
+
+
+def test_mixed_pdf_classifies_each_page_and_records_crop_rotation() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "mixed.pdf"
+
+    parsed = parse_document("mixed.pdf", fixture.read_bytes())
+
+    page_map = parsed.metadata["pdf_page_map"]
+    assert [page["classification"] for page in page_map] == ["native", "ocr_candidate", "blank", "ocr_candidate"]
+    assert parsed.metadata["ocr_pages"] == [2, 4]
+    assert parsed.metadata["ocr_required"] is True
+    assert {block.locator["page"] for block in parsed.blocks} == {1}
+    assert page_map[3]["rotation"] == 90
+    assert len(page_map[3]["crop_box"]) == 4
 
 
 @pytest.mark.parametrize(

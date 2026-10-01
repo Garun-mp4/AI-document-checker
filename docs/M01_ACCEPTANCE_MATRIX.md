@@ -29,11 +29,11 @@
 | JSON: исходный текст, подсветка значений, Markdown | `json: upload`; backend parsing/preview | Расширенная адресация повторяющихся значений — M07 |
 | EPUB: главы/абзацы, второй chapter, source selection | `epub: upload`, `multichapter.epub`; backend parsing | Структурированный текст, не исходная вёрстка книги |
 | Оригинал неизменен после конвертации | `upload()` сравнивает все байты с фикстурой; backend success/fallback для MD/TXT | Старые уже перезаписанные оригиналы не могут быть восстановлены из отсутствующих байтов |
-| Локальный русско-английский OCR | `Real local Russian OCR` на PDF с изображением, реальный Poppler/Tesseract; backend OCR | Качество сложных сканов и координаты слов — следующие OCR milestones |
+| Локальный русско-английский OCR с точными областями | `Real local Russian OCR` и смешанный PDF с реальным Poppler/Tesseract; backend OCR и viewer citations | Качество сложных сканов и настройки повторного OCR — M06 |
 | Пустой, oversized, unsupported upload | `Rejected upload` + независимые запросы API | Client guard и server validation проверяются раздельно |
 | Повреждённый PDF/DOCX, неверный PDF, encrypted PDF, unreadable scan, DTD | `Processing failure is recoverable`; backend parsing/OCR | Ошибка сохраняется в библиотеке; новый чат остаётся доступен |
 | Семь карточек и серверные идентификаторы sources | Все успешные `upload()` + `documents.spec.mjs` citations; backend analysis/citations | Ответы fake provider проверяют механику, не интеллект настоящего Codex |
-| Citation открывает original, highlight, затем связанный Markdown | 13 format E2E + backend mapping/preview | При OCR без текстового слоя проверяется страница/callout, не word boxes |
+| Citation открывает original, highlight, затем связанный Markdown | 13 format E2E + смешанный PDF E2E с проверкой OCR word boxes; backend mapping/preview | Для legacy OCR-источников без карты предлагается точное восстановление через повторную обработку |
 | Ошибки PDF/DOCX renderer не дают белого экрана | `render failure` fault fetch; ready и семь карточек сохраняются; reload восстанавливает viewer | PDF.js использует native iframe fallback, DOCX — текстовый fallback |
 | Ошибка MarkItDown → native fallback → rebuild | `markdown.spec.mjs`; backend processing/markitdown | Fault в единственном сценарии; остальные конвертации настоящие |
 | Потоковый ответ показывается до окончания, GFM безопасен | `Stream Markdown...`: gate между delta, bold/list/table/code/blockquote, отключённый script | Test gate исключает sleep как способ скрыть гонку |

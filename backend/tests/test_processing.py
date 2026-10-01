@@ -14,7 +14,9 @@ from app.services.markitdown_service import MarkdownConversionError, MarkdownRes
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
 from app.services.processing_helpers import (
     _computed_blocks,
+    _merge_pdf_ocr_pages,
     _ocr_analysis_blocks,
+    _pdf_markdown,
 )
 
 
@@ -47,7 +49,7 @@ def test_computed_blocks_adds_table_summary_and_numeric_columns() -> None:
 
 
 def test_ocr_analysis_blocks_keep_page_locator_and_markdown_range() -> None:
-    parsed = ParsedDocument("pdf", [SourceBlock("Распознанная строка", {"kind": "pdf", "page": 3, "label": "Страница 3"})])
+    parsed = ParsedDocument("pdf", [SourceBlock("Распознанная строка", {"kind": "pdf", "page": 3, "label": "Страница 3", "ocr": True})])
 
     blocks, mapping = _ocr_analysis_blocks(parsed, "## Страница 3\nРаспознанная строка\n")
 
@@ -56,6 +58,73 @@ def test_ocr_analysis_blocks_keep_page_locator_and_markdown_range() -> None:
     assert blocks[0][3] == 2
     assert blocks[0][5] > 0
     assert mapping["quality"] == {"exact": 1, "fuzzy": 0, "nearest": 0, "none": 0}
+
+
+def test_mixed_pdf_merge_preserves_native_text_and_uses_one_ocr_source_per_page() -> None:
+    native = ParsedDocument("pdf", [
+        SourceBlock("Native page one.", {"kind": "pdf", "page": 1, "char_start": 0}),
+        SourceBlock("Partial hidden layer.", {"kind": "pdf", "page": 2, "char_start": 0}),
+    ], {
+        "page_count": 4,
+        "ocr_pages": [2, 4],
+        "pdf_page_map": [
+            {"page": 1, "classification": "native"},
+            {"page": 2, "classification": "ocr_candidate"},
+            {"page": 3, "classification": "blank"},
+            {"page": 4, "classification": "ocr_candidate", "rotation": 90},
+        ],
+    })
+    ocr = ParsedDocument("pdf", [
+        SourceBlock("Complete OCR page two.", {"kind": "pdf", "page": 2, "char_start": 0, "ocr": True, "ocr_map": {"word_boxes": [[0, 0, 10, 10, 0, 4, 1, 90]]}}),
+        SourceBlock("Rotated OCR page four.", {"kind": "pdf", "page": 4, "char_start": 0, "ocr": True, "ocr_map": {"word_boxes": [[0, 0, 10, 10, 0, 7, 1, 90]]}}),
+    ], {
+        "ocr_used": True,
+        "ocr_language": "rus+eng",
+        "ocr_engine_version": "tesseract-5.3",
+        "ocr_page_count": 2,
+        "ocr_page_map": [
+            {"page": 2, "classification": "ocr", "word_count": 4, "line_count": 1},
+            {"page": 4, "classification": "ocr", "word_count": 4, "line_count": 1},
+        ],
+    })
+
+    merged, summary = _merge_pdf_ocr_pages(native, ocr)
+    markdown = _pdf_markdown(merged)
+
+    assert [(block.locator["page"], block.text) for block in merged.blocks] == [
+        (1, "Native page one."), (2, "Complete OCR page two."), (4, "Rotated OCR page four."),
+    ]
+    assert "Partial hidden layer." not in markdown
+    assert markdown.index("## Страница 1") < markdown.index("## Страница 2") < markdown.index("## Страница 4")
+    assert "## Страница 3" not in markdown
+    assert summary == {
+        "native_pages": [1], "ocr_pages": [2, 4], "blank_pages": [3],
+        "unreadable_pages": [], "native_preserved_pages": [],
+    }
+    assert merged.metadata["pdf_page_map"][3]["rotation"] == 90
+
+
+def test_mixed_pdf_marks_unreadable_scan_partial_but_keeps_native_sources() -> None:
+    native = ParsedDocument("pdf", [
+        SourceBlock("Text that is still available.", {"kind": "pdf", "page": 1}),
+    ], {
+        "page_count": 2,
+        "ocr_pages": [2],
+        "pdf_page_map": [
+            {"page": 1, "classification": "native"},
+            {"page": 2, "classification": "ocr_candidate"},
+        ],
+    })
+    ocr = ParsedDocument("pdf", [], {
+        "ocr_page_map": [{"page": 2, "classification": "unreadable"}],
+    })
+
+    merged, summary = _merge_pdf_ocr_pages(native, ocr)
+
+    assert [block.text for block in merged.blocks] == ["Text that is still available."]
+    assert summary["unreadable_pages"] == [2]
+    assert merged.metadata["pdf_page_map"][1]["classification"] == "unreadable"
+    assert merged.metadata["pdf_page_map"][1]["ocr_result"] == "unreadable"
 
 
 @pytest.mark.parametrize("file_type", ["txt", "pdf", "docx", "md", "xml"])

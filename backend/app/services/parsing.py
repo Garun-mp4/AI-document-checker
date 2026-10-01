@@ -132,6 +132,38 @@ def _split_long_text(text: str, locator: dict[str, Any], target: int = CHUNK_TAR
     return result
 
 
+def _pdf_page_geometry(page: Any) -> dict[str, Any]:
+    try:
+        box = page.cropbox
+        crop_box = [float(box.left), float(box.bottom), float(box.right), float(box.top)]
+        width = abs(crop_box[2] - crop_box[0])
+        height = abs(crop_box[3] - crop_box[1])
+        rotation = int(getattr(page, "rotation", 0) or 0) % 360
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        crop_box = None
+        width = height = None
+        rotation = 0
+    if rotation in (90, 270):
+        width, height = height, width
+    return {"crop_box": crop_box, "rotation": rotation, "width": width, "height": height}
+
+
+def _pdf_text_quality(text: str) -> tuple[bool, int, str | None]:
+    visible = [character for character in text if not character.isspace()]
+    alphanumeric = sum(character.isalnum() for character in visible)
+    suspicious = sum(
+        character == "\ufffd" or (ord(character) < 32 and character not in "\t\n\r")
+        for character in visible
+    )
+    if not visible:
+        return False, 0, "text_layer_missing"
+    if alphanumeric < 24:
+        return False, alphanumeric, "sparse_text_layer"
+    if suspicious / len(visible) >= 0.12 or alphanumeric / len(visible) < 0.35:
+        return False, alphanumeric, "suspicious_text_layer"
+    return True, alphanumeric, None
+
+
 def _parse_pdf(data: bytes) -> ParsedDocument:
     if not data.startswith(b"%PDF-"):
         raise DocumentParsingError("Расширение PDF не соответствует содержимому файла.")
@@ -145,11 +177,27 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
             raise DocumentParsingError('В PDF превышен безопасный предел страниц.')
         blocks: list[SourceBlock] = []
         extracted_chars = 0
+        page_map: list[dict[str, Any]] = []
+        ocr_pages: list[int] = []
         for page_number, page in enumerate(pages, start=1):
-            page_text = "" if "/Contents" not in page else page.extract_text(extraction_mode="layout") or page.extract_text() or ""
+            has_content = page.get_contents() is not None
+            page_text = "" if not has_content else page.extract_text(extraction_mode="layout") or page.extract_text() or ""
             extracted_chars += len(page_text.strip())
             if extracted_chars > settings.document_max_chars:
                 raise DocumentParsingError('Текст PDF превышает безопасный предел.')
+            native_quality, alphanumeric, reason = _pdf_text_quality(page_text)
+            classification = "native" if native_quality else "ocr_candidate" if has_content else "blank"
+            geometry = _pdf_page_geometry(page)
+            page_map.append({
+                "page": page_number,
+                "classification": classification,
+                "native_char_count": len(page_text.strip()),
+                "native_alphanumeric_count": alphanumeric,
+                "ocr_reason": reason if classification == "ocr_candidate" else None,
+                **geometry,
+            })
+            if classification == "ocr_candidate":
+                ocr_pages.append(page_number)
             blocks.extend(_split_long_text(page_text, {
                 "kind": "pdf", "page": page_number, "label": f"Страница {page_number}",
                 "char_start": 0, "char_end": len(page_text),
@@ -158,19 +206,20 @@ def _parse_pdf(data: bytes) -> ParsedDocument:
         raise
     except (PdfReadError, ValueError, OSError, KeyError) as exc:
         raise DocumentParsingError("PDF повреждён или имеет неподдерживаемую структуру.") from exc
-    page_width = page_height = None
-    if pages:
-        try:
-            page_width = float(pages[0].mediabox.width)
-            page_height = float(pages[0].mediabox.height)
-        except (TypeError, ValueError):
-            page_width = page_height = None
-    metadata = {"page_count": len(pages)}
+    page_width = page_map[0].get("width") if page_map else None
+    page_height = page_map[0].get("height") if page_map else None
+    metadata: dict[str, Any] = {
+        "page_count": len(pages),
+        "pdf_page_map": page_map,
+        "ocr_pages": ocr_pages,
+        "ocr_required": bool(ocr_pages),
+    }
     if page_width and page_height:
         metadata.update({"page_width": page_width, "page_height": page_height})
-    if extracted_chars < 30 or not blocks:
-        metadata.update({"ocr_required": True, "ocr_reason": "В PDF не найден извлекаемый текст."})
-        return ParsedDocument("pdf", [], metadata)
+    if not blocks and ocr_pages:
+        metadata["ocr_reason"] = "В PDF есть страницы без надёжного текстового слоя."
+    elif not blocks:
+        metadata["ocr_reason"] = "PDF содержит только пустые страницы."
     return ParsedDocument("pdf", blocks, metadata)
 
 

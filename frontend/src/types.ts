@@ -47,7 +47,7 @@ export interface DocumentRecord {
   markdown_line_count: number
   markdown_checksum: string | null
   markdown_mapping: Record<string, number>
-  ocr_status: 'not_needed' | 'processing' | 'ready' | 'failed'
+  ocr_status: 'not_needed' | 'processing' | 'ready' | 'partial' | 'failed'
   ocr_language: string | null
   ocr_page_count: number | null
   ocr_confidence: number | null

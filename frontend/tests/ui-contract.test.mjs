@@ -99,8 +99,10 @@ test('frontend advertises the formats supported by the backend contract', () => 
 
 test('OCR has an explicit processing state and user-facing fallback message', () => {
   assert.match(app, /ocr: 'Распознаю скан'/)
-  assert.match(app, /ocr_status === 'ready'/)
+  assert.match(app, /document\.ocr_status === 'partial'/)
+  assert.match(originalViewer, /Создаю карту координат/)
   assert.match(app, /Не удалось распознать скан/)
   assert.match(styles, /\.ocr-notice\s*\{[^}]*border/)
-  assert.match(originalViewer, /selectedSource\?\.locator\.ocr === true/)
+  assert.match(originalViewer, /pdfOcrWordBoxes\(selectedSource\)/)
+  assert.match(originalViewer, /pdf-ocr-highlight-box/)
 })

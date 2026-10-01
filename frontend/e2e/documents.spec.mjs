@@ -98,3 +98,51 @@ test('Real local Russian OCR → page canvas → source citation', async ({ page
   await page.getByRole('tab', { name: 'Markdown', exact: true }).click()
   await expect(page.locator('.markdown-viewer')).toContainText('Алексей')
 })
+
+test('Mixed PDF keeps native pages, OCRs scanned pages, and highlights OCR word coordinates', async ({ page }) => {
+  const doc = await upload(page, 'mixed.pdf')
+  const state = await (await page.request.get(`/api/v1/documents/${doc.id}`)).json()
+  expect(state.ocr_status).toBe('ready')
+  expect(state.analysis_source).toBe('ocr')
+
+  const chunks = await (await page.request.get(`/api/v1/documents/${doc.id}/chunks?limit=200`)).json()
+  const ocrSources = chunks.filter(chunk => chunk.locator.ocr === true)
+  expect(new Set(ocrSources.map(chunk => chunk.locator.page))).toEqual(new Set([2, 4]))
+  for (const source of ocrSources) {
+    const map = source.locator.ocr_map
+    expect(map.coordinate_space).toBe('page-normalized-top-left')
+    expect(map.rotation).toBe(source.locator.page === 4 ? 90 : 0)
+    expect(map.word_boxes.length).toBeGreaterThan(0)
+    expect(map.line_boxes.length).toBeGreaterThan(0)
+    for (const [x0, y0, x1, y1, start, end] of map.word_boxes) {
+      expect(x0).toBeGreaterThanOrEqual(0)
+      expect(y0).toBeGreaterThanOrEqual(0)
+      expect(x1).toBeLessThanOrEqual(map.coordinate_scale)
+      expect(y1).toBeLessThanOrEqual(map.coordinate_scale)
+      expect(x1).toBeGreaterThan(x0)
+      expect(y1).toBeGreaterThan(y0)
+      expect(end).toBeGreaterThan(start)
+    }
+  }
+  expect(chunks.some(chunk => chunk.locator.page === 1 && chunk.locator.ocr !== true)).toBeTruthy()
+  expect(chunks.some(chunk => chunk.locator.page === 3)).toBeFalsy()
+
+  const preview = await (await page.request.get(`/api/v1/documents/${doc.id}/preview`)).json()
+  expect(preview.page_count).toBe(4)
+  await originalVisible(page, 'pdf')
+  const pageTwoOcrSource = ocrSources.find(source => source.locator.page === 2)
+  const citation = page.locator(`.citation-chip[data-source-id="${pageTwoOcrSource.id}"]`).first()
+  await expect(citation).toBeVisible()
+  await citation.click()
+  await expect(page.locator('.preview-source-callout')).toContainText('Выбран источник')
+  await expect(page.locator('.pdf-ocr-highlight-box').first()).toBeVisible()
+  const geometry = await page.locator('.pdf-ocr-highlight-box').first().evaluate(element => {
+    const box = element.getBoundingClientRect()
+    const sheet = element.closest('.pdf-page-sheet').getBoundingClientRect()
+    return { left: box.left - sheet.left, top: box.top - sheet.top, right: box.right - sheet.left, bottom: box.bottom - sheet.top, width: sheet.width, height: sheet.height }
+  })
+  expect(geometry.left).toBeGreaterThanOrEqual(0)
+  expect(geometry.top).toBeGreaterThanOrEqual(0)
+  expect(geometry.right).toBeLessThanOrEqual(geometry.width + 1)
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.height + 1)
+})

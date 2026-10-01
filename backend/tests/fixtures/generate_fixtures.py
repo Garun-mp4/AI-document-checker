@@ -8,8 +8,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
 from openpyxl import Workbook
+from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from pptx.util import Inches
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import RectangleObject
 
 FIXTURE_DIR = Path(__file__).parent
 
@@ -60,6 +63,43 @@ def _make_text_pdf() -> bytes:
         f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
     )
     return bytes(document)
+
+
+def _make_scan_page(text: str, *, rotate: int = 0, crop: bool = False):
+    image = Image.new("RGB", (1240, 1754), "white")
+    draw = ImageDraw.Draw(image)
+    font_paths = (
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    )
+    font_path = next((candidate for candidate in font_paths if candidate.exists()), None)
+    if font_path is None:
+        raise RuntimeError("A system font with Cyrillic glyphs is required to regenerate OCR fixtures.")
+    font = ImageFont.truetype(str(font_path), 46)
+    draw.text((76, 130), text, font=font, fill="black")
+    draw.text((76, 250), "OCR MIXED PAGE 2026", font=font, fill="black")
+    stream = BytesIO()
+    image.save(stream, "PDF", resolution=150)
+    page = PdfReader(BytesIO(stream.getvalue())).pages[0]
+    if crop:
+        box = page.cropbox
+        page.cropbox = RectangleObject((float(box.left) + 8, float(box.bottom) + 8,
+                                        float(box.right) - 8, float(box.top) - 8))
+    if rotate:
+        page.rotate(rotate)
+    return page
+
+
+def _make_mixed_pdf() -> bytes:
+    writer = PdfWriter()
+    native = PdfReader(BytesIO(_make_text_pdf()))
+    writer.add_page(native.pages[0])
+    writer.add_page(_make_scan_page("Сканированная страница OCR"))
+    writer.add_blank_page(width=612, height=792)
+    writer.add_page(_make_scan_page("Поворот и обрезка OCR", rotate=90, crop=True))
+    stream = BytesIO()
+    writer.write(stream)
+    return stream.getvalue()
 
 
 def _make_docx() -> bytes:
@@ -142,6 +182,7 @@ def _make_epub() -> bytes:
 
 FIXTURE_CONTENTS = {
     "sample.pdf": _make_text_pdf(),
+    "mixed.pdf": _make_mixed_pdf(),
     "sample.docx": _make_docx(),
     "sample.txt": (
         "Проект: Проверка документов\n"

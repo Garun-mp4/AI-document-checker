@@ -279,6 +279,63 @@ def test_compose_indexes_every_supported_fixture_through_the_real_api(compose_cl
         assert document["status"] == "needs_auth"
 
 
+@pytest.mark.integration
+def test_compose_indexes_mixed_pdf_and_persists_page_coordinate_map(compose_client: httpx.Client) -> None:
+    _require_disconnected_codex(compose_client)
+    content = (FIXTURES / "mixed.pdf").read_bytes()
+    response = compose_client.post(
+        "/api/v1/documents",
+        files={"file": ("mixed.pdf", content, "application/pdf")},
+    )
+    assert response.status_code == 202, response.text
+    document_id = response.json()["id"]
+    try:
+        document = _wait_for_document(compose_client, document_id)
+        assert document["status"] == "needs_auth", document.get("error_message")
+        assert document["analysis_source"] == "ocr"
+        assert document["ocr_status"] == "ready"
+        assert document["ocr_page_count"] == 2
+
+        page_map = document["metadata"]["pdf_page_map"]
+        assert [page["classification"] for page in page_map] == ["native", "ocr", "blank", "ocr"]
+        assert page_map[3]["rotation"] == 90
+        assert page_map[3]["crop_box"]
+
+        chunks_response = compose_client.get(f"/api/v1/documents/{document_id}/chunks?limit=200")
+        assert chunks_response.status_code == 200, chunks_response.text
+        chunks = chunks_response.json()
+        assert any("Project: Document Checker Sample" in chunk["text"] for chunk in chunks)
+        assert not any(chunk["locator"].get("page") == 3 for chunk in chunks)
+        ocr_chunks = [chunk for chunk in chunks if chunk["locator"].get("ocr") is True]
+        assert {chunk["locator"]["page"] for chunk in ocr_chunks} == {2, 4}
+        assert all(chunk["locator"].get("ocr_map", {}).get("word_boxes") for chunk in ocr_chunks)
+        assert all(chunk["locator"].get("ocr_map", {}).get("line_boxes") for chunk in ocr_chunks)
+        for chunk in ocr_chunks:
+            locator = chunk["locator"]
+            coordinate_map = locator["ocr_map"]
+            assert locator["char_end"] > locator["char_start"]
+            assert coordinate_map["coordinate_scale"] == 10_000
+            assert coordinate_map["raster_width"] > 0 and coordinate_map["raster_height"] > 0
+            for box in coordinate_map["word_boxes"]:
+                assert 0 <= box[0] < box[2] <= coordinate_map["coordinate_scale"]
+                assert 0 <= box[1] < box[3] <= coordinate_map["coordinate_scale"]
+                assert box[4] < box[5]
+
+        markdown = compose_client.get(f"/api/v1/documents/{document_id}/markdown")
+        assert markdown.status_code == 200, markdown.text
+        markdown_text = markdown.json()["markdown"]
+        assert "## Страница 1" in markdown_text
+        assert "## Страница 2" in markdown_text
+        assert "## Страница 3" not in markdown_text
+        assert "## Страница 4" in markdown_text
+        original = compose_client.get(f"/api/v1/documents/{document_id}/file")
+        assert original.status_code == 200
+        assert original.content == content
+    finally:
+        delete_response = compose_client.delete(f"/api/v1/documents/{document_id}")
+        assert delete_response.status_code == 204, delete_response.text
+
+
 def _large_docx() -> bytes:
     source = (FIXTURES / "sample.docx").read_bytes()
     expanded = BytesIO()

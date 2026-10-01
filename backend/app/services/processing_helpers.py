@@ -56,6 +56,109 @@ def _ocr_analysis_blocks(
             "markdown_char_start": position,
             "markdown_char_end": end,
         }
-        result.append((block.text, locator, "ocr", line_start, line_end, position, end, "exact"))
+        source = "ocr" if block.locator.get("ocr") is True else "pdf_native"
+        result.append((block.text, locator, source, line_start, line_end, position, end, "exact"))
         cursor = end
     return result, {"quality": {"exact": len(result), "fuzzy": 0, "nearest": 0, "none": max(0, len(parsed.blocks) - len(result))}}
+
+
+def _merge_pdf_ocr_pages(native: ParsedDocument, ocr: ParsedDocument) -> tuple[ParsedDocument, dict[str, list[int]]]:
+    """Choose the better source per PDF page and keep an auditable page map."""
+    page_count = int(native.metadata.get("page_count", 0))
+    page_map = [dict(item) for item in native.metadata.get("pdf_page_map", [])]
+    native_by_page: dict[int, list[SourceBlock]] = {}
+    ocr_by_page: dict[int, list[SourceBlock]] = {}
+    for block in native.blocks:
+        page = block.locator.get("page")
+        if isinstance(page, int):
+            native_by_page.setdefault(page, []).append(block)
+    for block in ocr.blocks:
+        page = block.locator.get("page")
+        if isinstance(page, int):
+            ocr_by_page.setdefault(page, []).append(block)
+    ocr_page_results = {item.get("page"): item for item in ocr.metadata.get("ocr_page_map", [])}
+
+    selected: list[SourceBlock] = []
+    summary = {"native_pages": [], "ocr_pages": [], "blank_pages": [], "unreadable_pages": [], "native_preserved_pages": []}
+    for page_number in range(1, page_count + 1):
+        info = page_map[page_number - 1] if page_number <= len(page_map) else {"page": page_number, "classification": "ocr_candidate"}
+        native_blocks = native_by_page.get(page_number, [])
+        ocr_blocks = ocr_by_page.get(page_number, [])
+        raster_result = ocr_page_results.get(page_number, {})
+        original_classification = info.get("classification")
+
+        if original_classification == "blank" or raster_result.get("classification") == "blank":
+            chosen = native_blocks
+            final_classification = "native" if chosen else "blank"
+            if not chosen:
+                summary["blank_pages"].append(page_number)
+        elif ocr_blocks:
+            # These pages were classified as sparse or suspicious by native
+            # extraction. Prefer OCR when available so partial text layers
+            # cannot be duplicated beside the full rendered-page transcript.
+            chosen = ocr_blocks
+            final_classification = "ocr"
+            summary["ocr_pages"].append(page_number)
+        elif native_blocks:
+            chosen = native_blocks
+            final_classification = "native"
+            if original_classification == "ocr_candidate":
+                summary["native_preserved_pages"].append(page_number)
+            if raster_result.get("classification") == "unreadable":
+                summary["unreadable_pages"].append(page_number)
+        else:
+            chosen = []
+            final_classification = "unreadable" if raster_result.get("classification") == "unreadable" else "blank"
+            if final_classification == "unreadable":
+                summary["unreadable_pages"].append(page_number)
+            else:
+                summary["blank_pages"].append(page_number)
+
+        if final_classification == "native":
+            summary["native_pages"].append(page_number)
+        info["native_classification"] = original_classification
+        info["classification"] = final_classification
+        info["ocr_result"] = raster_result.get("classification", "not_run")
+        info["ocr_word_count"] = raster_result.get("word_count", 0)
+        info["ocr_line_count"] = raster_result.get("line_count", 0)
+        selected.extend(chosen)
+
+    selected.sort(key=lambda block: (int(block.locator.get("page", 0)), int(block.locator.get("char_start", 0))))
+    metadata = {
+        **native.metadata,
+        "pdf_page_map": page_map,
+        "ocr_pages": list(native.metadata.get("ocr_pages", [])),
+        "ocr_used_pages": summary["ocr_pages"],
+        "ocr_summary": {key: values for key, values in summary.items()},
+        "ocr_used": bool(summary["ocr_pages"]),
+        "ocr_language": ocr.metadata.get("ocr_language"),
+        "ocr_dpi": ocr.metadata.get("ocr_dpi"),
+        "ocr_engine_version": ocr.metadata.get("ocr_engine_version"),
+        "ocr_page_map": ocr.metadata.get("ocr_page_map", []),
+        "ocr_page_count": len(summary["ocr_pages"]),
+        "ocr_char_count": sum(len(block.text) for block in selected if block.locator.get("ocr") is True),
+    }
+    used_confidences = [
+        ocr_page_results[page].get("confidence")
+        for page in summary["ocr_pages"]
+        if page in ocr_page_results and isinstance(ocr_page_results[page].get("confidence"), (int, float))
+    ]
+    metadata["ocr_confidence"] = round(sum(used_confidences) / len(used_confidences), 2) if used_confidences else None
+    return ParsedDocument("pdf", selected, metadata), summary
+
+
+def _pdf_markdown(parsed: ParsedDocument) -> str:
+    pages: dict[int, list[SourceBlock]] = {}
+    for block in parsed.blocks:
+        page = block.locator.get("page")
+        if isinstance(page, int):
+            pages.setdefault(page, []).append(block)
+    parts: list[str] = []
+    for page_number in range(1, int(parsed.metadata.get("page_count", 0)) + 1):
+        page_blocks = pages.get(page_number, [])
+        if not page_blocks:
+            continue
+        text = "\n".join(block.text.strip() for block in page_blocks if block.text.strip())
+        if text:
+            parts.extend([f"## Страница {page_number}\n", text, "\n\n"])
+    return "".join(parts).rstrip() + "\n"

@@ -328,6 +328,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .preview-source-callout { width: 100%; margin: 0; padding: 11px 14px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); background: var(--paper); }
 .preview-source-callout-heading { display: flex; align-items: center; gap: 7px; color: var(--ink-secondary); font-size: 12px; font-weight: 600; }
 .preview-source-callout p { max-height: 66px; margin: 6px 0 0; overflow: auto; color: var(--ink-soft); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-reprocess-button { display: inline-flex; width: fit-content; min-height: 30px; align-items: center; gap: 6px; margin-top: 8px; padding: 0 10px; font-size: 11px; }
 .preview-source-callout small { display: block; margin-top: 6px; color: var(--ink-tertiary); font-size: 11px; }
 .original-text-viewer { min-width: max-content; padding: 12px 0; background: #fff; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .source-text-line { display: grid; grid-template-columns: 46px minmax(0, 1fr); min-height: 22px; padding: 0 14px 0 0; }
@@ -339,7 +340,9 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .pdf-original-page-wrap { min-width: 0; min-height: 100%; width: 100%; overflow: hidden; }
 .pdf-page-sheet { position: relative; width: fit-content; max-width: 100%; margin: 0 auto; border: 1px solid #d6d6d6; background: #fff; box-shadow: 0 8px 24px rgb(0 0 0 / 8%); }
 .pdf-page-sheet canvas { display: block; }
-.pdf-text-layer { position: absolute; inset: 0; overflow: hidden; user-select: text; }
+.pdf-ocr-highlight-layer { position: absolute; z-index: 1; inset: 0; overflow: hidden; pointer-events: none; }
+.pdf-ocr-highlight-box { position: absolute; min-width: 1px; min-height: 1px; border-radius: 2px; background: rgb(190 190 190 / 72%); }
+.pdf-text-layer { position: absolute; z-index: 2; inset: 0; overflow: hidden; user-select: text; }
 .pdf-text-layer span { position: absolute; display: block; overflow: hidden; color: transparent; font-family: sans-serif; line-height: 1; white-space: pre; transform-origin: left top; }
 .pdf-text-layer .pdf-text-match { border-radius: 2px; background: rgb(190 190 190 / 72%); }
 .pdf-native-fallback { display: flex; min-height: 100%; flex-direction: column; gap: 8px; background: #525252; }

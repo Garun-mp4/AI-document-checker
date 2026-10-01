@@ -24,6 +24,8 @@ interface OriginalDocumentViewerProps {
   selectedSourceId: string | null
   originalUrl: string
   pageNumber: number
+  onReprocess?: () => void
+  reprocessing?: boolean
 }
 
 function sourceQuery(source: ViewerSource | null): string {
@@ -31,6 +33,35 @@ function sourceQuery(source: ViewerSource | null): string {
   const value = source.text.replace(/\s+/g, ' ').trim()
   if (!value) return ''
   return value.length > 100 ? value.slice(0, 100).replace(/\s+\S*$/, '') : value
+}
+
+interface PdfOcrWordBox {
+  key: number
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+function pdfOcrWordBoxes(source: ViewerSource | null): PdfOcrWordBox[] {
+  const rawMap = source?.locator.ocr_map
+  if (!rawMap || typeof rawMap !== 'object') return []
+  const map = rawMap as Record<string, unknown>
+  const scale = map.coordinate_scale
+  const rawBoxes = map.word_boxes
+  if (typeof scale !== 'number' || scale <= 0 || !Array.isArray(rawBoxes)) return []
+  return rawBoxes.flatMap((raw, key) => {
+    if (!Array.isArray(raw) || raw.length < 8 || !raw.slice(0, 8).every((value) => typeof value === 'number' && Number.isFinite(value))) return []
+    const [x0, y0, x1, y1] = raw as number[]
+    if (x1 <= x0 || y1 <= y0) return []
+    return [{
+      key,
+      left: x0 / scale * 100,
+      top: y0 / scale * 100,
+      width: (x1 - x0) / scale * 100,
+      height: (y1 - y0) / scale * 100,
+    }]
+  })
 }
 
 function normalizedIncludes(value: string, query: string): boolean {
@@ -72,13 +103,17 @@ function locatorLabel(source: ViewerSource): string {
   return 'Фрагмент документа'
 }
 
-function SourceCallout({ source, exact }: { source: ViewerSource | null; exact: boolean }) {
+function SourceCallout({ source, exact, onReprocess, reprocessing = false }: { source: ViewerSource | null; exact: boolean; onReprocess?: () => void; reprocessing?: boolean }) {
   if (!source) return null
+  const needsOcrRecovery = source.locator.ocr === true && pdfOcrWordBoxes(source).length === 0
   return (
     <div className="preview-source-callout" role="status">
       <div className="preview-source-callout-heading"><BookOpen size={14} /><span>Выбран источник · {locatorLabel(source)}</span></div>
       <p>{source.text}</p>
-      {!exact && <small>Точное место не найдено, показана ближайшая область.</small>}
+      {needsOcrRecovery
+        ? <><small>У этого старого результата OCR сохранена страница, но нет координат точной подсветки. Повторная обработка создаст карту координат.</small>
+          {onReprocess && <button className="button button-light preview-reprocess-button" type="button" onClick={onReprocess} disabled={reprocessing}>{reprocessing ? <><LoaderCircle size={14} className="spin" /> Создаю карту координат…</> : 'Создать карту координат'}</button>}</>
+        : !exact && <small>Точное место не найдено, показана ближайшая область.</small>}
     </div>
   )
 }
@@ -250,11 +285,12 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
   useEffect(() => {
     const sourcePage = typeof selectedSource?.locator.page === 'number' ? selectedSource.locator.page : null
     if (selectedSource?.locator.ocr === true && sourcePage === pageNumber) {
-      // Scanned PDFs have no native PDF text layer. The OCR locator is still
-      // exact at page level, so a citation can be acknowledged without
-      // pretending that an invisible PDF text span exists.
-      onMatch(true)
-      scrollIntoViewRespectingMotion(sheetRef.current)
+      const boxes = pdfOcrWordBoxes(selectedSource)
+      onMatch(boxes.length > 0)
+      const target = boxes.length
+        ? sheetRef.current?.querySelector('.pdf-ocr-highlight-box')
+        : sheetRef.current
+      scrollIntoViewRespectingMotion(target)
       return
     }
     if (!items.length || !selectedSource) return
@@ -276,6 +312,9 @@ function PdfOriginalViewer({ originalUrl, pageNumber, selectedSource, onMatch }:
     {rendering && <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Рендерю страницу {pageNumber}…</div>}
     <div className="pdf-page-sheet" ref={sheetRef}>
       <canvas ref={canvasRef} />
+      {selectedSource?.locator.ocr === true && selectedSource.locator.page === pageNumber && <div className="pdf-ocr-highlight-layer" aria-hidden="true">
+        {pdfOcrWordBoxes(selectedSource).map((box) => <span className="pdf-ocr-highlight-box" key={box.key} style={{ left: `${box.left}%`, top: `${box.top}%`, width: `${box.width}%`, height: `${box.height}%` }} />)}
+      </div>}
       <div className="pdf-text-layer" aria-hidden="true">
         {items.map((item, index) => {
           const match = Boolean(query && (normalizedIncludes(item.str, query) || query.split(/\s+/).some((word) => word.length > 5 && normalizedIncludes(item.str, word))))
@@ -423,7 +462,7 @@ function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview
   </div>
 }
 
-export function OriginalDocumentViewer({ document: record, preview, selectedSource, selectedSourceId, originalUrl, pageNumber }: OriginalDocumentViewerProps) {
+export function OriginalDocumentViewer({ document: record, preview, selectedSource, selectedSourceId, originalUrl, pageNumber, onReprocess, reprocessing = false }: OriginalDocumentViewerProps) {
   const [renderError, setRenderError] = useState<string | null>(null)
   const [exactMatch, setExactMatch] = useState(true)
   const [retryKey, setRetryKey] = useState(0)
@@ -440,7 +479,7 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   useEffect(() => { setRenderError(null); setExactMatch(true) }, [preview.document_id, renderer, retryKey])
   return <div className={`original-viewer-body renderer-${renderer}`} data-renderer={renderer} data-selected-source={selectedSourceId || undefined}>
     <div className="preview-toolbar"><span>Оригинал файла{preview.encoding ? ` · ${preview.encoding}` : ''}</span><a href={originalUrl} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>
-    <SourceCallout source={selectedSource} exact={exactMatch} />
+    <SourceCallout source={selectedSource} exact={exactMatch} onReprocess={onReprocess} reprocessing={reprocessing} />
     {renderError ? <RenderError preview={preview} originalUrl={originalUrl} message={renderError} onRetry={() => { setRenderError(null); setRetryKey((value) => value + 1) }} /> : <div className="original-render-surface">{content || <RenderError preview={preview} originalUrl={originalUrl} onRetry={() => setRetryKey((value) => value + 1)} />}</div>}
   </div>
 }

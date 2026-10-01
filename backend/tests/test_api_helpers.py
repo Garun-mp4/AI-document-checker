@@ -78,6 +78,12 @@ def test_document_out_exposes_markdown_processing_metadata() -> None:
     assert result.ocr_status == "ready"
     assert result.ocr_confidence == 91.5
 
+    document.ocr_status = "partial"
+    document.ocr_error = "Не удалось распознать текст на страницах: 3."
+    partial_result = api._document_out(document)
+    assert partial_result.ocr_status == "partial"
+    assert partial_result.ocr_error.endswith("3.")
+
 
 def test_document_media_type_is_stable_for_all_supported_formats() -> None:
     expected = {

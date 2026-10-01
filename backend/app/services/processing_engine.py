@@ -31,7 +31,12 @@ from app.services.markdown_mapping import serialize_map
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
 from app.services.ocr import OCRProcessingError, OCRService
 from app.services.parsing import DocumentParsingError
-from app.services.processing_helpers import _computed_blocks, _ocr_analysis_blocks
+from app.services.processing_helpers import (
+    _computed_blocks,
+    _merge_pdf_ocr_pages,
+    _ocr_analysis_blocks,
+    _pdf_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,29 +118,36 @@ class ProcessingAttempt:
         markdown_text = ""
         markdown_engine_version: str | None = None
         ocr_metadata: dict[str, object] = {}
-        if parsed.metadata.get("ocr_required"):
-            total_pages = parsed.metadata.get('page_count')
-            await self.stage('ocr', processed_pages=0, total_pages=total_pages)
+        candidate_pages = parsed.metadata.get("ocr_pages", []) if parsed.file_type == "pdf" else []
+        if candidate_pages:
+            await self.stage('ocr', processed_pages=0, total_pages=len(candidate_pages))
 
             async def report_ocr_progress(processed_pages: int, total: int) -> None:
                 await self.stage('ocr', processed_pages=processed_pages, total_pages=total)
 
-            ocr_result = await ocr_uploaded(path, configuration=self.configuration,
+            ocr_result = await ocr_uploaded(path, configuration=self.configuration, pages=candidate_pages,
+                                            allow_empty=bool(parsed.blocks),
                                             progress_callback=report_ocr_progress)
-            parsed = ocr_result.parsed
-            markdown_text = ocr_result.markdown
-            analysis_blocks, markdown_mapping = _ocr_analysis_blocks(parsed, markdown_text)
-            if not analysis_blocks:
-                raise OCRProcessingError("OCR не смог связать распознанный текст со страницей документа.")
-            markdown_status = "ready"
-            analysis_source = "ocr"
-            markdown_engine_version = ocr_result.engine_version
+            parsed, ocr_summary = _merge_pdf_ocr_pages(parsed, ocr_result.parsed)
             ocr_metadata = parsed.metadata
-            markdown_checksum = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
-            await self.write(markdown_path, markdown_text)
-            await self.write(markdown_map_path, serialize_map(markdown_mapping))
-        else:
             if not parsed.blocks:
+                raise OCRProcessingError("В PDF не найден читаемый текст: страницы пустые или не удалось распознать скан.")
+            if ocr_summary["ocr_pages"]:
+                markdown_text = _pdf_markdown(parsed)
+                analysis_blocks, markdown_mapping = _ocr_analysis_blocks(parsed, markdown_text)
+                if not analysis_blocks:
+                    raise OCRProcessingError("OCR не смог связать распознанный текст со страницей документа.")
+                markdown_status = "ready"
+                analysis_source = "ocr"
+                markdown_engine_version = ocr_result.engine_version
+                markdown_checksum = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
+                await self.write(markdown_path, markdown_text)
+                await self.write(markdown_map_path, serialize_map(markdown_mapping))
+
+        if markdown_status != "ready":
+            if not parsed.blocks:
+                if parsed.file_type == "pdf":
+                    raise DocumentParsingError("В PDF не найден читаемый текст: документ может состоять из пустых страниц.")
                 raise DocumentParsingError("Не удалось извлечь текст из файла.")
             try:
                 markdown_result = await self.markitdown.convert(path)
@@ -189,12 +201,19 @@ class ProcessingAttempt:
             'markdown_line_count': len(markdown_text.splitlines()) if markdown_status == 'ready' else 0,
             'markdown_checksum': markdown_checksum,
             'markdown_mapping_json': markdown_mapping.get('quality', {}) if markdown_status == 'ready' else {},
-            'ocr_status': 'ready' if ocr_metadata else 'not_needed',
-            'ocr_language': ocr_metadata.get('ocr_language'), 'ocr_page_count': ocr_metadata.get('ocr_page_count'),
+            'ocr_status': (
+                'partial' if ocr_metadata.get('ocr_summary', {}).get('unreadable_pages')
+                else 'ready' if ocr_metadata.get('ocr_used') else 'not_needed'
+            ),
+            'ocr_language': ocr_metadata.get('ocr_language'),
+            'ocr_page_count': ocr_metadata.get('ocr_page_count') or None,
             'ocr_confidence': ocr_metadata.get('ocr_confidence'), 'ocr_error': None,
-            'ocr_engine_version': markdown_engine_version if ocr_metadata else None,
+            'ocr_engine_version': ocr_metadata.get('ocr_engine_version') if ocr_metadata else None,
             'ocr_char_count': ocr_metadata.get('ocr_char_count', 0),
         }
+        unreadable_pages = ocr_metadata.get('ocr_summary', {}).get('unreadable_pages', [])
+        if unreadable_pages:
+            snapshot['ocr_error'] = 'Не удалось распознать текст на страницах: ' + ', '.join(map(str, unreadable_pages)) + '.'
         derived = _computed_blocks(parsed)
         await self.stage('indexing', completed=0, total=len(analysis_blocks))
         for start in range(0, len(analysis_blocks), 48):

@@ -24,7 +24,7 @@ class DocumentOut(BaseModel):
     markdown_line_count: int
     markdown_checksum: str | None
     markdown_mapping: dict[str, Any]
-    ocr_status: Literal["not_needed", "processing", "ready", "failed"]
+    ocr_status: Literal["not_needed", "processing", "ready", "partial", "failed"]
     ocr_language: str | None
     ocr_page_count: int | None
     ocr_confidence: float | None

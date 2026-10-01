@@ -1,8 +1,25 @@
 # Отчёт о тестировании AI Document Checker
 
+## M05 — OCR смешанных PDF и карта координат
+
+Дата: 1 октября 2026 года. M05 завершён и проверен. M06 не начинался; настройки качества OCR остаются следующим milestone. Подробное описание реализации: [docs/M05_OCR_MIXED_PDFS.md](docs/M05_OCR_MIXED_PDFS.md).
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit | 205 passed, 8 integration deselected |
+| Compose API integration | 8 passed, 205 unit deselected; тестовый provider отключён, live Codex не использовался |
+| Frontend contracts | 17 passed |
+| TypeScript / production build | Успешно; осталось штатное предупреждение Vite о размере JS bundle |
+| Ruff `app` и `tests` | Успешно |
+| Полный Chromium E2E | 65 passed, 0 failed, 0 skipped (18,7 минуты) |
+| Responsive E2E | 6 размеров от 1440×900 до 390×844 прошли |
+| Compose test services | DB/API/worker healthy; тестовые volumes сохранены |
+
+Mixed PDF acceptance использует файл с нативной страницей, русско-английским сканом, пустой страницей и повёрнутой/CropBox-страницей. Реальная обработка через Compose проверила классификацию страниц, отсутствие дубликатов и пустых листов, порядок Markdown, диапазоны символов, координаты слов/строк, поворот, неизменность исходных байтов и сохранение карты в API. Chromium проверил клик по citation и геометрию подсветки на PDF canvas. Отдельный тест покрывает частично нераспознанные страницы и сохранение доступного текста.
+
 ## M04 — прогресс обработки и проверка версии приложения
 
-Дата: 1 октября 2026 года. M04 реализован; M05 не начинался. Реализация и эксплуатационный запуск: [docs/M04_PROGRESS_VERSION.md](docs/M04_PROGRESS_VERSION.md).
+Дата: 1 октября 2026 года. M04 завершён до начала M05. Реализация и эксплуатационный запуск: [docs/M04_PROGRESS_VERSION.md](docs/M04_PROGRESS_VERSION.md).
 
 | Проверка | Результат |
 | --- | --- |

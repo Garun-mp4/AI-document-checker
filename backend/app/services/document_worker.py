@@ -92,7 +92,12 @@ def execute(payload: dict, progress_callback=None):
         from app.services.ocr import OCRService
         snapshot = Path.cwd() / 'original.pdf'
         snapshot.write_bytes(data)
-        return dataclasses.asdict(OCRService(Path.cwd()).process(snapshot, progress_callback=progress_callback))
+        return dataclasses.asdict(OCRService(Path.cwd()).process(
+            snapshot,
+            progress_callback=progress_callback,
+            pages=payload.get('pages'),
+            allow_empty=payload.get('allow_empty', False),
+        ))
     if operation == 'table':
         from app.services.preview import read_csv_table, read_spreadsheet_table
         if payload['file_type'] == 'csv':

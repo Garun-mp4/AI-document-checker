@@ -576,13 +576,18 @@ function App() {
     return saveCodexPreferences(codex?.model || DEFAULT_CODEX_MODEL, reasoningEffort)
   }, [codex, saveCodexPreferences])
 
-  const retryDocument = useCallback(async () => {
+  const retryDocument = useCallback(async (operation: 'retry' | 'process' = 'retry') => {
     if (!document || processingActionPending) return
     setProcessingActionPending(true)
     try {
-      const updated = await api<DocumentRecord>(`${API}/documents/${document.id}/retry`, { method: 'POST' })
+      const updated = await api<DocumentRecord>(`${API}/documents/${document.id}/retry${operation === 'process' ? '?operation=process' : ''}`, { method: 'POST' })
       setDocument(updated)
-      setProcessingJob(null)
+      if (operation === 'process') {
+        const jobs = await api<ProcessingJob[]>(`${API}/documents/${document.id}/jobs`)
+        setProcessingJob(jobs.find((job) => ['queued', 'running', 'cancelling'].includes(job.state)) ?? jobs[0] ?? null)
+      } else {
+        setProcessingJob(null)
+      }
       updateDocumentInLibrary(updated)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось повторить обработку.')
@@ -838,7 +843,8 @@ function App() {
   })
   const currentListItem = chats.find((item) => item.document_id === selectedId)
   const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
-  const activeStatus = visibleStatus ? ['queued', 'extracting', 'ocr', 'indexing', 'analyzing'].includes(visibleStatus.status) : false
+  const activeJob = Boolean(processingJob && ['queued', 'running', 'cancelling'].includes(processingJob.state))
+  const activeStatus = visibleStatus ? ['queued', 'extracting', 'ocr', 'indexing', 'analyzing'].includes(visibleStatus.status) || (visibleStatus.status === 'ready' && activeJob) : false
   const replacementFailure = visibleStatus?.status === 'ready' && processingJob?.state === 'failed'
   const mainClasses = [
     'app-shell',
@@ -954,8 +960,8 @@ function App() {
               onRetry={replacementFailure ? () => void retryDocument() : undefined}
             />}
 
-            {document?.ocr_status === 'ready' && document.analysis_source === 'ocr' && (
-              <div className="ocr-notice" role="status"><BookOpen size={16} /><span>Это сканированный PDF. Текст распознан локально ({document.ocr_language || 'rus+eng'}), а оригинальные страницы сохранены без изменений.</span></div>
+            {document && (document.ocr_status === 'partial' || (document.ocr_status === 'ready' && document.analysis_source === 'ocr')) && (
+              <div className="ocr-notice" role="status"><BookOpen size={16} /><span>{document.ocr_status === 'partial' ? `${document.ocr_error || 'Не удалось распознать часть страниц.'} Доступный текст сохранён, оригинал документа доступен без изменений.` : `Текст сканированных страниц распознан локально (${document.ocr_language || 'rus+eng'}), а оригинал сохранён без изменений.`}</span></div>
             )}
 
             {(visibleStatus.status === 'needs_auth' || visibleStatus.status === 'model_unavailable' || visibleStatus.status === 'error' || visibleStatus.status === 'cancelled') && (
@@ -1000,7 +1006,7 @@ function App() {
                             {markdownDocument?.status === 'ready' && <a className="preview-download" href={`${API}/documents/${document.id}/markdown/download`} download>Скачать .md</a>}
                           </div>
                           {previewTab === 'original' ? (
-                            documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>
+                            documentPreview.original_url ? <OriginalDocumentViewer document={document} preview={documentPreview} selectedSource={selectedSource} selectedSourceId={selectedSourceId} originalUrl={documentPreview.original_url} pageNumber={previewPage} onReprocess={() => void retryDocument('process')} reprocessing={processingActionPending} /> : <div className="preview-render-error" role="alert"><TriangleAlert size={18} /><span>Оригинальный файл недоступен.</span></div>
                           ) : markdownDocument ? (
                             <MarkdownViewer data={markdownDocument} selectedSource={selectedSource} onRebuild={() => void rebuildMarkdown()} rebuilding={markdownRebuilding} onLoadMore={() => void loadMoreMarkdown()} loadingMore={markdownLoadingMore} />
                           ) : <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю Markdown…</div>}
@@ -1022,7 +1028,7 @@ function App() {
                         <p className={`insight-answer ${insight.citations.length === 0 ? 'no-evidence' : ''}`}><CitationText text={insight.answer} citations={insight.citations} onOpenSource={openSource} /></p>
                         <div className="insight-citations">
                           {insight.citations.length ? insight.citations.map((source) => (
-                            <button key={source.id} className="citation-chip" onClick={() => void openSource(source)} title={source.text}>
+                            <button key={source.id} className="citation-chip" data-source-id={source.id} onClick={() => void openSource(source)} title={source.text}>
                               {source.is_derived ? <Calculator size={12} /> : <BookOpen size={12} />}
                               <span>{locatorText(source)}</span><ChevronRight size={12} />
                             </button>
