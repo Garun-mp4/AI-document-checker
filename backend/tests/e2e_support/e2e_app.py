@@ -4,9 +4,13 @@ Only Codex is replaced. Storage, parsers, OCR, embeddings and analysis use
 the application's actual implementations. Never import this from app/.
 """
 import asyncio
+import hashlib
 import json
+import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import HTTPException, Request
 from sqlalchemy import delete, select
@@ -113,6 +117,54 @@ async def control(request: Request):
         provider.complete_calls = 0
         provider.chat_calls = 0
     return {'mode': provider.mode, 'complete_calls': provider.complete_calls, 'chat_calls': provider.chat_calls}
+
+
+@app.post('/api/v1/__e2e/maintenance/seed')
+async def seed_maintenance_artifacts():
+    """Seed uniquely named disposable files for local-data maintenance acceptance."""
+    fixture_id = uuid.uuid4().hex
+    token = f'M15_PRIVATE_AUTH_SENTINEL_{fixture_id}'
+    upload_root = Path(settings.upload_dir)
+    embedding_root = Path(settings.embedding_cache_dir)
+    auth_root = Path(settings.codex_home)
+    for directory in (upload_root, embedding_root, auth_root):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    temp_file = upload_root / f'.artifact-abandoned-m15-{fixture_id}.tmp'
+    parser_cache = upload_root / f'.parsed-cache-{hashlib.sha256(fixture_id.encode()).hexdigest()}.json'
+    embedding_cache = embedding_root / f'.embedding-cache-{hashlib.sha256(fixture_id.encode()).hexdigest()}.json'
+    auth_file = auth_root / f'm15-auth-{fixture_id}.json'
+    temp_file.write_text('stale synthetic temporary artifact', encoding='utf-8')
+    parser_cache.write_text('synthetic parser cache', encoding='utf-8')
+    embedding_cache.write_bytes(b'synthetic disposable embedding cache')
+    auth_file.write_text(json.dumps({'refresh_token': token}), encoding='utf-8')
+    stale = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
+    for path in (temp_file, parser_cache, embedding_cache):
+        os.utime(path, (stale, stale))
+    return {'fixture_id': fixture_id, 'auth_token': token}
+
+
+@app.get('/api/v1/__e2e/maintenance/verify/{fixture_id}')
+async def verify_maintenance_artifacts(fixture_id: str):
+    """Report booleans for E2E sentinels without returning their contents."""
+    if not re.fullmatch(r'[0-9a-f]{32}', fixture_id):
+        raise HTTPException(status_code=422, detail='Invalid maintenance fixture id')
+    token = f'M15_PRIVATE_AUTH_SENTINEL_{fixture_id}'
+    upload_root = Path(settings.upload_dir)
+    embedding_root = Path(settings.embedding_cache_dir)
+    auth_file = Path(settings.codex_home) / f'm15-auth-{fixture_id}.json'
+    parser_cache = upload_root / f'.parsed-cache-{hashlib.sha256(fixture_id.encode()).hexdigest()}.json'
+    embedding_cache = embedding_root / f'.embedding-cache-{hashlib.sha256(fixture_id.encode()).hexdigest()}.json'
+    try:
+        auth_preserved = token in auth_file.read_text(encoding='utf-8')
+    except OSError:
+        auth_preserved = False
+    return {
+        'temporary_removed': not (upload_root / f'.artifact-abandoned-m15-{fixture_id}.tmp').exists(),
+        'parser_cache_removed': not parser_cache.exists(),
+        'embedding_cache_removed': not embedding_cache.exists(),
+        'authorization_preserved': auth_preserved,
+    }
 
 
 @app.post("/api/v1/__e2e/citation")

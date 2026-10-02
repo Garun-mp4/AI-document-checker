@@ -1,6 +1,7 @@
 """Exercise Linux kernel limits in disposable children of the test container."""
 import asyncio
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-assert os.environ.get('E2E_AUDIT_PROJECT') == 'document-checker-e2e', 'Use the isolated E2E project only'
+assert re.fullmatch(r'document-checker-e2e-[0-9a-f]{8}', os.environ.get('E2E_AUDIT_PROJECT', '')), 'Use a fresh isolated E2E project only'
 assert sys.platform == 'linux'
 prefix = 'from app.services.document_worker import restrict_process; restrict_process(256, 1, 4096); '
 

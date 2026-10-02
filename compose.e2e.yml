@@ -31,7 +31,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://e2e:synthetic-test-only@db:5432/e2e
       PYTHONPATH: /test_support:/app
-      LOCAL_UI_ORIGINS: '["http://localhost:5174","http://127.0.0.1:5174"]'
+      LOCAL_UI_ORIGINS: '${E2E_LOCAL_UI_ORIGINS:-["http://localhost:5174","http://127.0.0.1:5174"]}'
       CODEX_HOME: /data/codex
       UPLOAD_DIR: /data/uploads
       EMBEDDING_CACHE_DIR: /data/embeddings
@@ -80,7 +80,7 @@ services:
         APP_BUILD_ID: e2e
         APP_BUILD_COMMIT: synthetic
         APP_BUILD_TIME: '2026-10-01T00:00:00Z'
-    ports: ['127.0.0.1:5174:80']
+    ports: ['127.0.0.1:${E2E_WEB_PORT:-5174}:80']
     depends_on:
       api:
         condition: service_healthy

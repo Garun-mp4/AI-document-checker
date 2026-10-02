@@ -24,7 +24,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 
 from app.config import settings
 from app.database import SessionLocal
@@ -101,6 +101,7 @@ from app.services.document_security import (
 )
 from app.services.isolated_documents import run_document_operation
 from app.services.job_queue import active_chunk_version, cancel, cleanup_files, enqueue
+from app.services.maintenance import delete_documents
 from app.services.parsing import (
     SUPPORTED_EXTENSIONS,
     DocumentParsingError,
@@ -121,6 +122,13 @@ from app.services.source_locators import versioned_source_locator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
+
+
+def _reject_during_cache_cleanup(request: Request) -> None:
+    if getattr(request.app.state, "maintenance_cache_cleanup", False):
+        raise HTTPException(status_code=409, detail="Выполняется очистка кэша. Повторите запрос через несколько секунд.")
+    if getattr(request.app.state, "maintenance_delete_all", False):
+        raise HTTPException(status_code=409, detail="Выполняется очистка библиотеки. Повторите запрос после её завершения.")
 
 
 _DOCUMENT_MEDIA_TYPES = {
@@ -313,6 +321,7 @@ async def update_chat_settings(chat_id: uuid.UUID, body: ChatUpdateIn) -> ChatSe
 
 @router.post("/documents", response_model=DocumentOut, status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(request: Request, file: Annotated[UploadFile, File()]) -> DocumentOut:
+    _reject_during_cache_cleanup(request)
     if not file.filename:
         raise HTTPException(status_code=400, detail="У файла отсутствует имя.")
     try:
@@ -349,6 +358,7 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
         if not size:
             raise HTTPException(status_code=400, detail='Файл пустой.')
         await run_document_operation('validate', storage_path, filename=filename)
+        _reject_during_cache_cleanup(request)
         document = Document(
             id=document_id,
             filename=filename,
@@ -361,6 +371,8 @@ async def upload_document(request: Request, file: Annotated[UploadFile, File()])
             active_version=0, next_version=1,
         )
         async with SessionLocal() as session:
+            await session.execute(text("SELECT pg_advisory_xact_lock(73402105)"))
+            _reject_during_cache_cleanup(request)
             session.add(document)
             # Create the durable conversation before processing starts so a
             # queued or failed upload is still visible in the chat library.
@@ -403,6 +415,7 @@ async def get_document(document_id: uuid.UUID) -> DocumentOut:
 
 @router.post("/documents/{document_id}/retry", response_model=DocumentOut, status_code=202)
 async def retry_document(document_id: uuid.UUID, request: Request, operation: str = "retry") -> DocumentOut:
+    _reject_during_cache_cleanup(request)
     try:
         if operation not in {"retry", "analysis", "process"}:
             raise HTTPException(status_code=422, detail="Неизвестная операция.")
@@ -423,6 +436,7 @@ async def reprocess_document_ocr(
     body: OcrReprocessIn,
     request: Request,
 ) -> DocumentOut:
+    _reject_during_cache_cleanup(request)
     quality_dpi = {"fast": 150, "balanced": 200, "high": 300}
     async with SessionLocal() as session:
         document = await session.get(Document, document_id)
@@ -469,43 +483,7 @@ async def reprocess_document_ocr(
 
 @router.delete("/documents/{document_id}", status_code=204)
 async def delete_document(document_id: uuid.UUID, request: Request) -> None:
-    try:
-        await cancel(document_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail='Документ не найден.') from exc
-    # Wait for child teardown. Lease fencing still prevents writes if the worker died.
-    deadline = asyncio.get_running_loop().time() + settings.queue_heartbeat_seconds + 2
-    while asyncio.get_running_loop().time() < deadline:
-        async with SessionLocal() as session:
-            active = await session.scalar(select(ProcessingJob.id).where(
-                ProcessingJob.document_id == document_id, ProcessingJob.state == 'cancelling'))
-        if active is None:
-            break
-        await asyncio.sleep(0.1)
-    async with SessionLocal() as session:
-        document = await session.get(Document, document_id, with_for_update=True)
-        if document is None:
-            raise HTTPException(status_code=404, detail="Документ не найден.")
-        versions = (await session.execute(select(DocumentVersion).where(DocumentVersion.document_id == document_id))).scalars().all()
-        snapshots = [version.snapshot for version in versions]
-        path = document.storage_path
-        await session.delete(document)
-        await session.commit()
-    original_search_source_cache.remove_document(str(document_id))
-    preview_response_cache.remove_document(str(document_id))
-    table_response_cache.remove_document(str(document_id))
-    table_search_response_cache.remove_document(str(document_id))
-    for snapshot in snapshots:
-        try:
-            cleanup_files(snapshot, document_id)
-        except (OSError, ValueError, DocumentParsingError):
-            logger.warning("Refused unsafe or unavailable version artifact deletion")
-    for artifact in (path, document.markdown_path, document.markdown_map_path):
-        if artifact:
-            try:
-                remove_storage(owned_storage(artifact, document_id))
-            except (OSError, DocumentParsingError):
-                logger.warning('Refused unsafe or unavailable artifact deletion')
+    await delete_documents(request, [document_id], action="delete_selected")
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[SourceOut])
@@ -1039,6 +1017,7 @@ async def download_document_markdown(document_id: uuid.UUID, request: Request) -
 
 @router.post("/documents/{document_id}/markdown/rebuild", response_model=DocumentOut, status_code=202)
 async def rebuild_document_markdown(document_id: uuid.UUID, request: Request) -> DocumentOut:
+    _reject_during_cache_cleanup(request)
     try:
         await request.app.state.processor.retry(document_id, 'process')
     except KeyError as exc:
@@ -1091,6 +1070,7 @@ async def document_analysis_versions(document_id: uuid.UUID) -> list[DocumentAna
 
 @router.post("/documents/{document_id}/analysis/rebuild", status_code=202)
 async def rebuild_document_analysis(document_id: uuid.UUID, body: ReanalyzeIn, request: Request) -> dict[str, Any]:
+    _reject_during_cache_cleanup(request)
     codex = request.app.state.codex
     try:
         model, effort = await codex.validate_choice(body.model, body.reasoning_effort)
@@ -1332,6 +1312,7 @@ async def chat_messages(chat_id: uuid.UUID, request: Request) -> list[MessageOut
 
 async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text: str | None = None,
                                   retry_user_id: uuid.UUID | None = None) -> StreamingResponse:
+    _reject_during_cache_cleanup(request)
     codex = request.app.state.codex
     try:
         await codex.require_ready()
@@ -1353,6 +1334,8 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
         document = await session.get(Document, chat.document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
+        if str(document.id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
+            raise HTTPException(status_code=409, detail="Документ удаляется. Повторите запрос после обновления библиотеки.")
         if document.status != "ready":
             raise HTTPException(status_code=409, detail="Документ ещё обрабатывается или требует повторной обработки.")
         active_rows = (await session.execute(select(Message).where(
@@ -1468,6 +1451,9 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
                 message.generation_error = error[:500]
 
     async def generate():
+        if str(document_id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
+            await persist_interrupted("", "Ответ прерван из-за удаления документа.")
+            return
         current_task = asyncio.current_task()
         if current_task is not None:
             tasks[str(assistant_id)] = current_task

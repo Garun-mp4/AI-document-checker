@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -406,3 +407,32 @@ class AppVersionOut(BaseModel):
     build_id: str
     commit: str
     built_at: str
+
+
+class MaintenancePlanIn(BaseModel):
+    action: Literal["clear_temp", "clear_cache", "delete_selected", "delete_all"]
+    document_ids: list[str] = Field(default_factory=list, max_length=200)
+
+    @field_validator("document_ids")
+    @classmethod
+    def unique_document_ids(cls, values: list[str]) -> list[str]:
+        try:
+            normalized = [str(uuid.UUID(value)) for value in values]
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("Список содержит некорректный идентификатор документа.") from exc
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Список документов содержит повторы.")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> MaintenancePlanIn:
+        if self.action == "delete_selected" and not self.document_ids:
+            raise ValueError("Выберите хотя бы один чат с документом.")
+        if self.action != "delete_selected" and self.document_ids:
+            raise ValueError("Для этого действия список документов не требуется.")
+        return self
+
+
+class MaintenanceExecuteIn(BaseModel):
+    plan_id: str = Field(min_length=20, max_length=100)
+    confirmation: str = Field(max_length=80)

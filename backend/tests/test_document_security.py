@@ -334,10 +334,11 @@ def test_api_size_guard_and_cancel_remove_only_partial_upload(tmp_path, monkeypa
         async def close(self): self.closed = True
     keep = tmp_path / 'keep.txt'
     keep.write_bytes(b'keep')
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     for cancel in [False, True]:
         file = Upload(cancel)
         with pytest.raises(asyncio.CancelledError if cancel else HTTPException):
-            asyncio.run(api.upload_document(SimpleNamespace(), file))
+            asyncio.run(api.upload_document(request, file))
         assert file.closed
         assert list(tmp_path.iterdir()) == [keep]
     assert keep.read_bytes() == b'keep'
@@ -365,6 +366,8 @@ def test_streamed_http_limit_without_content_length_and_private_errors(tmp_path,
     asyncio.run(scenario())
     assert 'PRIVATE_DOCUMENT' not in caplog.text
     assert 'secret-token' not in caplog.text
+    assert 'broken' in caplog.text
+    assert 'test_document_security.py' in caplog.text
 
 
 @pytest.mark.parametrize('cancel_commit', [False, True])
@@ -394,6 +397,7 @@ def test_upload_commit_failure_or_cancellation_preserves_consistency(tmp_path, m
         class Session:
             async def __aenter__(self): return self
             async def __aexit__(self, *_args): pass
+            async def execute(self, _statement): pass  # The upload takes the library advisory lock before enqueueing.
             def add(self, _document): pass
             async def commit(self):
                 committing.set()

@@ -31,7 +31,11 @@ test('Stream Markdown, citations, reload, real container restart and new chat', 
   await page.reload()
   await showChat(page)
   await expect(page.locator('.assistant-message li')).toHaveCount(2)
-  const compose = ['compose', '-p', 'document-checker-e2e', '-f', 'compose.e2e.yml']
+  const project = process.env.E2E_COMPOSE_PROJECT
+  const composeFile = process.env.E2E_COMPOSE_FILE
+  expect(project, 'A fresh isolated E2E Compose project is required before restarting services').toMatch(/^document-checker-e2e-[0-9a-f]{8}$/)
+  expect(composeFile, 'The isolated E2E Compose file must be explicitly configured').toBeTruthy()
+  const compose = ['compose', '-p', project, '-f', composeFile]
   for (const service of ['db', 'api', 'worker', 'web']) {
     execFileSync('docker', [...compose, 'restart', service], { cwd: path.resolve('..'), timeout: 90_000 })
     execFileSync('docker', [...compose, 'up', '-d', '--wait', '--wait-timeout', '120', service], { cwd: path.resolve('..'), timeout: 150_000 })

@@ -1,4 +1,5 @@
 import logging
+import traceback
 
 from starlette.responses import JSONResponse
 
@@ -21,8 +22,12 @@ class PrivateErrorsMiddleware:
         try:
             await self.app(scope, receive, tracked_send)
         except Exception as exc:
-            # SQLAlchemy/SDK exceptions can embed document values and secrets.
-            logger.exception('Request failed (%s)', type(exc).__name__, exc_info=False)
+            # SQLAlchemy/SDK exceptions can embed document values and secrets. Log only
+            # source locations (never source lines, locals, or the exception message).
+            frames = traceback.extract_tb(exc.__traceback__)[-6:]
+            locations = ' > '.join(f'{frame.filename.rsplit("/", 1)[-1].rsplit(chr(92), 1)[-1]}:{frame.name}:{frame.lineno}'
+                                   for frame in frames)
+            logger.error('Request failed (%s) at %s', type(exc).__name__, locations or 'unknown')
             if not started:
                 await JSONResponse({'detail': 'Внутренняя ошибка. Повторите запрос.'}, status_code=500)(scope, receive, send)
             else:

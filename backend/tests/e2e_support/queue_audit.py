@@ -1,6 +1,7 @@
 """Real PostgreSQL invariants. Run only with the isolated worker stopped."""
 import asyncio
 import os
+import re
 import uuid
 from datetime import timedelta
 
@@ -20,7 +21,7 @@ from app.services.job_queue import (
     submit,
 )
 
-assert os.environ.get('E2E_AUDIT_PROJECT') == 'document-checker-e2e'
+assert re.fullmatch(r'document-checker-e2e-[0-9a-f]{8}', os.environ.get('E2E_AUDIT_PROJECT', ''))
 assert settings.database_url.endswith('/e2e')
 
 

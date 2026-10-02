@@ -11,6 +11,7 @@ import {
   CircleHelp,
   Clock3,
   Download,
+  Database,
   FileCode2,
   FileSpreadsheet,
   FileText,
@@ -47,6 +48,7 @@ import { ChatMarkdown } from './components/ChatMarkdown'
 import { ProcessingStatusPanel } from './components/ProcessingStatusPanel'
 import { BuildVersionNotice } from './components/BuildVersionNotice'
 import { UploadQueue } from './components/UploadQueue'
+import { LocalDataDialog } from './components/LocalDataDialog'
 import type { UploadQueueEntry, UploadQueueState } from './components/UploadQueue'
 import { useBuildVersion } from './useBuildVersion'
 
@@ -291,6 +293,7 @@ function App() {
   const [codexSaving, setCodexSaving] = useState(false)
   const [codexPreferenceMessage, setCodexPreferenceMessage] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
+  const [localDataOpen, setLocalDataOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [sendingChats, setSendingChats] = useState<Record<string, boolean>>({})
   const [chatStreams, setChatStreams] = useState<Record<string, { text: string; sources: StreamCitation[]; assistantId: string | null }>>({})
@@ -1399,6 +1402,18 @@ function App() {
     }
   }, [deleteTarget, refreshLibrary, selectedId, showToast])
 
+  const handleMaintenanceDeleted = useCallback((documentIds: string[]) => {
+    const clearAll = documentIds.includes('*')
+    setChats((current) => clearAll ? [] : current.filter((item) => !documentIds.includes(item.document_id)))
+    setChatLibraryTotal((current) => clearAll ? 0 : Math.max(0, current - documentIds.length))
+    if (clearAll || (selectedId && documentIds.includes(selectedId))) {
+      setSelectedId(null)
+      setNewChatOpen(true)
+      localStorage.setItem(NEW_CHAT_STORAGE_KEY, 'true')
+    }
+    void refreshLibrary()
+  }, [refreshLibrary, selectedId])
+
   const streamChatRequest = useCallback(async (targetChat: ChatRecord, text: string, retryUserId?: string) => {
     if (!text.trim() || sendingChats[targetChat.id]) return
     const temporaryUserId = retryUserId ? null : crypto.randomUUID()
@@ -1826,6 +1841,9 @@ function App() {
             {authReady && <span className="connection-model">{codexModelLabel(codex)} · {codexReasoningLabel(codex?.reasoning_effort)}</span>}
           </button>
           <button className="icon-button chat-visibility-toggle" type="button" aria-label={chatVisible ? 'Свернуть чат' : 'Открыть чат'} title={chatVisible ? 'Свернуть чат' : 'Открыть чат'} aria-expanded={chatVisible} aria-controls="document-chat" onClick={toggleChat}>{chatVisible ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
+          <button className="button button-light local-data-trigger" type="button" aria-label="Управление локальными данными" title="Управление локальными данными" onClick={() => setLocalDataOpen(true)}>
+            <Database size={15} /><span>Локальные данные</span>
+          </button>
           <UploadQueue
             items={uploadQueue}
             expanded={uploadQueueExpanded}
@@ -2333,6 +2351,7 @@ function App() {
         </section>
       </div>}
 
+      {localDataOpen && <LocalDataDialog onClose={() => setLocalDataOpen(false)} onDocumentsDeleted={handleMaintenanceDeleted} onActionComplete={showToast} />}
       {toast && <div className="toast-message" role="status" aria-live="polite">{toast}</div>}
     </div>
   )

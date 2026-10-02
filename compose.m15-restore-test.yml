@@ -1,0 +1,45 @@
+# Two disposable databases and document volumes used only by test-m15-backup-restore.ps1.
+services:
+  source-db:
+    image: pgvector/pgvector:0.8.6-pg17
+    environment:
+      POSTGRES_DB: m15source
+      POSTGRES_USER: m15test
+      POSTGRES_PASSWORD: m15-synthetic-only
+    volumes:
+      - source_database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U m15test -d m15source"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  restore-db:
+    image: pgvector/pgvector:0.8.6-pg17
+    environment:
+      POSTGRES_DB: m15restore
+      POSTGRES_USER: m15test
+      POSTGRES_PASSWORD: m15-synthetic-only
+    volumes:
+      - restore_database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U m15test -d m15restore"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  source-files:
+    image: pgvector/pgvector:0.8.6-pg17
+    user: "0:0"
+    entrypoint: ["sh", "-c", "mkdir -p /data && sleep infinity"]
+    volumes:
+      - source_documents:/data
+  restore-files:
+    image: pgvector/pgvector:0.8.6-pg17
+    user: "0:0"
+    entrypoint: ["sh", "-c", "mkdir -p /data && sleep infinity"]
+    volumes:
+      - restore_documents:/data
+volumes:
+  source_database:
+  restore_database:
+  source_documents:
+  restore_documents:

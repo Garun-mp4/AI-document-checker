@@ -189,3 +189,18 @@ class ProcessingJob(Base):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaintenanceEvent(Base):
+    """Privacy-safe audit record for local data maintenance operations."""
+
+    __tablename__ = 'maintenance_events'
+    __table_args__ = (Index('ix_maintenance_events_created_at', 'created_at'),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    bytes_changed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())

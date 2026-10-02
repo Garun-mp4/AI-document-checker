@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import re
 import subprocess
 import time
 import unittest
@@ -11,8 +12,18 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).resolve().parents[3]
-COMPOSE = ['docker', 'compose', '-p', 'document-checker-e2e', '-f', str(ROOT / 'compose.e2e.yml')]
-BASE = 'http://127.0.0.1:5174/api/v1'
+E2E_PROJECT = os.environ.get('E2E_COMPOSE_PROJECT', '')
+E2E_COMPOSE_FILE = os.environ.get('E2E_COMPOSE_FILE', str(ROOT / 'compose.e2e.yml'))
+COMPOSE = ['docker', 'compose', '-p', E2E_PROJECT, '-f', E2E_COMPOSE_FILE]
+E2E_BASE_URL = os.environ.get('AI_CHECKER_BASE_URL', '')
+BASE = E2E_BASE_URL.rstrip('/') + '/api/v1'
+
+
+def require_isolated_project():
+    if not re.fullmatch(r'document-checker-e2e-[0-9a-f]{8}', E2E_PROJECT):
+        raise RuntimeError('E2E destructive queue acceptance requires an isolated document-checker-e2e project')
+    if not re.fullmatch(r'https?://(?:127\.0\.0\.1|localhost):5175', E2E_BASE_URL):
+        raise RuntimeError('E2E destructive queue acceptance requires the dedicated local test port 5175')
 
 
 def compose(*args):
@@ -23,12 +34,13 @@ def compose(*args):
 class QueueAcceptance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        require_isolated_project()
         cls.client = httpx.Client(base_url=BASE, trust_env=False, timeout=40)
         cls.client.post('/__e2e/provider', json={}).raise_for_status()
         # Run admission races with no other consumer claiming the controlled rows.
         compose('stop', 'worker')
         try:
-            print(compose('exec', '-T', '-e', 'E2E_AUDIT_PROJECT=document-checker-e2e',
+            print(compose('exec', '-T', '-e', f'E2E_AUDIT_PROJECT={E2E_PROJECT}',
                           'api', 'python', '/test_support/queue_audit.py'), flush=True)
         finally:
             compose('start', 'worker')
@@ -274,5 +286,7 @@ class QueueAcceptance(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    assert os.environ.get('E2E_AUDIT_PROJECT') == 'document-checker-e2e', 'Synthetic project authorization required'
+    assert os.environ.get('E2E_AUDIT_PROJECT') == E2E_PROJECT and re.fullmatch(
+        r'document-checker-e2e-[0-9a-f]{8}', E2E_PROJECT
+    ), 'Synthetic project authorization required'
     unittest.main(verbosity=2)

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api import router
+from app.services.maintenance import router as maintenance_router
 from app.config import settings
 from app.database import engine
 from app.private_errors import PrivateErrorsMiddleware
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Document Checker API", version="1.0.0", lifespan=lifespan)
 app.include_router(router)
+app.include_router(maintenance_router)
 app.add_middleware(UploadBodyLimitMiddleware)
 app.add_middleware(PrivateErrorsMiddleware)
 

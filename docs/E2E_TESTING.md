@@ -12,13 +12,19 @@ backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt -r b
 pwsh -File scripts/test-e2e.ps1
 ```
 
-Команда генерирует 47 синтетических файлов, запускает backend unit с coverage, frontend contracts/build, production Compose `document-checker-e2e` на **5174**, Linux-аудит защит, Chromium E2E и семь API-интеграционных тестов. У проекта собственные PostgreSQL, оригиналы, Markdown, preferences и embeddings volumes. Скрипт очищает только volumes этого явно названного тестового проекта перед/после прогона. Рабочий проект на 5173 не затрагивается.
+Чтобы прогнать весь backend unit-набор и только M15 UI/API/backup acceptance, не запуская посторонние браузерные и queue-сценарии:
+
+```powershell
+pwsh -File scripts/test-e2e.ps1 -M15Only
+```
+
+Обычный запуск генерирует 47 синтетических файлов и выполняет полную приёмку: backend unit с coverage, frontend contracts/build, production Compose под новым случайным именем `document-checker-e2e-<8 hex>` на **5175**, Linux-аудит защит, Chromium E2E, queue acceptance, общие API-интеграционные тесты, приёмку M15 и изолированную проверку восстановления backup. Режим `-M15Only` выполняет backend unit, frontend contracts/build, Compose/Linux security acceptance, M15 Chromium и API acceptance и изолированное восстановление backup; общие Chromium, queue и API integration сценарии в нём пропускаются. На каждый запуск создаются отдельные PostgreSQL, originals, Markdown, preferences и embeddings volumes; после прогона удаляются только volumes проекта с этим новым случайным именем. Скрипт отказывается запускаться, если 5175 уже занят. Рабочий проект и прежнее тестовое окружение на 5173/5174 не затрагиваются.
 
 `-KeepRunning` оставляет окружение для диагностики; следующий запуск всё равно начинает с чистой тестовой базы. Первый запуск скачивает Chromium и локальную multilingual embedding model. OCR работает настоящими Poppler/Tesseract rus+eng. Текст документов не передаётся в облако.
 
 Тестовый Codex существует только в исключённом из production-образа каталоге `backend/tests/e2e_support`; штатный entrypoint его не импортирует. Подменён только облачный провайдер. Парсеры, MarkItDown, embeddings, OCR, БД, сохранение сообщений и renderer настоящие. Fault-сценарии отдельно подменяют один вызов конвертации или браузерный fetch. Synthetic answers проверяют механику, а не интеллект Codex.
 
-`LOCAL_UI_ORIGINS` задаёт точный JSON-список разрешённых origins; production default остаётся localhost/127.0.0.1:5173, изолированный E2E разрешает только 5174.
+`LOCAL_UI_ORIGINS` задаёт точный JSON-список разрешённых origins; production default остаётся localhost/127.0.0.1:5173, изолированный E2E разрешает только 5175.
 
 Unit и integration запускаются раздельно (`-m "not integration"` / `-m integration`), поэтому полная приёмка не скрывает отсутствие Compose через skip. Интеграционные тесты выполняются с disconnected provider, браузерные — с ready provider. В E2E нет ретраев и `test.skip`, состояние ожидается по API/DOM; stream gate открывается после проверки промежуточного ответа.
 
@@ -33,16 +39,20 @@ Unit и integration запускаются раздельно (`-m "not integrat
 
 ```powershell
 cd frontend
+$env:PLAYWRIGHT_BASE_URL = 'http://127.0.0.1:5175'
+$env:E2E_COMPOSE_PROJECT = 'document-checker-e2e-<8-hex-этого-прогона>'
+$env:E2E_COMPOSE_FILE = (Join-Path (Resolve-Path ..) 'compose.e2e.yml')
 npm run test:e2e -- -g "pdf: upload"
 npx playwright show-report
 # При сбое подставьте реальный путь из сообщения теста:
 npx playwright show-trace test-results/<failed-test>/trace.zip
+Remove-Item Env:PLAYWRIGHT_BASE_URL, Env:E2E_COMPOSE_PROJECT, Env:E2E_COMPOSE_FILE
 ```
 
-В `compose.e2e.yml` фиксированы project services и loopback port. Не перенаправляйте эти тесты на рабочую библиотеку. Тест истории перезапускает только `document-checker-e2e` api/db/web. Cleanup:
+В `compose.e2e.yml` фиксированы services, а имя проекта и loopback port задаёт `scripts/test-e2e.ps1`. Не перенаправляйте тесты на рабочую библиотеку. Скрипт сам генерирует уникальный project name и удаляет только созданные им тестовые volumes. Не запускайте cleanup ниже для существующего проекта: используйте только имя случайного проекта из конкретного текущего прогона, если тот завершился с `-KeepRunning`.
 
 ```powershell
-docker compose -p document-checker-e2e -f compose.e2e.yml down -v --remove-orphans
+docker compose -p document-checker-e2e-<8-hex-этого-прогона> -f compose.e2e.yml down -v --remove-orphans
 ```
 
 ## Явно включаемый live Codex
