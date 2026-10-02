@@ -57,6 +57,7 @@ const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.jso
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
 const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
+const ANALYSIS_LAYOUT_STORAGE_KEY = 'document-checker-analysis-layout'
 const UPLOAD_QUEUE_STORAGE_KEY = 'document-checker-upload-queue'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
 const DEFAULT_CODEX_REASONING = 'medium'
@@ -64,6 +65,12 @@ const ALLOWED_CODEX_MODELS = new Set(['gpt-6-luna', 'gpt-6.1-sol'])
 const CHAT_LIBRARY_PAGE_SIZE = 30
 
 type ChatLibraryActionMenu = { chatId: string; top: number; left: number }
+type AnalysisLayoutMode = 'auto' | 'stacked' | 'split'
+
+function restoreAnalysisLayoutMode(): AnalysisLayoutMode {
+  const stored = localStorage.getItem(ANALYSIS_LAYOUT_STORAGE_KEY)
+  return stored === 'stacked' || stored === 'split' ? stored : 'auto'
+}
 
 function restoreUploadQueue(): UploadQueueEntry[] {
   try {
@@ -267,6 +274,7 @@ function App() {
   const [uploadQueueExpanded, setUploadQueueExpanded] = useState(false)
   const [uploadActive, setUploadActive] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(true)
+  const [analysisLayoutMode, setAnalysisLayoutMode] = useState<AnalysisLayoutMode>(restoreAnalysisLayoutMode)
   const [chatOpen, setChatOpen] = useState(true)
   const [chatFull, setChatFull] = useState(false)
   const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem('document-checker-chat-width')) || 360)
@@ -319,6 +327,7 @@ function App() {
   const [exportPending, setExportPending] = useState(false)
   const [exportError, setExportError] = useState('')
   const [previewPage, setPreviewPage] = useState(1)
+  const isTablePreview = ['csv', 'xlsx', 'xls'].includes(documentPreview?.renderer || '')
   const { check: buildVersionCheck, recheck: recheckBuildVersion } = useBuildVersion()
   const fileInput = useRef<HTMLInputElement>(null)
   const retryFileInput = useRef<HTMLInputElement>(null)
@@ -857,6 +866,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(sidebarCollapsed))
   }, [sidebarCollapsed])
+
+  useEffect(() => {
+    localStorage.setItem(ANALYSIS_LAYOUT_STORAGE_KEY, analysisLayoutMode)
+  }, [analysisLayoutMode])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1998,7 +2011,29 @@ function App() {
                   <div className="fact-item"><Clock3 size={15} /><span>Добавлен {relativeDate(document.created_at)}</span></div>
                 </div>
 
-                <div className={`document-analysis-layout ${['csv', 'xlsx', 'xls'].includes(documentPreview?.renderer || '') ? 'is-table-layout' : ''}`}>
+                <div className={`workspace-layout-picker mode-${analysisLayoutMode} ${isTablePreview ? 'is-table-layout' : ''}`} data-testid="workspace-layout-picker">
+                  <fieldset className="workspace-layout-fieldset">
+                    <legend>Расположение</legend>
+                    <div className="workspace-layout-options">
+                      <label className={`workspace-layout-option ${analysisLayoutMode === 'auto' ? 'is-selected' : ''}`}>
+                        <input type="radio" name="workspace-layout-mode" value="auto" checked={analysisLayoutMode === 'auto'} onChange={() => setAnalysisLayoutMode('auto')} />
+                        <span>Авто</span>
+                      </label>
+                      <label className={`workspace-layout-option ${analysisLayoutMode === 'stacked' ? 'is-selected' : ''}`}>
+                        <input type="radio" name="workspace-layout-mode" value="stacked" checked={analysisLayoutMode === 'stacked'} onChange={() => setAnalysisLayoutMode('stacked')} />
+                        <span>Документ сверху</span>
+                      </label>
+                      <label className={`workspace-layout-option ${analysisLayoutMode === 'split' ? 'is-selected' : ''}`}>
+                        <input type="radio" name="workspace-layout-mode" value="split" checked={analysisLayoutMode === 'split'} onChange={() => setAnalysisLayoutMode('split')} />
+                        <span>Документ слева</span>
+                      </label>
+                    </div>
+                  </fieldset>
+                  {isTablePreview && <p className="workspace-layout-note workspace-layout-table-note" role="status">Для табличных документов оригинал остаётся над ответами, чтобы таблица сохраняла полезную ширину.</p>}
+                  <p className="workspace-layout-note workspace-layout-split-note" role="status">Центральная область узкая для двух колонок, поэтому документ временно показан сверху. Выбор сохранён.</p>
+                </div>
+
+                <div className={`document-analysis-layout ${isTablePreview ? 'is-table-layout' : ''}`} data-layout-mode={analysisLayoutMode}>
                 <section id="document-original-viewer" className={`source-viewer ${previewOpen ? 'viewer-open' : 'viewer-closed'}`} aria-label="Оригинал документа">
                   <div className="viewer-heading">
                     <div className="viewer-heading-label"><BookOpen size={16} /><strong>Оригинал документа</strong><span>{documentPreview ? `${documentPreview.source_count} ${pluralLabel(documentPreview.source_count, 'источник', 'источника', 'источников')}` : `${document.chunk_count} ${pluralLabel(document.chunk_count, 'источник', 'источника', 'источников')}`}</span></div>
