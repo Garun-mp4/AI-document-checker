@@ -6,6 +6,7 @@ import test from 'node:test'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const app = await readFile(resolve(root, 'src/App.tsx'), 'utf8')
+const layoutSelector = await readFile(resolve(root, 'src/components/DocumentLayoutSelector.tsx'), 'utf8')
 const chatMarkdown = await readFile(resolve(root, 'src/components/ChatMarkdown.tsx'), 'utf8')
 const markdownViewer = await readFile(resolve(root, 'src/components/MarkdownViewer.tsx'), 'utf8')
 const originalViewer = await readFile(resolve(root, 'src/components/OriginalDocumentViewer.tsx'), 'utf8')
@@ -75,9 +76,10 @@ test('UI help only highlights a registered current-build target after an explici
 test('confirmed user-facing targets are registered at their actual controls', () => {
   for (const targetId of [
     'document.upload.open', 'chat-library.toggle', 'chat.new', 'codex.settings.open',
-    'workspace.layout.select', 'document.original.open', 'document.markdown.open',
+    'document.original.open', 'document.markdown.open',
     'document.bookmarks.open', 'document.export.open', 'local-data.open',
   ]) assert.match(app, new RegExp(`data-help-target="${targetId.replaceAll('.', '\\.') }"`))
+  assert.match(layoutSelector, /data-help-target="workspace\.layout\.select"/)
   assert.match(app, /data-help-target=\{index === 0 && insight\.citations\.length > 0 \? 'document\.citations\.open'/)
   assert.match(searchToolbar, /data-help-target="document\.search\.open"/)
   assert.match(originalViewer, /data-help-target="document\.ocr\.settings"/)

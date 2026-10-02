@@ -43,6 +43,8 @@ import {
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import type { AdditionalAnalysis, AdditionalAnalysisMode, ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentBookmark, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import { DocumentLayoutSelector } from './components/DocumentLayoutSelector'
+import type { AnalysisLayoutMode } from './components/DocumentLayoutSelector'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
@@ -77,7 +79,6 @@ const ALLOWED_CODEX_MODELS = new Set(['gpt-6-luna', 'gpt-6.1-sol'])
 const CHAT_LIBRARY_PAGE_SIZE = 30
 
 type ChatLibraryActionMenu = { chatId: string; top: number; left: number }
-type AnalysisLayoutMode = 'auto' | 'stacked' | 'split'
 
 function restoreAnalysisLayoutMode(): AnalysisLayoutMode {
   const stored = localStorage.getItem(ANALYSIS_LAYOUT_STORAGE_KEY)
@@ -2331,23 +2332,7 @@ function App() {
                 </div>
 
                 <div className={`workspace-layout-picker mode-${analysisLayoutMode} ${isTablePreview ? 'is-table-layout' : ''}`} data-testid="workspace-layout-picker">
-                  <fieldset ref={workspaceLayoutHelpTargetRef} data-help-target="workspace.layout.select" className="workspace-layout-fieldset">
-                    <legend>Расположение</legend>
-                    <div className="workspace-layout-options">
-                      <label className={`workspace-layout-option ${analysisLayoutMode === 'auto' ? 'is-selected' : ''}`}>
-                        <input type="radio" name="workspace-layout-mode" value="auto" checked={analysisLayoutMode === 'auto'} onChange={() => setAnalysisLayoutMode('auto')} />
-                        <span>Авто</span>
-                      </label>
-                      <label className={`workspace-layout-option ${analysisLayoutMode === 'stacked' ? 'is-selected' : ''}`}>
-                        <input type="radio" name="workspace-layout-mode" value="stacked" checked={analysisLayoutMode === 'stacked'} onChange={() => setAnalysisLayoutMode('stacked')} />
-                        <span>Документ сверху</span>
-                      </label>
-                      <label className={`workspace-layout-option ${analysisLayoutMode === 'split' ? 'is-selected' : ''}`}>
-                        <input type="radio" name="workspace-layout-mode" value="split" checked={analysisLayoutMode === 'split'} onChange={() => setAnalysisLayoutMode('split')} />
-                        <span>Документ слева</span>
-                      </label>
-                    </div>
-                  </fieldset>
+                  <DocumentLayoutSelector value={analysisLayoutMode} onChange={setAnalysisLayoutMode} helpTargetRef={workspaceLayoutHelpTargetRef} />
                   {isTablePreview && <p className="workspace-layout-note workspace-layout-table-note" role="status">Для табличных документов оригинал остаётся над ответами, чтобы таблица сохраняла полезную ширину.</p>}
                   <p className="workspace-layout-note workspace-layout-split-note" role="status">Центральная область узкая для двух колонок, поэтому документ временно показан сверху. Выбор сохранён.</p>
                 </div>

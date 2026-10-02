@@ -9,25 +9,32 @@ test('workspace layout is user-selectable, responsive, persistent, and preserves
   await upload(page, 'sample.docx')
   await originalVisible(page, 'docx')
   const layout = page.locator('.document-analysis-layout')
-  const splitRadio = page.getByRole('radio', { name: 'Документ слева', exact: true })
-  const stackedRadio = page.getByRole('radio', { name: 'Документ сверху', exact: true })
-  const autoRadio = page.getByRole('radio', { name: 'Авто', exact: true })
+  const layoutSelect = page.getByRole('combobox', { name: 'Расположение' })
+  const modeOption = label => page.getByRole('option').filter({ has: page.getByText(label, { exact: true }) })
+  const chooseMode = async label => {
+    await layoutSelect.click()
+    await modeOption(label).click()
+  }
 
-  await expect(autoRadio).toBeChecked()
+  await expect(layoutSelect).toContainText('Авто')
   await page.setViewportSize({ width: 1920, height: 1080 })
   await expect.poll(() => layout.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(' ').length)).toBe(2)
 
   await page.setViewportSize({ width: 1280, height: 720 })
   await expect.poll(() => layout.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(' ').length)).toBe(1)
 
-  await autoRadio.focus()
-  await page.keyboard.press('ArrowRight')
-  await expect(stackedRadio).toBeChecked()
+  await layoutSelect.focus()
+  await page.keyboard.press('ArrowDown')
+  await expect(modeOption('Авто')).toHaveAttribute('data-highlighted', '')
+  await page.keyboard.press('ArrowDown')
+  await expect(modeOption('Документ сверху')).toHaveAttribute('data-highlighted', '')
+  await page.keyboard.press('Enter')
+  await expect(layoutSelect).toContainText('Документ сверху')
   await expect(layout).toHaveAttribute('data-layout-mode', 'stacked')
   await expect.poll(() => layout.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(' ').length)).toBe(1)
 
-  await page.getByText('Документ слева', { exact: true }).click()
-  await expect(splitRadio).toBeChecked()
+  await chooseMode('Документ слева')
+  await expect(layoutSelect).toContainText('Документ слева')
   await expect(layout).toHaveAttribute('data-layout-mode', 'split')
   await expect(page.getByRole('status').filter({ hasText: 'временно показан сверху' })).toBeVisible()
 
@@ -49,10 +56,24 @@ test('workspace layout is user-selectable, responsive, persistent, and preserves
       await expect(page.locator('.insight-card')).toHaveCount(7)
       await page.screenshot({ path: 'test-results/layout-split-mobile.png' })
     }
+    if (width === 430 || width === 390) {
+      await layoutSelect.click()
+      const listbox = page.getByRole('listbox')
+      await expect(listbox.getByRole('option')).toHaveCount(3)
+      const popup = await listbox.boundingBox()
+      expect(popup, `layout selector popup is rendered at ${width}px`).toBeTruthy()
+      expect(popup.x).toBeGreaterThanOrEqual(0)
+      expect(popup.x + popup.width).toBeLessThanOrEqual(width + 1)
+      for (const optionCopy of await listbox.locator('.workspace-layout-option-copy').all()) {
+        const dimensions = await optionCopy.evaluate(element => ({ scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }))
+        expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1)
+      }
+      await page.keyboard.press('Escape')
+    }
   }
 
   await page.reload()
-  await expect(page.getByRole('radio', { name: 'Документ слева', exact: true })).toBeChecked()
+  await expect(page.getByRole('combobox', { name: 'Расположение' })).toContainText('Документ слева')
   await expect(layout).toHaveAttribute('data-layout-mode', 'split')
   await expect(page.locator('.insight-card')).toHaveCount(7)
   await expect.poll(() => layout.evaluate(element => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(1)
@@ -71,25 +92,50 @@ test('workspace layout is user-selectable, responsive, persistent, and preserves
   await expect(page.locator('.preview-source-callout')).toContainText('Выбран источник')
   await expect(page.locator('#document-original-viewer .source-match').first()).toBeVisible()
 
-  await page.getByText('Документ сверху', { exact: true }).click()
-  await expect(stackedRadio).toBeChecked()
+  await chooseMode('Документ сверху')
+  await expect(layoutSelect).toContainText('Документ сверху')
   await expect.poll(async () => {
     const [viewerBox, insightsBox] = await Promise.all([viewer.boundingBox(), insights.boundingBox()])
     return Boolean(viewerBox && insightsBox && insightsBox.y >= viewerBox.y + viewerBox.height)
   }).toBeTruthy()
   await expect(page.locator('#document-original-viewer .source-match').first()).toBeVisible()
 
-  await page.getByText('Документ слева', { exact: true }).click()
-  await expect(page.getByRole('radio', { name: 'Документ слева', exact: true })).toBeChecked()
+  await chooseMode('Документ слева')
+  await expect(layoutSelect).toContainText('Документ слева')
   await page.setViewportSize({ width: 1920, height: 1080 })
   await upload(page, 'sample.csv')
   await originalVisible(page, 'csv')
   const tableLayout = page.locator('.document-analysis-layout')
-  await expect(page.getByRole('radio', { name: 'Документ слева', exact: true })).toBeChecked()
+  await expect(page.getByRole('combobox', { name: 'Расположение' })).toContainText('Документ слева')
   await expect(tableLayout).toHaveClass(/is-table-layout/)
   await expect.poll(() => tableLayout.evaluate(element => getComputedStyle(element).display)).toBe('block')
   await expect(page.getByRole('status').filter({ hasText: 'табличных документов' })).toBeVisible()
   await expect(page.locator('.original-csv-table')).toBeVisible()
+})
+
+test('workspace layout selector closes on Escape and outside click and exposes its selected option', async ({ page }) => {
+  await upload(page, 'sample.txt')
+  const trigger = page.getByRole('combobox', { name: 'Расположение' })
+  const listbox = page.getByRole('listbox')
+
+  await trigger.focus()
+  await page.keyboard.press('Enter')
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  await expect(listbox.getByRole('option')).toHaveCount(3)
+  await expect(listbox.getByRole('option').filter({ has: page.getByText('Авто', { exact: true }) })).toHaveCSS('outline-width', '2px')
+  const listboxId = await trigger.getAttribute('aria-controls')
+  expect(listboxId).toBeTruthy()
+  await expect(page.locator(`#${listboxId}`)).toHaveAttribute('role', 'listbox')
+  await expect(listbox.getByRole('option').filter({ has: page.getByText('Авто', { exact: true }) })).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('Escape')
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(listbox).toHaveCount(0)
+
+  await trigger.click()
+  await expect(listbox).toBeVisible()
+  await page.locator('.document-facts').click()
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(listbox).toHaveCount(0)
 })
 
 test('small desktop height keeps workspace panels usable without page-level scrolling', async ({ page }) => {
