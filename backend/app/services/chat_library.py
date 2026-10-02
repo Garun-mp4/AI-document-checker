@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chat, Document, Message
@@ -56,7 +56,7 @@ def _search_snippet(value: str | None, query: str) -> str | None:
 
 def _summary_from_values(
     chat: Any,
-    document: Any,
+    document: Any | None,
     *,
     message_count: int,
     first_user_message: str | None,
@@ -67,22 +67,26 @@ def _summary_from_values(
     search_message_id: Any = None,
     search_message_content: str | None = None,
 ) -> ChatSummaryOut:
+    scope = getattr(chat, "scope", "document")
+    is_application_chat = scope == "application"
     custom_title = getattr(chat, "title", None)
-    title = _trim_title(custom_title or first_user_message or document.filename)
+    fallback_title = "Помощь по приложению" if is_application_chat else document.filename
+    title = _trim_title(custom_title or first_user_message or fallback_title)
     return ChatSummaryOut(
         id=str(chat.id),
-        document_id=str(document.id),
+        scope=scope,
+        document_id=str(document.id) if document is not None else None,
         title=title,
         custom_title=custom_title,
         pinned=getattr(chat, "pinned_at", None) is not None,
         revision=getattr(chat, "revision", 1),
-        filename=document.filename,
-        file_type=document.file_type,
-        file_size=document.file_size,
-        status=document.status,
-        error_message=document.error_message,
-        chunk_count=document.chunk_count,
-        metadata=document.metadata_json or {},
+        filename=document.filename if document is not None else None,
+        file_type=document.file_type if document is not None else None,
+        file_size=document.file_size if document is not None else None,
+        status=document.status if document is not None else None,
+        error_message=document.error_message if document is not None else None,
+        chunk_count=document.chunk_count if document is not None else 0,
+        metadata=(document.metadata_json or {}) if document is not None else {},
         created_at=chat.created_at,
         last_activity_at=last_activity_at,
         message_count=message_count,
@@ -93,7 +97,7 @@ def _summary_from_values(
     )
 
 
-def build_chat_summary(chat: Any, document: Any, messages: list[Any]) -> ChatSummaryOut:
+def build_chat_summary(chat: Any, document: Any | None, messages: list[Any]) -> ChatSummaryOut:
     """Build a library row from an already-loaded chat and its messages."""
 
     first_user_message = next(
@@ -101,7 +105,7 @@ def build_chat_summary(chat: Any, document: Any, messages: list[Any]) -> ChatSum
         None,
     )
     latest_message = max(messages, key=lambda item: (item.created_at, str(getattr(item, "id", ""))), default=None)
-    fallback_activity = max(chat.created_at, document.updated_at)
+    fallback_activity = max(chat.created_at, document.updated_at) if document is not None else chat.created_at
     return _summary_from_values(
         chat,
         document,
@@ -173,10 +177,7 @@ def _summary_query(search_query: str | None):
             match_ranked.c.content,
         ).where(match_ranked.c.rank == 1).cte("chat_search_match")
 
-    activity = func.coalesce(
-        latest.c.created_at,
-        case((Chat.created_at >= Document.updated_at, Chat.created_at), else_=Document.updated_at),
-    )
+    activity = func.coalesce(latest.c.created_at, Document.updated_at, Chat.created_at)
     statement = (
         select(
             Chat,
@@ -190,7 +191,7 @@ def _summary_query(search_query: str | None):
             match.c.message_id.label("search_message_id") if match is not None else None,
             match.c.content.label("search_message_content") if match is not None else None,
         )
-        .join(Document, Document.id == Chat.document_id)
+        .outerjoin(Document, Document.id == Chat.document_id)
         .outerjoin(latest, latest.c.chat_id == Chat.id)
         .outerjoin(counts, counts.c.chat_id == Chat.id)
         .outerjoin(first_user, first_user.c.chat_id == Chat.id)
@@ -217,7 +218,7 @@ async def list_chat_library(
 
     search_query = normalize_search_query(query)
     statement, activity = _summary_query(search_query)
-    count_statement = select(func.count()).select_from(Chat).join(Document, Document.id == Chat.document_id)
+    count_statement = select(func.count()).select_from(Chat).outerjoin(Document, Document.id == Chat.document_id)
     if search_query:
         pattern = escape_like_query(search_query)
         matched_message = select(Message.id).where(
@@ -228,6 +229,7 @@ async def list_chat_library(
             Chat.title.ilike(pattern, escape="\\"),
             Document.filename.ilike(pattern, escape="\\"),
             matched_message,
+            (Chat.scope == "application") & literal("Помощь по приложению").ilike(pattern, escape="\\"),
         ))
     total = int(await session.scalar(count_statement) or 0)
 
@@ -279,8 +281,8 @@ async def get_chat_settings(session: AsyncSession, chat_id: Any) -> ChatSettings
     chat = await session.get(Chat, chat_id)
     if chat is None:
         return None
-    document = await session.get(Document, chat.document_id)
-    if document is None:
+    document = await session.get(Document, chat.document_id) if chat.document_id is not None else None
+    if chat.scope == "document" and document is None:
         return None
     first_user_message = await session.scalar(
         select(Message.content)
@@ -288,10 +290,13 @@ async def get_chat_settings(session: AsyncSession, chat_id: Any) -> ChatSettings
         .order_by(Message.created_at, Message.id)
         .limit(1)
     )
-    title = _trim_title(chat.title or first_user_message or document.filename)
+    title = _trim_title(chat.title or first_user_message or (
+        "Помощь по приложению" if chat.scope == "application" else document.filename
+    ))
     return ChatSettingsOut(
         id=str(chat.id),
-        document_id=str(chat.document_id),
+        scope=chat.scope,
+        document_id=str(chat.document_id) if chat.document_id is not None else None,
         title=title,
         custom_title=chat.title,
         pinned=chat.pinned_at is not None,

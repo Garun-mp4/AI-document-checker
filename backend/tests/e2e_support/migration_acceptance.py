@@ -1,4 +1,4 @@
-"""Exercise the additive M16 migration against real isolated Compose data."""
+"""Exercise the additive APP-M02 migration against real isolated Compose data."""
 
 from __future__ import annotations
 
@@ -21,6 +21,23 @@ def request(path: str) -> Any:
     with urllib.request.urlopen(f"{BASE_URL}{path}", timeout=15) as response:
         body = response.read()
     return json.loads(body) if body else None
+
+
+def post(path: str, payload: dict[str, Any]) -> Any:
+    body = json.dumps(payload).encode("utf-8")
+    call = urllib.request.Request(
+        f"{BASE_URL}{path}", data=body, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(call, timeout=15) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else None
+
+
+def delete(path: str) -> Any:
+    call = urllib.request.Request(f"{BASE_URL}{path}", method="DELETE")
+    with urllib.request.urlopen(call, timeout=15) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else None
 
 
 def original_digest(document_id: str) -> str:
@@ -82,11 +99,11 @@ def migration_snapshot() -> dict[str, Any]:
 
 def main() -> None:
     if not BASE_URL.startswith(("http://127.0.0.1:5175", "http://localhost:5175")):
-        raise RuntimeError("M16 migration acceptance requires the isolated E2E origin on port 5175.")
+        raise RuntimeError("APP-M02 migration acceptance requires the isolated E2E origin on port 5175.")
     if re.fullmatch(r"document-checker-e2e-[0-9a-f]{8}", PROJECT) is None:
-        raise RuntimeError("M16 migration acceptance requires the unique isolated E2E Compose project.")
+        raise RuntimeError("APP-M02 migration acceptance requires the unique isolated E2E Compose project.")
     if not COMPOSE_FILE:
-        raise RuntimeError("M16 migration acceptance requires the explicit isolated Compose file.")
+        raise RuntimeError("APP-M02 migration acceptance requires the explicit isolated Compose file.")
 
     before = migration_snapshot()
     stopped = False
@@ -112,7 +129,22 @@ def main() -> None:
         f"/api/v1/documents/{before['document']['id']}/analysis/additional",
     ):
         assert isinstance(request(endpoint), list), "The new M09 routes did not become available after migration upgrade."
-    print("M16 migration upgrade 0010 -> 0011 preserved existing documents, original bytes, chats, messages, citations and legacy locators.")
+    app_chat = post("/api/v1/chats/application", {})
+    assert app_chat["scope"] == "application" and app_chat["document_id"] is None
+    assert request(f"/api/v1/chats/{app_chat['id']}")["scope"] == "application"
+    assert request(f"/api/v1/chats/{app_chat['id']}/messages") == []
+    try:
+        refused_downgrade = subprocess.run(
+            ["docker", "compose", "-p", PROJECT, "-f", str(Path(COMPOSE_FILE).resolve()),
+             "run", "--rm", "--no-deps", "api", "alembic", "downgrade", "0011_bookmarks_analysis"],
+            check=False, capture_output=True, text=True, timeout=360,
+        )
+        downgrade_output = f"{refused_downgrade.stdout}\n{refused_downgrade.stderr}"
+        assert refused_downgrade.returncode != 0 and "refusing to delete saved conversations" in downgrade_output.lower()
+        assert request(f"/api/v1/chats/{app_chat['id']}")["scope"] == "application"
+    finally:
+        delete(f"/api/v1/chats/{app_chat['id']}")
+    print("APP-M02 migration upgrade preserved existing document chats, messages, citations and original bytes; application chats work without documents and unsafe downgrade is refused.")
 
 
 if __name__ == "__main__":

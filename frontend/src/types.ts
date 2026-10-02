@@ -61,15 +61,16 @@ export interface DocumentRecord {
 
 export interface ChatSummary {
   id: string
-  document_id: string
+  scope: 'document' | 'application'
+  document_id: string | null
   title: string
   custom_title: string | null
   pinned: boolean
   revision: number
-  filename: string
-  file_type: string
-  file_size: number
-  status: DocumentStatus
+  filename: string | null
+  file_type: string | null
+  file_size: number | null
+  status: DocumentStatus | null
   error_message: string | null
   chunk_count: number
   metadata: Record<string, unknown>
@@ -92,7 +93,8 @@ export interface ChatLibraryPage {
 
 export interface ChatSettings {
   id: string
-  document_id: string
+  scope: 'document' | 'application'
+  document_id: string | null
   title: string
   custom_title: string | null
   pinned: boolean
@@ -105,6 +107,8 @@ export interface SourceRef {
   locator: Record<string, unknown>
   ordinal: number
   is_derived: boolean
+  source_type?: 'document' | 'application'
+  title?: string | null
 }
 
 export type PreviewLayout = 'pdf' | 'paper' | 'table' | 'tree' | 'slides'
@@ -301,7 +305,8 @@ export interface ChatMessage {
 
 export interface ChatRecord {
   id: string
-  document_id: string
+  scope: 'document' | 'application'
+  document_id: string | null
   context_epoch?: number
 }
 
@@ -344,10 +349,12 @@ export interface CodexReasoningOption {
 }
 
 export interface StreamCitation {
-  label: string
+  label?: string
   id: string
   text: string
   locator: SourceRef['locator']
   ordinal: number
   is_derived: boolean
+  source_type?: 'document' | 'application'
+  title?: string | null
 }

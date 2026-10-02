@@ -618,4 +618,20 @@ Targeted browser reruns допускаются через `-PlaywrightGrep`. Mig
 | `git diff --check` | **PASS**; Git вывел только предупреждения о нормализации CRLF |
 | Compose/API/browser | **Не запускались**: milestone не меняет API, БД, миграции, контейнеры или frontend; интеграционные тесты остаются отдельной категорией |
 
-APP-M02 и APP-M03 не начинались.
+## APP-M02 — помощь по приложению и документу в одном чате — 2 октября 2026 года
+
+Реализованы самостоятельные persistent app-help чаты без `document_id`, миграция `0012_application_chats`, отдельный retrieval каталога возможностей и документных chunks, смешанные ответы с раздельными server-resolved citations и детерминированный отказ без выдуманного источника для неизвестной функции. App-help отображается в общей библиотеке, поддерживает rename/pin/delete и восстанавливается после reload; API не разрешает клиенту выбрать для него произвольный документ. Ответ доходит до UI только после полной проверки структурированного результата, а остановленный поток сохраняется как interrupted без частичного JSON-ответа. Проверка sources выполняется до фиксации ответа.
+
+Дополнительно закрыта гонка при переключении с документа на app-help: позднее завершение document preview/insights/messages не перезаписывает app-chat state. Регрессионный браузерный тест удерживает запрос insights, переключает чат и завершает запрос после этого. README и [план APP assistant](docs/APP_ASSISTANT_PLAN.md) обновлены с границами контекста и ограничениями `ephemeral=True`. Реестр targets/highlight и автоматический поиск UI не реализовывались; это APP-M03.
+
+| Проверка | Результат |
+|---|---|
+| Полный backend suite (`python -m pytest -q`) | **382 passed, 10 skipped**; skipped tests требуют Compose integration base URL |
+| Frontend contracts (`npm test`) | **25 passed** |
+| Frontend production build (`npm run build`) | **PASS**; Vite сообщает о bundle >500 kB, как и до M02 |
+| App-help Chromium E2E | **4 passed**: persistent chat, citations, stop/retry, rename/pin/delete, reload, mobile layout, async race, app-only/mixed/document-only separation |
+| API integration на изолированном Compose | **5 passed, 5 skipped**; пропуски требуют opt-in live Codex |
+| Migration acceptance на изолированном Compose | **PASS**: upgrade сохраняет прежние document chats/messages/citations/original bytes; создание app-help без документа; downgrade с app-help сессией безопасно отклонён |
+| `node --check` и `git diff --check` | **PASS** |
+
+AI E2E выполнялись с синтетическим provider; проверка качества ответа на живом Codex не заявляется. APP-M03 не начинался.

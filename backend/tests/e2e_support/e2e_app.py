@@ -32,6 +32,8 @@ class DeterministicCodex(CodexService):
         self.stream_release.set()
         self.complete_calls = 0
         self.chat_calls = 0
+        self.structured_calls = 0
+        self.last_request_metadata = {"document_evidence_count": 0, "application_evidence_count": 0, "ephemeral": None}
 
     async def start(self):
         pass
@@ -77,10 +79,46 @@ class DeterministicCodex(CodexService):
             raise CodexModelUnavailable("Synthetic model unavailable")
         return model, reasoning_effort
 
-    async def stream_chat(self, payload, existing_thread_id=None, *, model=None, reasoning_effort=None):
+    async def stream_chat(self, payload, existing_thread_id=None, *, model=None, reasoning_effort=None,
+                          output_schema=None, base_instructions=None, ephemeral=None):
         self.chat_calls += 1
         await self.require_ready()
         yield {"kind": "thread", "thread_id": existing_thread_id or str(uuid.uuid4())}
+        if output_schema is not None:
+            self.structured_calls += 1
+            application_evidence = payload.get("application_evidence", [])
+            document_evidence = payload.get("document_evidence", [])
+            self.last_request_metadata = {
+                "document_evidence_count": len(document_evidence),
+                "application_evidence_count": len(application_evidence),
+                "ephemeral": ephemeral,
+                "scope": payload.get("request_scope"),
+            }
+            citation_items = []
+            if application_evidence:
+                citation_items.append({"source_type": "application", "source_id": application_evidence[0]["source_id"]})
+            if document_evidence and payload.get("request_scope") == "mixed":
+                citation_items.append({"source_type": "document", "source_id": document_evidence[0]["source_id"]})
+            if citation_items:
+                scope = "mixed" if len(citation_items) == 2 else citation_items[0]["source_type"]
+                response = {
+                    "answer": "Подтверждённая возможность приложения." + (" Также найден фрагмент документа." if document_evidence else ""),
+                    "status": "answered",
+                    "scope": scope,
+                    "citations": citation_items,
+                    "ui_target_id": (application_evidence[0].get("ui_target_ids") or [None])[0] if application_evidence else None,
+                }
+            else:
+                response = {"answer": "Подтверждений нет.", "status": "not_found", "scope": "unknown", "citations": [], "ui_target_id": None}
+            serialized = json.dumps(response, ensure_ascii=False)
+            split_at = max(1, len(serialized) // 2)
+            yield {"kind": "delta", "text": serialized[:split_at]}
+            await self.stream_release.wait()
+            if self.mode == "stream_error":
+                raise RuntimeError("Synthetic stream failure")
+            yield {"kind": "delta", "text": serialized[split_at:]}
+            return
+
         yield {"kind": "delta", "text": "**Синтетический ответ**\n\n"}
         # Test controls release this after asserting an intermediate UI state.
         await self.stream_release.wait()
@@ -116,7 +154,10 @@ async def control(request: Request):
     if data.get('reset_counters'):
         provider.complete_calls = 0
         provider.chat_calls = 0
-    return {'mode': provider.mode, 'complete_calls': provider.complete_calls, 'chat_calls': provider.chat_calls}
+        provider.structured_calls = 0
+        provider.last_request_metadata = {"document_evidence_count": 0, "application_evidence_count": 0, "ephemeral": None}
+    return {'mode': provider.mode, 'complete_calls': provider.complete_calls, 'chat_calls': provider.chat_calls,
+            'structured_calls': provider.structured_calls, 'last_request_metadata': provider.last_request_metadata}
 
 
 @app.post('/api/v1/__e2e/maintenance/seed')

@@ -9,11 +9,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api import router
-from app.services.maintenance import router as maintenance_router
 from app.config import settings
 from app.database import engine
 from app.private_errors import PrivateErrorsMiddleware
 from app.services.codex import CodexService
+from app.services.maintenance import router as maintenance_router
 from app.services.processing import DocumentProcessor
 from app.upload_limits import UploadBodyLimitMiddleware
 
@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     app.state.processor = processor
     app.state.chat_generation_tasks = {}
     app.state.chat_generation_buffers = {}
+    app.state.maintenance_deleting_chats = set()
     await processor.start()
     yield
     await processor.stop()

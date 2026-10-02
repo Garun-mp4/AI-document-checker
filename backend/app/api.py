@@ -73,6 +73,20 @@ from app.schemas import (
     TablePreviewOut,
 )
 from app.services.additional_analysis import analyze_additional
+from app.services.app_help import (
+    APP_HELP_CATALOG,
+    AppHelpAvailableSource,
+    AppHelpResponse,
+    app_help_output_schema,
+    search_app_capabilities,
+    validate_app_help_response,
+)
+from app.services.application_assistant import (
+    APP_ASSISTANT_INSTRUCTIONS,
+    build_application_assistant_payload,
+    classify_assistant_scope,
+    format_validated_app_answer,
+)
 from app.services.artifact_response import artifact_response
 from app.services.chat_context import bounded_history
 from app.services.chat_library import get_chat_settings
@@ -221,10 +235,44 @@ async def _sources_for_ids(session, document_id: uuid.UUID, ids: list[str]) -> l
     ]
 
 
+async def _sources_for_chat_ids(session, chat: Chat, ids: list[str]) -> list[SourceOut]:
+    """Resolve citations only inside this chat's document and the trusted app catalog."""
+
+    app_by_id = {entry.source_id: entry for entry in APP_HELP_CATALOG}
+    requested_app = {
+        value: app_by_id[value]
+        for value in ids
+        if value in app_by_id and chat.scope in {"application", "document"}
+    }
+    document_ids = [value for value in ids if value not in app_by_id]
+    document_sources = (
+        await _sources_for_ids(session, chat.document_id, document_ids)
+        if chat.document_id is not None and document_ids
+        else []
+    )
+    document_by_id = {item.id: item for item in document_sources}
+    resolved: list[SourceOut] = []
+    for value in ids:
+        if value in requested_app:
+            capability = requested_app[value]
+            resolved.append(SourceOut(
+                id=value,
+                text=capability.evidence_text[:2_500],
+                locator={},
+                ordinal=0,
+                is_derived=False,
+                source_type="application",
+                title=capability.title,
+            ))
+        elif value in document_by_id:
+            resolved.append(document_by_id[value])
+    return resolved
+
+
 async def _message_out(session, chat: Chat, message: Message) -> MessageOut:
     return MessageOut(
         id=str(message.id), role=message.role, content=message.content,
-        citations=await _sources_for_ids(session, chat.document_id, message.citations or []),
+        citations=await _sources_for_chat_ids(session, chat, message.citations or []),
         model=message.model, reasoning_effort=message.reasoning_effort,
         created_at=message.created_at,
         context_epoch=message.context_epoch,
@@ -288,6 +336,55 @@ async def paginated_chat_library(
     """Search and page through chat summaries without fetching message bodies."""
     async with SessionLocal() as session:
         return await query_chat_library(session, query=q, offset=offset, limit=limit)
+
+
+@router.post("/chats/application", response_model=ChatOut, status_code=status.HTTP_201_CREATED)
+async def create_application_chat(request: Request) -> ChatOut:
+    """Create a durable app-help session that is not linked to a document."""
+
+    _reject_during_cache_cleanup(request)
+    async with SessionLocal() as session, session.begin():
+        chat = Chat(scope="application", document_id=None)
+        session.add(chat)
+        await session.flush()
+        return ChatOut(id=str(chat.id), scope="application", document_id=None, context_epoch=chat.context_epoch)
+
+
+@router.delete("/chats/{chat_id}")
+async def delete_application_chat(chat_id: uuid.UUID, request: Request) -> dict[str, Any]:
+    """Delete one standalone application-help conversation and its messages."""
+
+    _reject_during_cache_cleanup(request)
+    deleting = getattr(request.app.state, "maintenance_deleting_chats", None)
+    if deleting is None:
+        deleting = set()
+        request.app.state.maintenance_deleting_chats = deleting
+    key = str(chat_id)
+    if key in deleting:
+        raise HTTPException(status_code=409, detail="Удаление этого чата уже выполняется.")
+    async with SessionLocal() as session:
+        chat = await session.get(Chat, chat_id)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        if chat.scope != "application" or chat.document_id is not None:
+            raise HTTPException(status_code=409, detail="Удалять отдельным действием можно только чат помощи по приложению.")
+
+    deleting.add(key)
+    cancelled = 0
+    try:
+        from app.services.maintenance import _active_chat_tasks
+
+        cancelled = await _active_chat_tasks(request, [key])
+        async with SessionLocal() as session, session.begin():
+            chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
+            if chat is None:
+                raise HTTPException(status_code=404, detail="Чат не найден.")
+            if chat.scope != "application" or chat.document_id is not None:
+                raise HTTPException(status_code=409, detail="Область чата изменилась; он не был удалён.")
+            await session.delete(chat)
+        return {"id": key, "deleted": True, "cancelled_generations": cancelled}
+    finally:
+        deleting.discard(key)
 
 
 @router.get("/chats/{chat_id}", response_model=ChatSettingsOut)
@@ -1491,7 +1588,7 @@ async def document_chat(document_id: uuid.UUID) -> ChatOut:
         chat = (await session.execute(select(Chat).where(Chat.document_id == document_id))).scalar_one_or_none()
         if chat is None:
             raise HTTPException(status_code=404, detail="Чат появится после завершения индексации документа.")
-        return ChatOut(id=str(chat.id), document_id=str(chat.document_id), context_epoch=chat.context_epoch)
+        return ChatOut(id=str(chat.id), scope="document", document_id=str(chat.document_id), context_epoch=chat.context_epoch)
 
 
 def _chat_generation_tasks(request: Request) -> dict[str, asyncio.Task]:
@@ -1548,17 +1645,33 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
     buffers = _chat_generation_buffers(request)
     user: Message | None = None
     history: list[Message] = []
+    document: Document | None = None
+    chunks: list[Chunk] = []
+    app_matches = ()
+    request_scope: Literal["application", "document", "mixed"] = "document"
+    use_app_contract = False
+    document_id: uuid.UUID | None = None
+    file_type: str | None = None
+    source_version: int | None = None
     async with SessionLocal() as session, session.begin():
         chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
         if chat is None:
             raise HTTPException(status_code=404, detail="Чат не найден.")
-        document = await session.get(Document, chat.document_id)
-        if document is None:
-            raise HTTPException(status_code=404, detail="Документ не найден.")
-        if str(document.id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
-            raise HTTPException(status_code=409, detail="Документ удаляется. Повторите запрос после обновления библиотеки.")
-        if document.status != "ready":
-            raise HTTPException(status_code=409, detail="Документ ещё обрабатывается или требует повторной обработки.")
+        if str(chat_id) in getattr(request.app.state, "maintenance_deleting_chats", set()):
+            raise HTTPException(status_code=409, detail="Чат удаляется. Обновите библиотеку и повторите запрос.")
+        if chat.scope == "document":
+            if chat.document_id is None:
+                raise HTTPException(status_code=409, detail="У документного чата отсутствует документ.")
+            document = await session.get(Document, chat.document_id)
+            if document is None:
+                raise HTTPException(status_code=404, detail="Документ не найден.")
+            if str(document.id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
+                raise HTTPException(status_code=409, detail="Документ удаляется. Повторите запрос после обновления библиотеки.")
+            if document.status != "ready":
+                raise HTTPException(status_code=409, detail="Документ ещё обрабатывается или требует повторной обработки.")
+        elif chat.scope != "application" or chat.document_id is not None:
+            raise HTTPException(status_code=409, detail="Область этого чата настроена некорректно.")
+
         active_rows = (await session.execute(select(Message).where(
             Message.chat_id == chat_id,
             Message.generation_status == "streaming",
@@ -1588,18 +1701,23 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
             ).order_by(Message.created_at.desc(), Message.id.desc()).limit(32))).scalars().all()
             history.reverse()
 
-        document_id = document.id
-        file_type = document.file_type
+        app_matches = search_app_capabilities(text or "")
+        request_scope = classify_assistant_scope(text or "", app_matches, chat_scope=chat.scope)
+        use_app_contract = chat.scope == "application" or request_scope in {"application", "mixed"}
+        document_id = document.id if document else None
+        file_type = document.file_type if document else None
         context_epoch = chat.context_epoch
-        active_version = await session.get(DocumentVersion, (document_id, document.active_version))
-        if active_version is None or active_version.state != "ready":
-            raise HTTPException(status_code=409, detail="Нет готовой версии источников для ответа.")
-        source_version = active_version.chunk_version
+        if document:
+            active_version = await session.get(DocumentVersion, (document.id, document.active_version))
+            if active_version is None or active_version.state != "ready":
+                raise HTTPException(status_code=409, detail="Нет готовой версии источников для ответа.")
+            source_version = active_version.chunk_version
         previous_messages = bounded_history(history, exclude_id=user.id if user else None)
         retrieval_query = " ".join([item["text"] for item in previous_messages[-4:]] + [text or ""])[-1_500:]
 
-    chunks = await search_chunks(document_id, retrieval_query, limit=8, version=source_version)
-    if file_type == "csv" and re.search(
+    if document_id is not None and request_scope in {"document", "mixed"}:
+        chunks = await search_chunks(document_id, retrieval_query, limit=8, version=source_version)
+    if document_id is not None and request_scope in {"document", "mixed"} and file_type == "csv" and re.search(
         r"сумм|средн|миним|максим|итог|количеств|агрегат|скольк|посчит|вычисл|рассчит|подсчит|average|sum|total",
         retrieval_query, re.IGNORECASE,
     ):
@@ -1618,18 +1736,60 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
         elif table_summary:
             chunks = [table_summary, *chunks[:7]]
 
-    sources: list[dict[str, str]] = []
     source_map: dict[str, Chunk] = {}
-    for index, chunk in enumerate(chunks, start=1):
-        label = f"S{index:02d}"
-        source_map[label] = chunk
-        sources.append({"label": label, "location": str(chunk.locator.get("label", "Фрагмент документа")), "excerpt": chunk.text[:1_500]})
-    payload = {
-        "question": text,
-        "previous_messages": previous_messages,
-        "sources": sources,
-        "instruction": "Ответь по-русски и поставь метку [Sxx] после каждого подтверждённого факта. Если источники не дают ответа, прямо скажи об этом без меток.",
-    }
+    structured_sources: dict[str, AppHelpAvailableSource] = {}
+    structured_source_events: list[dict[str, Any]] = []
+    if use_app_contract:
+        for match in app_matches:
+            capability = match.capability
+            structured_sources[capability.source_id] = AppHelpAvailableSource(
+                source_type="application", ui_target_ids=capability.ui_target_ids,
+            )
+            structured_source_events.append({
+                "id": capability.source_id,
+                "text": capability.evidence_text[:2_500],
+                "locator": {},
+                "ordinal": 0,
+                "is_derived": False,
+                "source_type": "application",
+                "title": capability.title,
+            })
+        document_evidence: list[dict[str, Any]] = []
+        for chunk in chunks:
+            source_id = str(chunk.id)
+            structured_sources[source_id] = AppHelpAvailableSource(source_type="document")
+            label = str((chunk.locator or {}).get("label") or "Фрагмент документа")
+            document_evidence.append({
+                "source_id": source_id,
+                "source_type": "document",
+                "location": label[:160],
+                "excerpt": chunk.text[:1_500],
+            })
+            structured_source_events.append({
+                "id": source_id,
+                "text": str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500],
+                "locator": chunk.locator,
+                "ordinal": chunk.ordinal,
+                "is_derived": chunk.is_derived,
+                "source_type": "document",
+                "title": label[:160],
+            })
+        payload = build_application_assistant_payload(
+            text or "", app_matches, previous_messages=previous_messages,
+            scope=request_scope, document_evidence=document_evidence,
+        )
+    else:
+        legacy_sources: list[dict[str, str]] = []
+        for index, chunk in enumerate(chunks, start=1):
+            label = f"S{index:02d}"
+            source_map[label] = chunk
+            legacy_sources.append({"label": label, "location": str(chunk.locator.get("label", "Фрагмент документа")), "excerpt": chunk.text[:1_500]})
+        payload = {
+            "question": text,
+            "previous_messages": previous_messages,
+            "sources": legacy_sources,
+            "instruction": "Ответь по-русски и поставь метку [Sxx] после каждого подтверждённого факта. Если источники не дают ответа, прямо скажи об этом без меток.",
+        }
 
     async with SessionLocal() as session, session.begin():
         chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
@@ -1640,10 +1800,13 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
         ).limit(1))).scalar_one_or_none()
         if active is not None:
             raise HTTPException(status_code=409, detail="В этом чате уже формируется ответ.")
-        latest_document = await session.get(Document, document_id)
-        latest_version = await session.get(DocumentVersion, (document_id, latest_document.active_version)) if latest_document else None
-        if latest_version is None or latest_version.chunk_version != source_version:
-            raise HTTPException(status_code=409, detail="Версия документа изменилась. Повторите запрос.")
+        if document_id is not None:
+            latest_document = await session.get(Document, document_id)
+            latest_version = await session.get(DocumentVersion, (document_id, latest_document.active_version)) if latest_document else None
+            if latest_version is None or latest_version.chunk_version != source_version:
+                raise HTTPException(status_code=409, detail="Версия документа изменилась. Повторите запрос.")
+        elif chat.scope != "application" or chat.document_id is not None:
+            raise HTTPException(status_code=409, detail="Чат приложения изменился. Повторите запрос.")
         if retry_user_id is None:
             user = Message(chat_id=chat_id, role="user", content=text or "", citations=[],
                            model=response_model, reasoning_effort=response_reasoning_effort,
@@ -1672,8 +1835,11 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
                 message.generation_error = error[:500]
 
     async def generate():
-        if str(document_id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
+        if document_id is not None and str(document_id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
             await persist_interrupted("", "Ответ прерван из-за удаления документа.")
+            return
+        if str(chat_id) in getattr(request.app.state, "maintenance_deleting_chats", set()):
+            await persist_interrupted("", "Ответ прерван из-за удаления чата.")
             return
         current_task = asyncio.current_task()
         if current_task is not None:
@@ -1685,45 +1851,106 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
             yield _sse("started", {"user_message_id": str(user_id), "assistant_message_id": str(assistant_id),
                                    "context_epoch": context_epoch, "model": response_model,
                                    "reasoning_effort": response_reasoning_effort, "source_version": source_version})
-            yield _sse("sources", {"sources": [{
-                "label": label, "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
-                "ordinal": chunk.ordinal, "is_derived": chunk.is_derived,
-            } for label, chunk in source_map.items()]})
-            async for item in codex.stream_chat(payload, None, model=response_model,
-                                                reasoning_effort=response_reasoning_effort):
-                if item["kind"] != "delta":
-                    continue
-                answer_parts.append(item["text"])
-                buffers[str(assistant_id)] = answer_parts
-                answer_now = "".join(answer_parts)
-                if len(answer_now) - persisted_length >= 512:
-                    async with SessionLocal() as session, session.begin():
-                        message = await session.get(Message, assistant_id, with_for_update=True)
-                        if message is None or message.generation_status != "streaming":
-                            return
-                        message.content = answer_now[-8_000:]
-                    persisted_length = len(answer_now)
-                yield _sse("delta", {"text": item["text"]})
-            raw_answer = "".join(answer_parts).strip()
-            found_labels = re.findall(r"\[(S\d{2})\]", raw_answer)
-            valid_labels = list(dict.fromkeys(label for label in found_labels if label in source_map))
-            citations = [source_map[label] for label in valid_labels]
-            answer = (format_source_markers(raw_answer, valid_labels)[:8_000].strip() if citations else
-                      "В документе не найдено достаточно подтверждений для уверенного ответа.")
-            async with SessionLocal() as session, session.begin():
-                message = await session.get(Message, assistant_id, with_for_update=True)
-                if message is None or message.generation_status != "streaming":
-                    return
-                message.content = answer
-                message.citations = [str(chunk.id) for chunk in citations]
-                message.generation_status = "complete"
-                message.generation_error = None
-            citation_data = [{
-                "label": label, "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
-                "ordinal": chunk.ordinal, "is_derived": chunk.is_derived,
-            } for label, chunk in zip(valid_labels, citations, strict=True)]
-            yield _sse("done", {"assistant_message_id": str(assistant_id), "answer": answer,
-                                 "citations": citation_data})
+            if use_app_contract:
+                yield _sse("sources", {"sources": structured_source_events})
+                if request_scope == "application" and not app_matches:
+                    validated = AppHelpResponse(
+                        answer="В текущей версии приложения я не нашёл подтверждённой информации об этой функции.",
+                        status="not_found", scope="unknown", citations=[], ui_target_id=None,
+                    )
+                elif not structured_sources:
+                    validated = AppHelpResponse(
+                        answer="В доступных источниках не нашлось подтверждения для уверенного ответа.",
+                        status="not_found", scope="unknown", citations=[], ui_target_id=None,
+                    )
+                else:
+                    structured_parts: list[str] = []
+                    async for item in codex.stream_chat(
+                        payload, None, model=response_model, reasoning_effort=response_reasoning_effort,
+                        output_schema=app_help_output_schema(), base_instructions=APP_ASSISTANT_INSTRUCTIONS,
+                        ephemeral=True,
+                    ):
+                        if item["kind"] != "delta":
+                            continue
+                        structured_parts.append(item["text"])
+                        if sum(map(len, structured_parts)) > 32_000:
+                            raise ValueError("Ответ помощника превысил допустимый размер.")
+                    validated = validate_app_help_response(
+                        "".join(structured_parts), available_sources=structured_sources,
+                    )
+                answer = format_validated_app_answer(validated)[:8_000].strip()
+                citation_ids = [citation.source_id for citation in validated.citations]
+                async with SessionLocal() as session:
+                    current_chat = await session.get(Chat, chat_id)
+                    citation_sources = (
+                        await _sources_for_chat_ids(session, current_chat, citation_ids)
+                        if current_chat
+                        else []
+                    )
+                if len(citation_sources) != len(citation_ids):
+                    raise ValueError("Не удалось разрешить одну из проверенных ссылок ответа.")
+                citation_data = [source.model_dump() for source in citation_sources]
+                async with SessionLocal() as session, session.begin():
+                    current_chat = await session.get(Chat, chat_id)
+                    message = await session.get(Message, assistant_id, with_for_update=True)
+                    if (current_chat is None or current_chat.context_epoch != context_epoch or
+                            message is None or message.generation_status != "streaming"):
+                        return
+                    if str(chat_id) in getattr(request.app.state, "maintenance_deleting_chats", set()):
+                        message.content = ""
+                        message.generation_status = "interrupted"
+                        message.generation_error = "Ответ прерван из-за удаления чата."
+                        return
+                    message.content = answer
+                    message.citations = citation_ids
+                    message.generation_status = "complete"
+                    message.generation_error = None
+                if answer:
+                    answer_parts.append(answer)
+                    yield _sse("delta", {"text": answer})
+                yield _sse("done", {"assistant_message_id": str(assistant_id), "answer": answer,
+                                     "citations": citation_data, "ui_target_id": validated.ui_target_id,
+                                     "response_status": validated.status, "response_scope": validated.scope})
+            else:
+                yield _sse("sources", {"sources": [{
+                    "label": label, "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
+                    "ordinal": chunk.ordinal, "is_derived": chunk.is_derived, "source_type": "document",
+                } for label, chunk in source_map.items()]})
+                async for item in codex.stream_chat(payload, None, model=response_model,
+                                                    reasoning_effort=response_reasoning_effort):
+                    if item["kind"] != "delta":
+                        continue
+                    answer_parts.append(item["text"])
+                    buffers[str(assistant_id)] = answer_parts
+                    answer_now = "".join(answer_parts)
+                    if len(answer_now) - persisted_length >= 512:
+                        async with SessionLocal() as session, session.begin():
+                            message = await session.get(Message, assistant_id, with_for_update=True)
+                            if message is None or message.generation_status != "streaming":
+                                return
+                            message.content = answer_now[-8_000:]
+                        persisted_length = len(answer_now)
+                    yield _sse("delta", {"text": item["text"]})
+                raw_answer = "".join(answer_parts).strip()
+                found_labels = re.findall(r"\[(S\d{2})\]", raw_answer)
+                valid_labels = list(dict.fromkeys(label for label in found_labels if label in source_map))
+                citations = [source_map[label] for label in valid_labels]
+                answer = (format_source_markers(raw_answer, valid_labels)[:8_000].strip() if citations else
+                          "В документе не найдено достаточно подтверждений для уверенного ответа.")
+                async with SessionLocal() as session, session.begin():
+                    message = await session.get(Message, assistant_id, with_for_update=True)
+                    if message is None or message.generation_status != "streaming":
+                        return
+                    message.content = answer
+                    message.citations = [str(chunk.id) for chunk in citations]
+                    message.generation_status = "complete"
+                    message.generation_error = None
+                citation_data = [{
+                    "label": label, "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
+                    "ordinal": chunk.ordinal, "is_derived": chunk.is_derived, "source_type": "document",
+                } for label, chunk in zip(valid_labels, citations, strict=True)]
+                yield _sse("done", {"assistant_message_id": str(assistant_id), "answer": answer,
+                                     "citations": citation_data})
         except asyncio.CancelledError:
             await persist_interrupted("".join(answer_parts), "Ответ остановлен или соединение было прервано. Частичный текст сохранён; вопрос можно повторить.")
             raise

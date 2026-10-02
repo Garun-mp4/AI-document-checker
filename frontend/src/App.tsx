@@ -57,6 +57,7 @@ import { useBuildVersion } from './useBuildVersion'
 const API = '/api/v1'
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
+const SELECTED_APPLICATION_CHAT_STORAGE_KEY = 'document-checker-selected-application-chat'
 const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const ANALYSIS_LAYOUT_STORAGE_KEY = 'document-checker-analysis-layout'
@@ -145,7 +146,8 @@ function uploadQueueStage(document: DocumentRecord, job: ProcessingJob | undefin
   return job?.queue_position ? `${stage} · позиция ${job.queue_position}` : stage
 }
 
-function locatorText(source: { locator: SourceRef['locator'] }): string {
+function locatorText(source: { locator: SourceRef['locator']; source_type?: SourceRef['source_type']; title?: SourceRef['title'] }): string {
+  if (source.source_type === 'application') return source.title || 'Функция приложения'
   const label = source.locator.label
   if (typeof label === 'string' && label) return label
   const page = source.locator.page
@@ -210,7 +212,10 @@ function scrollIntoViewRespectingMotion(target: Element | null, block: ScrollLog
   target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block })
 }
 
-function summaryToDocument(summary: ChatSummary): DocumentRecord {
+function summaryToDocument(summary: ChatSummary): DocumentRecord | null {
+  if (summary.scope !== 'document' || !summary.document_id || !summary.filename || !summary.file_type || summary.file_size === null || !summary.status) {
+    return null
+  }
   return {
     active_version: 0,
     id: summary.document_id,
@@ -257,7 +262,14 @@ function App() {
   const [renameError, setRenameError] = useState('')
   const [pendingMessageNavigation, setPendingMessageNavigation] = useState<string | null>(null)
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    const isNewChat = localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true'
+    const savedApplicationChat = localStorage.getItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY)
+    return isNewChat || savedApplicationChat ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY)
+  })
+  const [selectedApplicationChatId, setSelectedApplicationChatId] = useState<string | null>(() =>
+    localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY),
+  )
   const [newChatOpen, setNewChatOpen] = useState(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true')
   const [document, setDocument] = useState<DocumentRecord | null>(null)
   const [processingJob, setProcessingJob] = useState<ProcessingJob | null>(null)
@@ -311,6 +323,8 @@ function App() {
   const [codexSaving, setCodexSaving] = useState(false)
   const [codexPreferenceMessage, setCodexPreferenceMessage] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
+  const [deleteApplicationChatTarget, setDeleteApplicationChatTarget] = useState<ChatSummary | null>(null)
+  const [applicationSourceTarget, setApplicationSourceTarget] = useState<SourceRef | null>(null)
   const [localDataOpen, setLocalDataOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [sendingChats, setSendingChats] = useState<Record<string, boolean>>({})
@@ -366,6 +380,7 @@ function App() {
   const skipNextChatAutoScrollRef = useRef(false)
   const chatLibraryRequestRef = useRef(0)
   const selectedIdRef = useRef(selectedId)
+  const documentLoadGenerationRef = useRef(0)
   const documentRef = useRef(document)
   const markdownDocumentRef = useRef(markdownDocument)
   selectedIdRef.current = selectedId
@@ -468,7 +483,10 @@ function App() {
       setChats(result.items)
       setChatLibraryTotal(result.total)
       setChatLibraryHasMore(result.has_more)
-      setSelectedId((current) => preferredDocumentId ?? (newChatOpen ? null : current ?? result.items[0]?.document_id ?? null))
+      if (preferredDocumentId) setSelectedApplicationChatId(null)
+      setSelectedId((current) => preferredDocumentId ?? (selectedApplicationChatId || newChatOpen
+        ? null
+        : current ?? result.items.find((item) => item.scope === 'document')?.document_id ?? null))
     } catch (error) {
       if (requestId === chatLibraryRequestRef.current) {
         setChatLibraryError(error instanceof Error ? error.message : 'Не удалось загрузить чаты.')
@@ -476,7 +494,7 @@ function App() {
     } finally {
       if (requestId === chatLibraryRequestRef.current) setChatLibraryLoading(false)
     }
-  }, [debouncedChatSearch, newChatOpen])
+  }, [debouncedChatSearch, newChatOpen, selectedApplicationChatId])
 
   useEffect(() => {
     void refreshLibrary()
@@ -521,17 +539,24 @@ function App() {
   }, [chatLibraryHasMore, chatLibraryLoadingMore, chatSearch, debouncedChatSearch, chats.length])
 
   const selectLibraryChat = useCallback((item: ChatSummary) => {
-    setPendingMessageNavigation(item.search_message_id)
+    setPendingMessageNavigation(item.scope === 'document' ? item.search_message_id : null)
     setHighlightedMessageId(null)
     setNewChatOpen(false)
-    setSelectedId(item.document_id)
+    setSelectedApplicationChatId(item.scope === 'application' ? item.id : null)
+    setSelectedId(item.scope === 'document' ? item.document_id : null)
+    if (item.scope === 'application') {
+      setChat(null)
+      setMessages([])
+    }
+    setChatOpen(true)
     setMobileLibraryOpen(false)
-    if (selectedId === item.document_id && item.search_message_id) {
+    setMobileChatOpen(item.scope === 'application' && compactChatLayout)
+    if (item.scope === 'document' && selectedId === item.document_id && item.search_message_id) {
       void api<ChatMessage[]>(`${API}/chats/${item.id}/messages`)
         .then(setMessages)
         .catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Не удалось открыть найденное сообщение.'))
     }
-  }, [selectedId, showToast])
+  }, [compactChatLayout, selectedId, showToast])
 
   const openChatActionMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>, item: ChatSummary) => {
     event.stopPropagation()
@@ -666,6 +691,11 @@ function App() {
   }, [selectedId])
 
   useEffect(() => {
+    if (selectedApplicationChatId) localStorage.setItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY, selectedApplicationChatId)
+    else localStorage.removeItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY)
+  }, [selectedApplicationChatId])
+
+  useEffect(() => {
     try {
       const persisted = uploadQueue.filter((item) => item.documentId || ['failed', 'cancelled'].includes(item.state)).slice(-20).map(({ id, filename, state, documentId, error, retryMode, updatedAt }) => ({
         id, filename, state, documentId, error, retryMode, updatedAt,
@@ -743,7 +773,8 @@ function App() {
     }
   }, [])
 
-  const loadReadyData = useCallback(async (documentId: string) => {
+  const loadReadyData = useCallback(async (documentId: string, generation: number) => {
+    const isCurrentLoad = () => documentLoadGenerationRef.current === generation && selectedIdRef.current === documentId
     try {
       const [cardData, chatData, previewData, markdownData, versionData, additionalData, bookmarkData] = await Promise.all([
         api<Insight[]>(`${API}/documents/${documentId}/insights`),
@@ -754,6 +785,7 @@ function App() {
         api<AdditionalAnalysis[]>(`${API}/documents/${documentId}/analysis/additional`),
         api<DocumentBookmark[]>(`${API}/documents/${documentId}/bookmarks`),
       ])
+      if (!isCurrentLoad()) return
       setInsights(cardData)
       setAdditionalAnalyses(additionalData)
       setDocumentBookmarks(bookmarkData)
@@ -768,13 +800,15 @@ function App() {
       setSearchResetKey((key) => key + 1)
       setPreviewPage(1)
       const savedMessages = await api<ChatMessage[]>(`${API}/chats/${chatData.id}/messages`)
+      if (!isCurrentLoad()) return
       setMessages(savedMessages)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Не удалось загрузить результаты документа.')
+      if (isCurrentLoad()) showToast(error instanceof Error ? error.message : 'Не удалось загрузить результаты документа.')
     }
   }, [showToast])
 
   useEffect(() => {
+    const generation = ++documentLoadGenerationRef.current
     if (!selectedId) {
       setDocument(null)
       setProcessingJob(null)
@@ -824,7 +858,7 @@ function App() {
         // its persisted document version changes, even if both polls see ready.
         if (result.status === 'ready' && loadedVersion !== result.updated_at) {
           loadedVersion = result.updated_at
-          await loadReadyData(selectedId)
+          await loadReadyData(selectedId, generation)
         }
       } else {
         showToast(documentResult.reason instanceof Error ? documentResult.reason.message : 'Не удалось открыть документ.')
@@ -845,6 +879,36 @@ function App() {
       window.clearInterval(timer)
     }
   }, [selectedId, loadReadyData, showToast, updateDocumentInLibrary])
+
+  useEffect(() => {
+    if (!selectedApplicationChatId) return
+    let active = true
+    const loadApplicationChat = async () => {
+      try {
+        const [record, savedMessages] = await Promise.all([
+          api<ChatRecord>(`${API}/chats/${selectedApplicationChatId}`),
+          api<ChatMessage[]>(`${API}/chats/${selectedApplicationChatId}/messages`),
+        ])
+        if (!active) return
+        if (record.scope !== 'application' || record.document_id !== null) throw new Error('Сохранённый чат помощи имеет некорректный тип.')
+        setChat(record)
+        setMessages(savedMessages)
+      } catch (error) {
+        if (!active) return
+        setSelectedApplicationChatId(null)
+        setNewChatOpen(true)
+        showToast(error instanceof Error ? error.message : 'Не удалось открыть чат помощи по приложению.')
+      }
+    }
+    void loadApplicationChat()
+    return () => { active = false }
+  }, [compactChatLayout, selectedApplicationChatId, showToast])
+
+  useEffect(() => {
+    if (compactChatLayout && chat?.scope === 'application' && chat.id === selectedApplicationChatId && chatOpen) {
+      setMobileChatOpen(true)
+    }
+  }, [chat?.id, chat?.scope, chatOpen, compactChatLayout, selectedApplicationChatId])
 
   useEffect(() => {
     if (!pendingMessageNavigation || !selectedId || !messages.length) return
@@ -921,6 +985,16 @@ function App() {
           closeExportDialog()
           return
         }
+        if (applicationSourceTarget) {
+          event.preventDefault()
+          setApplicationSourceTarget(null)
+          return
+        }
+        if (deleteApplicationChatTarget) {
+          event.preventDefault()
+          setDeleteApplicationChatTarget(null)
+          return
+        }
         setAuthOpen(false)
         setDeleteTarget(null)
         setMobileLibraryOpen(false)
@@ -929,7 +1003,7 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [chatActionMenu, clearChatRename, closeChatActionMenu, closeExportDialog, exportOpen, openPreferenceMenu, renameTargetId])
+  }, [applicationSourceTarget, chatActionMenu, clearChatRename, closeChatActionMenu, closeExportDialog, deleteApplicationChatTarget, exportOpen, openPreferenceMenu, renameTargetId])
 
   useEffect(() => {
     if (!openPreferenceMenu) return
@@ -945,7 +1019,7 @@ function App() {
   }, [authOpen])
 
   useEffect(() => {
-    if (!authOpen && !deleteTarget && !exportOpen) return
+    if (!authOpen && !deleteTarget && !deleteApplicationChatTarget && !applicationSourceTarget && !exportOpen) return
     const dialog = window.document.querySelector<HTMLElement>(exportOpen ? '.export-dialog' : '.modal-card')
     if (!dialog) return
     const focusableSelector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
@@ -966,7 +1040,7 @@ function App() {
     }
     window.document.addEventListener('keydown', onKeyDown)
     return () => window.document.removeEventListener('keydown', onKeyDown)
-  }, [authOpen, deleteTarget, exportOpen])
+  }, [applicationSourceTarget, authOpen, deleteApplicationChatTarget, deleteTarget, exportOpen])
 
   const uploadFiles = useCallback(async (input: FileList | File[] | null | undefined, retryIds?: string[]) => {
     const files = Array.from(input ?? [])
@@ -1107,6 +1181,7 @@ function App() {
     const latest = [...outcomes].reverse().find((item): item is DocumentRecord => item !== null)
     if (latest) {
       setNewChatOpen(false)
+      setSelectedApplicationChatId(null)
       setSelectedId(latest.id)
       setChatOpen(true)
       setPreviewOpen(true)
@@ -1162,6 +1237,7 @@ function App() {
 
   const openUploadQueueChat = useCallback((documentId: string) => {
     setNewChatOpen(false)
+    setSelectedApplicationChatId(null)
     setSelectedId(documentId)
     setMobileLibraryOpen(false)
     setChatOpen(true)
@@ -1169,6 +1245,7 @@ function App() {
 
   const startNewChat = useCallback(() => {
     setNewChatOpen(true)
+    setSelectedApplicationChatId(null)
     setSelectedId(null)
     setDocument(null)
     setInsights([])
@@ -1194,7 +1271,32 @@ function App() {
     setMobileChatOpen(false)
   }, [])
 
+  const startApplicationHelpChat = useCallback(async () => {
+    if (isUploading) return
+    try {
+      const created = await api<ChatRecord>(`${API}/chats/application`, { method: 'POST' })
+      setNewChatOpen(false)
+      setSelectedApplicationChatId(created.id)
+      setSelectedId(null)
+      setChat(created)
+      setMessages([])
+      setChatInput('')
+      setPendingMessageNavigation(null)
+      setChatOpen(true)
+      setChatFull(false)
+      setMobileLibraryOpen(false)
+      setMobileChatOpen(false)
+      void refreshLibrary()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось создать чат помощи по приложению.')
+    }
+  }, [isUploading, refreshLibrary, showToast])
+
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
+    if (source.source_type === 'application') {
+      setApplicationSourceTarget(source)
+      return
+    }
     if (!document) return
     searchNavigationRef.current += 1
     setSearchResetKey((key) => key + 1)
@@ -1442,10 +1544,30 @@ function App() {
     }
   }, [deleteTarget, refreshLibrary, selectedId, showToast])
 
+  const confirmDeleteApplicationChat = useCallback(async () => {
+    if (!deleteApplicationChatTarget) return
+    try {
+      await api(`${API}/chats/${deleteApplicationChatTarget.id}`, { method: 'DELETE' })
+      setChats((current) => current.filter((item) => item.id !== deleteApplicationChatTarget.id))
+      setChatLibraryTotal((current) => Math.max(0, current - 1))
+      if (selectedApplicationChatId === deleteApplicationChatTarget.id) {
+        setSelectedApplicationChatId(null)
+        setChat(null)
+        setMessages([])
+        setNewChatOpen(true)
+      }
+      setDeleteApplicationChatTarget(null)
+      void refreshLibrary()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось удалить чат помощи.')
+    }
+  }, [deleteApplicationChatTarget, refreshLibrary, selectedApplicationChatId, showToast])
+
   const handleMaintenanceDeleted = useCallback((documentIds: string[]) => {
     const clearAll = documentIds.includes('*')
-    setChats((current) => clearAll ? [] : current.filter((item) => !documentIds.includes(item.document_id)))
+    setChats((current) => clearAll ? [] : current.filter((item) => item.scope === 'application' || !documentIds.includes(item.document_id ?? '')))
     setChatLibraryTotal((current) => clearAll ? 0 : Math.max(0, current - documentIds.length))
+    if (clearAll) setSelectedApplicationChatId(null)
     if (clearAll || (selectedId && documentIds.includes(selectedId))) {
       setSelectedId(null)
       setNewChatOpen(true)
@@ -1774,8 +1896,9 @@ function App() {
     if (!saved) setOpenPreferenceMenu('reasoning')
   }
   const streamText = currentChatStream?.text ?? ''
-  const currentListItem = chats.find((item) => item.document_id === selectedId)
+  const currentListItem = selectedId ? chats.find((item) => item.scope === 'document' && item.document_id === selectedId) : undefined
   const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
+  const isApplicationChat = chat?.scope === 'application'
   const activeAnalysisVersion = analysisVersions.find((item) => item.is_active)
   const displayedAnalysisVersion = analysisVersions.find((item) => item.number === selectedAnalysisVersion) ?? activeAnalysisVersion
   const deleteQuestion = (() => {
@@ -1886,7 +2009,7 @@ function App() {
   const mainClasses = [
     'app-shell',
     sidebarCollapsed ? 'library-manual-collapsed' : '',
-    !selectedId ? 'empty-state' : '',
+    !selectedId && !isApplicationChat ? 'empty-state' : '',
     !chatOpen ? 'chat-hidden' : '',
     chatFull ? 'chat-full' : '',
     mobileLibraryOpen ? 'mobile-library-open' : '',
@@ -1899,7 +2022,7 @@ function App() {
   const renderChatRow = (item: ChatSummary) => {
     const isRenaming = renameTargetId === item.id
     return (
-      <div key={item.id} className={`document-row ${selectedId === item.document_id ? 'selected' : ''} ${item.pinned ? 'is-pinned' : ''}`} data-chat-id={item.id}>
+      <div key={item.id} className={`document-row ${(item.scope === 'application' ? selectedApplicationChatId === item.id : selectedId === item.document_id) ? 'selected' : ''} ${item.pinned ? 'is-pinned' : ''}`} data-chat-id={item.id}>
         {isRenaming ? (
           <form className="chat-rename-form" onSubmit={(event) => { event.preventDefault(); void saveChatRename(item) }}>
             <input
@@ -1917,17 +2040,19 @@ function App() {
           </form>
         ) : (
           <>
-            <button className="document-select" onClick={() => selectLibraryChat(item)} title={item.filename} aria-label={`Открыть чат ${item.title}`}>
-              <span className="document-type-icon">{fileIcon(item.file_type, 17)}</span>
+            <button className="document-select" onClick={() => selectLibraryChat(item)} title={item.scope === 'application' ? 'Помощь по приложению' : item.filename ?? item.title} aria-label={`Открыть чат ${item.title}`}>
+              <span className="document-type-icon">{item.scope === 'application' ? <CircleHelp size={17} /> : fileIcon(item.file_type ?? 'txt', 17)}</span>
               <span className="document-row-text">
                 <span className="document-row-name">{item.title}</span>
                 <span className="document-row-meta">
-                  <span className={`status-dot status-${item.status}`} />
-                  {item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status)}
+                  {item.scope === 'application' ? <span>Помощь по приложению</span> : <>
+                    <span className={`status-dot status-${item.status}`} />
+                    {item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status ?? 'queued')}
+                  </>}
                   <span className="row-meta-divider">·</span>{relativeDate(item.last_activity_at)}
                   {item.pinned && <span className="chat-pinned-indicator"><Pin size={11} /> Закреплён</span>}
                 </span>
-                {debouncedChatSearch && <span className="chat-search-snippet">{item.search_snippet ?? item.last_message_preview ?? item.filename}</span>}
+                {debouncedChatSearch && <span className="chat-search-snippet">{item.search_snippet ?? item.last_message_preview ?? item.filename ?? 'Помощь по приложению'}</span>}
               </span>
             </button>
             <button
@@ -2057,7 +2182,11 @@ function App() {
           <button type="button" role="menuitem" tabIndex={-1} onClick={() => void toggleChatPin(activeMenuItem)}>{activeMenuItem.pinned ? <PinOff size={15} /> : <Pin size={15} />} {activeMenuItem.pinned ? 'Открепить чат' : 'Закрепить чат'}</button>
           {activeMenuItem.custom_title && <button type="button" role="menuitem" tabIndex={-1} onClick={() => void resetChatTitle(activeMenuItem)}><RotateCw size={15} /> Вернуть исходное название</button>}
           <div className="chat-actions-divider" />
-          <button type="button" role="menuitem" tabIndex={-1} className="chat-actions-delete" onClick={() => { closeChatActionMenu(); setDeleteTarget(summaryToDocument(activeMenuItem)) }}><Trash2 size={15} /> Удалить документ и чат</button>
+          <button type="button" role="menuitem" tabIndex={-1} className="chat-actions-delete" onClick={() => {
+            closeChatActionMenu()
+            if (activeMenuItem.scope === 'application') setDeleteApplicationChatTarget(activeMenuItem)
+            else setDeleteTarget(summaryToDocument(activeMenuItem))
+          }}><Trash2 size={15} /> {activeMenuItem.scope === 'application' ? 'Удалить чат' : 'Удалить документ и чат'}</button>
         </div>,
         window.document.body,
       )}
@@ -2074,13 +2203,14 @@ function App() {
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файлы, чтобы загрузить</strong><span>Можно добавить несколько документов за раз · PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
 
         {!selectedId || !visibleStatus ? (
-          <EmptyWorkspace
-            isUploading={isUploading}
-            onChoose={() => fileInput.current?.click()}
-            documentsCount={chats.length}
-            onToggleLibrary={() => setSidebarCollapsed((value) => !value)}
-            onExpandChat={() => setChatFull(true)}
-          />
+          isApplicationChat ? <ApplicationHelpWorkspace /> : <EmptyWorkspace
+              isUploading={isUploading}
+              onChoose={() => fileInput.current?.click()}
+              onStartApplicationHelp={() => void startApplicationHelpChat()}
+              documentsCount={chats.length}
+              onToggleLibrary={() => setSidebarCollapsed((value) => !value)}
+              onExpandChat={() => setChatFull(true)}
+            />
         ) : (
           <div className="document-workspace">
             <div className="document-toolbar">
@@ -2301,21 +2431,44 @@ function App() {
       </main>
 
       {chatOpen && <div className="chat-resizer" role="separator" aria-label="Ширина чата" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={560} aria-valuenow={chatWidth} tabIndex={0} onPointerDown={startResize} onKeyDown={resizeByKeyboard} />}
-      <aside id="document-chat" className={`chat-panel ${chatFull ? 'chat-panel-full' : ''}`} aria-label="Чат по документу">
+      <aside id="document-chat" className={`chat-panel ${chatFull ? 'chat-panel-full' : ''}`} aria-label={isApplicationChat ? 'Помощь по приложению' : 'Чат по документу'}>
         <div className="chat-panel-header">
-          <div className="chat-title"><span className="chat-title-icon"><MessageSquareText size={16} /></span><div><strong>Чат с документом</strong><span>{document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
+          <div className="chat-title"><span className="chat-title-icon"><MessageSquareText size={16} /></span><div><strong>{isApplicationChat ? 'Помощь по приложению' : 'Чат с документом'}</strong><span>{isApplicationChat ? 'Инструкции по проверенным функциям' : document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
           <div className="chat-header-actions">
             {chat && <button className="icon-button chat-context-trigger" type="button" aria-label="Начать новый контекст" title="Начать новый контекст. Предыдущая переписка останется в истории, но не будет передаваться модели." onClick={() => void startNewContext()} disabled={contextPending || isSending}><RotateCw size={15} /></button>}
             <button className="icon-button desktop-chat-size" aria-label={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} title={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} onClick={() => setChatFull((value) => !value)}>{chatFull ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           </div>
         </div>
         <div className="chat-context-line">
-          <span className={`context-status-dot ${document?.status === 'ready' ? 'context-ready' : ''}`} />
-          <span>{document?.filename ?? 'Загрузите документ, чтобы начать'}</span>
+          <span className={`context-status-dot ${(isApplicationChat || document?.status === 'ready') ? 'context-ready' : ''}`} />
+          <span>{isApplicationChat ? 'Каталог функций приложения' : document?.filename ?? 'Загрузите документ, чтобы начать'}</span>
           {chat && <small>Контекст {chat.context_epoch ?? 0}</small>}
         </div>
         <div className="conversation" ref={conversation} aria-live="polite">
-          {!document || document.status !== 'ready' ? (
+          {isApplicationChat ? messages.length === 0 && !isSending ? (
+            <div className="chat-welcome">
+              <span className="welcome-kicker">ПОМОЩЬ ПО ПРИЛОЖЕНИЮ</span>
+              <h3>Что хотите найти?</h3>
+              <p>Ответы опираются на подтверждённые функции этой версии приложения.</p>
+              <div className="suggestion-list">
+                {['Как поменять модель?', 'Как открыть библиотеку чатов?', 'Как посмотреть оригинал документа?'].map((question) => <button key={question} type="button" onClick={() => { setChatInput(question); window.requestAnimationFrame(() => chatInputRef.current?.focus()) }}><span>{question}</span><ArrowUp size={14} /></button>)}
+              </div>
+            </div>
+          ) : (
+            <div className="message-list">
+              {messages.map((message) => <ChatBubble
+                key={message.id}
+                message={message}
+                onOpenSource={openSource}
+                highlighted={message.id === highlightedMessageId}
+                onDelete={() => setMessageDeleteTarget(message)}
+                onRetry={(userMessageId) => retryChatMessage(userMessageId)}
+                onStop={(messageId) => chat && void stopChatMessage(messageId, chat)}
+                canRetry={(message.context_epoch ?? 0) === (chat?.context_epoch ?? 0)}
+              />)}
+              {isSending && <div className="assistant-thinking"><span className="thinking-mark"><span /><span /><span /></span><span>{streamText ? 'Проверяю ответ по функциям приложения' : 'Ищу подтверждённые сведения'}</span></div>}
+            </div>
+          ) : !document || document.status !== 'ready' ? (
             <div className="chat-empty-state"><span className="chat-empty-icon"><MessageSquareText size={21} /></span><strong>{document ? statusLabel(document.status) : 'Выберите документ'}</strong><p>{document ? processingDescription(document.status) : 'После загрузки файла здесь можно задавать вопросы и получать ответы с привязкой к источнику.'}</p></div>
           ) : messages.length === 0 && !isSending ? (
             <div className="chat-welcome">
@@ -2349,7 +2502,7 @@ function App() {
           )}
         </div>
         <div className="chat-compose-area">
-          {!authReady && document?.status === 'ready' && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
+          {!authReady && ((isApplicationChat && chat) || document?.status === 'ready') && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
           <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
             <textarea
               ref={chatInputRef}
@@ -2359,14 +2512,14 @@ function App() {
               value={chatInput}
               onChange={(event) => setChatInput(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() } }}
-              placeholder={document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
+              placeholder={isApplicationChat ? 'Спросите о работе приложения…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
               aria-label="Сообщение для чата"
               maxLength={4_000}
-              disabled={!document || document.status !== 'ready' || !authReady || isSending}
+              disabled={(!isApplicationChat && (!document || document.status !== 'ready')) || !authReady || isSending}
             />
-            <div className="composer-footer"><span>Ответы проверяются по источникам</span><button className="send-button" type="submit" aria-label="Отправить вопрос" disabled={!chatInput.trim() || !chat || !authReady || isSending}><Send size={15} /></button></div>
+            <div className="composer-footer"><span>{isApplicationChat ? 'Ответы проверяются по функциям приложения' : 'Ответы проверяются по источникам'}</span><button className="send-button" type="submit" aria-label="Отправить вопрос" disabled={!chatInput.trim() || !chat || !authReady || isSending}><Send size={15} /></button></div>
           </form>
-          <p className="chat-footnote">Текст документа обрабатывается локально. В Codex передаются выбранные фрагменты.</p>
+          <p className="chat-footnote">{isApplicationChat ? 'В Codex передаются только выбранные сведения о приложении и история этого чата. Документы не читаются.' : 'Текст документа обрабатывается локально. В Codex передаются выбранные фрагменты.'}</p>
         </div>
       </aside>
 
@@ -2551,6 +2704,28 @@ function App() {
         </section>
       </div>}
 
+      {deleteApplicationChatTarget && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteApplicationChatTarget(null) }}>
+        <section className="modal-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="delete-application-chat-title" aria-describedby="delete-application-chat-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть" onClick={() => setDeleteApplicationChatTarget(null)}><X size={19} /></button>
+          <span className="modal-symbol"><Trash2 size={20} /></span>
+          <span className="modal-eyebrow">УДАЛЕНИЕ ЧАТА</span>
+          <h2 id="delete-application-chat-title">Удалить чат помощи?</h2>
+          <p id="delete-application-chat-description" className="modal-intro">Переписка «{deleteApplicationChatTarget.title}» будет удалена. Документы и другие чаты останутся.</p>
+          <div className="confirm-actions"><button className="button button-light" onClick={() => setDeleteApplicationChatTarget(null)}>Отмена</button><button className="button button-dark" onClick={() => void confirmDeleteApplicationChat()}>Удалить чат</button></div>
+        </section>
+      </div>}
+
+      {applicationSourceTarget && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setApplicationSourceTarget(null) }}>
+        <section className="modal-card confirm-card application-source-dialog" role="dialog" aria-modal="true" aria-labelledby="application-source-title" aria-describedby="application-source-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть сведения об источнике" onClick={() => setApplicationSourceTarget(null)}><X size={19} /></button>
+          <span className="modal-symbol"><CircleHelp size={20} /></span>
+          <span className="modal-eyebrow">ПОДТВЕРЖДЁННАЯ ФУНКЦИЯ</span>
+          <h2 id="application-source-title">{applicationSourceTarget.title || 'Функция приложения'}</h2>
+          <p id="application-source-description" className="modal-intro application-source-evidence">{applicationSourceTarget.text}</p>
+          <div className="confirm-actions"><button className="button button-dark" onClick={() => setApplicationSourceTarget(null)}>Понятно</button></div>
+        </section>
+      </div>}
+
       {messageDeleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setMessageDeleteTarget(null) }}>
         <section className="modal-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="delete-message-title" aria-describedby="delete-message-description">
           <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть" onClick={() => setMessageDeleteTarget(null)}><X size={19} /></button>
@@ -2588,12 +2763,14 @@ function processingDescription(status: DocumentRecord['status']): string {
 function EmptyWorkspace({
   isUploading,
   onChoose,
+  onStartApplicationHelp,
   documentsCount,
   onToggleLibrary,
   onExpandChat,
 }: {
   isUploading: boolean
   onChoose: () => void
+  onStartApplicationHelp: () => void
   documentsCount: number
   onToggleLibrary: () => void
   onExpandChat: () => void
@@ -2620,6 +2797,10 @@ function EmptyWorkspace({
           <span>или нажмите, чтобы выбрать на компьютере</span>
           <small>PDF · DOCX · TXT · MD · CSV · XML · XLSX · XLS · PPTX · HTML · JSON · EPUB <i /> до 25 МБ</small>
         </button>
+        <div className="application-help-entry">
+          <span>Нужна подсказка по самому приложению?</span>
+          <button className="button button-light" type="button" onClick={onStartApplicationHelp}>Спросить о работе приложения</button>
+        </div>
         <div className="empty-footnote"><ShieldCheck size={15} /><span>Оригиналы и индексы остаются на вашем компьютере</span></div>
         {documentsCount > 0 && <p className="empty-library-note">Выберите сохранённый чат слева, чтобы продолжить работу.</p>}
       </div>
@@ -2637,6 +2818,17 @@ function EmptyWorkspace({
         <p className="empty-chat-footnote">Ответы будут сопровождаться цитатами из документа.</p>
       </div>
     </div>
+  )
+}
+
+function ApplicationHelpWorkspace() {
+  return (
+    <section className="application-help-workspace" aria-labelledby="application-help-heading">
+      <span className="empty-eyebrow">ПОМОЩЬ ПО ПРИЛОЖЕНИЮ</span>
+      <h1 id="application-help-heading">Спросите, как найти функцию или выполнить действие.</h1>
+      <p>Ответы строятся по каталогу возможностей текущей версии. Чаты и документы из библиотеки не читаются.</p>
+      <div className="application-help-workspace-note"><ShieldCheck size={15} /><span>Выберите вопрос справа. Если подтверждённой информации нет, помощник скажет об этом.</span></div>
+    </section>
   )
 }
 

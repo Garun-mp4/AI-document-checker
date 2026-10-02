@@ -55,6 +55,8 @@ class SourceOut(BaseModel):
     locator: dict[str, Any]
     ordinal: int
     is_derived: bool
+    source_type: Literal["document", "application"] = "document"
+    title: str | None = None
 
 
 class PreviewBlockOut(BaseModel):
@@ -325,7 +327,8 @@ class DocumentExportIn(BaseModel):
 
 class ChatOut(BaseModel):
     id: str
-    document_id: str
+    scope: Literal["document", "application"] = "document"
+    document_id: str | None
     context_epoch: int = 0
 
 
@@ -355,21 +358,22 @@ class DocumentAnalysisVersionOut(BaseModel):
 
 
 class ChatSummaryOut(BaseModel):
-    """A durable library entry representing one document conversation."""
+    """A durable library entry for a document or application-help conversation."""
 
     id: str
-    document_id: str
+    scope: Literal["document", "application"] = "document"
+    document_id: str | None
     title: str
     custom_title: str | None = None
     pinned: bool = False
     revision: int = 1
-    filename: str
-    file_type: str
-    file_size: int
-    status: str
-    error_message: str | None
-    chunk_count: int
-    metadata: dict[str, Any]
+    filename: str | None = None
+    file_type: str | None = None
+    file_size: int | None = None
+    status: str | None = None
+    error_message: str | None = None
+    chunk_count: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     last_activity_at: datetime
     message_count: int
@@ -389,7 +393,8 @@ class ChatLibraryPageOut(BaseModel):
 
 class ChatSettingsOut(BaseModel):
     id: str
-    document_id: str
+    scope: Literal["document", "application"] = "document"
+    document_id: str | None
     title: str
     custom_title: str | None
     pinned: bool

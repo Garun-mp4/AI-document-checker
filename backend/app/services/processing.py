@@ -17,7 +17,9 @@ class DocumentProcessor:
     async def start(self):
         async with SessionLocal() as session, session.begin():
             documents = (await session.execute(select(Document).with_for_update())).scalars().all()
-            chat_ids = set((await session.execute(select(Chat.document_id))).scalars().all())
+            chat_ids = set((await session.execute(
+                select(Chat.document_id).where(Chat.document_id.is_not(None))
+            )).scalars().all())
             for document in documents:
                 if document.id not in chat_ids:
                     session.add(Chat(document_id=document.id))
