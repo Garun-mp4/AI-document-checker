@@ -63,6 +63,9 @@ export interface ChatSummary {
   id: string
   document_id: string
   title: string
+  custom_title: string | null
+  pinned: boolean
+  revision: number
   filename: string
   file_type: string
   file_size: number
@@ -75,6 +78,25 @@ export interface ChatSummary {
   message_count: number
   last_message_at: string | null
   last_message_preview: string | null
+  search_snippet: string | null
+  search_message_id: string | null
+}
+
+export interface ChatLibraryPage {
+  items: ChatSummary[]
+  total: number
+  offset: number
+  limit: number
+  has_more: boolean
+}
+
+export interface ChatSettings {
+  id: string
+  document_id: string
+  title: string
+  custom_title: string | null
+  pinned: boolean
+  revision: number
 }
 
 export interface SourceRef {

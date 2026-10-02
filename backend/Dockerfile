@@ -16,7 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_BUILD_TIME=${APP_BUILD_TIME}
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 libseccomp2 poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core libgomp1 libseccomp2 poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --gid app --home-dir /app app \

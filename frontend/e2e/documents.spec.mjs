@@ -1,4 +1,5 @@
 import { test, expect, upload, provider, originalVisible, showChat } from './helpers.mjs'
+import { readFile } from 'node:fs/promises'
 
 test.beforeEach(async ({ request }) => provider(request))
 
@@ -91,6 +92,54 @@ test('CSV aggregates and actual row pagination', async ({ page }) => {
   await page.getByRole('button', { name: 'Показать ещё', exact: true }).click()
   await expect(page.locator('.original-csv-table tbody tr')).toHaveCount(240)
   await expect(page.getByRole('button', { name: 'Показать ещё', exact: true })).toHaveCount(0)
+})
+
+test('export dialog downloads selected answers as Markdown and saved analysis as PDF', async ({ page }) => {
+  await upload(page, 'sample.txt')
+  await page.setViewportSize({ width: 390, height: 844 })
+  const openExport = page.getByRole('button', { name: 'Экспорт', exact: true })
+  await expect(openExport).toBeVisible()
+  await openExport.click()
+  const dialog = page.getByRole('dialog', { name: 'Экспорт документа' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText('не отправляет новый запрос модели')).toBeVisible()
+  const mobileLayout = await page.evaluate(() => ({
+    viewportWidth: document.documentElement.clientWidth,
+    pageWidth: document.documentElement.scrollWidth,
+  }))
+  const dialogBox = await dialog.boundingBox()
+  expect(mobileLayout.pageWidth).toBeLessThanOrEqual(mobileLayout.viewportWidth)
+  expect(dialogBox?.x).toBeGreaterThanOrEqual(0)
+  expect((dialogBox?.x ?? 0) + (dialogBox?.width ?? Infinity)).toBeLessThanOrEqual(mobileLayout.viewportWidth)
+
+  await dialog.locator('input[name="export-scope"][value="selected_answers"]').check()
+  const answers = dialog.locator('.export-answer-option input[type="checkbox"]')
+  await expect(answers).toHaveCount(7)
+  await answers.nth(1).uncheck()
+  await answers.nth(2).uncheck()
+  await answers.nth(3).uncheck()
+  await answers.nth(4).uncheck()
+  await answers.nth(5).uncheck()
+  await answers.nth(6).uncheck()
+  await dialog.locator('input[name="export-format"][value="markdown"]').check()
+  const markdownDownloadPromise = page.waitForEvent('download')
+  await dialog.getByRole('button', { name: 'Скачать Markdown' }).click()
+  const markdownDownload = await markdownDownloadPromise
+  expect(markdownDownload.suggestedFilename()).toMatch(/\.md$/)
+  const markdownContent = await readFile(await markdownDownload.path(), 'utf8')
+  expect(markdownContent).toContain('## Выбранные ответы')
+  expect(markdownContent).toContain('Источники')
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await openExport.click()
+  const pdfDialog = page.getByRole('dialog', { name: 'Экспорт документа' })
+  await pdfDialog.locator('input[name="export-format"][value="pdf"]').check()
+  const pdfDownloadPromise = page.waitForEvent('download')
+  await pdfDialog.getByRole('button', { name: 'Скачать PDF' }).click()
+  const pdfDownload = await pdfDownloadPromise
+  expect(pdfDownload.suggestedFilename()).toMatch(/\.pdf$/)
+  const pdfContent = await readFile(await pdfDownload.path())
+  expect(pdfContent.subarray(0, 5).toString()).toBe('%PDF-')
 })
 
 test('Citation loads and highlights a matching CSV range beyond the first table page', async ({ page }) => {

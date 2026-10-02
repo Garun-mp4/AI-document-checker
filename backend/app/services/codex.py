@@ -245,16 +245,21 @@ class CodexService:
         self,
         payload: dict[str, Any],
         existing_thread_id: str | None = None,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[dict[str, str]]:
         await self.require_ready()
         assert self.client is not None
+        selected_model = model or settings.codex_model
+        selected_effort = reasoning_effort or settings.codex_reasoning_effort
         thread = None
         if existing_thread_id:
             try:
                 thread = await self.client.thread_resume(
                     existing_thread_id,
                     approval_mode=ApprovalMode.deny_all,
-                    model=settings.codex_model,
+                    model=selected_model,
                     cwd=self._work_dir,
                     base_instructions=BASE_INSTRUCTIONS,
                     sandbox=Sandbox.read_only,
@@ -264,7 +269,7 @@ class CodexService:
         if thread is None:
             thread = await self.client.thread_start(
                 approval_mode=ApprovalMode.deny_all,
-                model=settings.codex_model,
+                model=selected_model,
                 cwd=self._work_dir,
                 base_instructions=BASE_INSTRUCTIONS,
                 sandbox=Sandbox.read_only,
@@ -277,8 +282,8 @@ class CodexService:
                 content=json.dumps(payload, ensure_ascii=False),
             ),
             approval_mode=ApprovalMode.deny_all,
-            model=settings.codex_model,
-            effort=settings.codex_reasoning_effort,
+            model=selected_model,
+            effort=selected_effort,
             sandbox=Sandbox.read_only,
         )
         async for notification in turn.stream():

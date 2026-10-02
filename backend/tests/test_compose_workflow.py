@@ -459,3 +459,97 @@ def test_compose_rejects_unsupported_and_over_limit_uploads_without_persisting_t
     assert oversized.status_code == 413
     final_ids = {item["id"] for item in compose_client.get("/api/v1/documents").json()}
     assert final_ids == initial_ids
+
+
+@pytest.mark.integration
+def test_compose_exports_saved_analysis_and_conversation_without_new_model_calls(
+    compose_client: httpx.Client,
+) -> None:
+    provider = compose_client.post("/api/v1/__e2e/provider", json={"mode": "ready", "reset_counters": True})
+    assert provider.status_code == 200, provider.text
+    uploaded = compose_client.post(
+        "/api/v1/documents",
+        files={"file": ("export-sample.txt", (FIXTURES / "sample.txt").read_bytes(), "text/plain")},
+    )
+    assert uploaded.status_code == 202, uploaded.text
+    document_id = uploaded.json()["id"]
+    try:
+        document = _wait_for_document(compose_client, document_id)
+        assert document["status"] == "ready", document
+        insights_response = compose_client.get(f"/api/v1/documents/{document_id}/insights")
+        assert insights_response.status_code == 200, insights_response.text
+        insights = insights_response.json()
+        assert len(insights) == 7
+        settings = compose_client.get("/api/v1/codex/status").json()
+
+        markdown = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={"scope": "analysis", "format": "markdown"},
+        )
+        assert markdown.status_code == 200, markdown.text
+        assert markdown.headers["content-type"].startswith("text/markdown")
+        assert "attachment" in markdown.headers.get("content-disposition", "")
+        assert "filename*=UTF-8''" in markdown.headers["content-disposition"]
+        assert markdown.headers.get("x-content-type-options") == "nosniff"
+        report = markdown.text
+        assert "export-sample.txt" in report
+        assert "Версия обработки" in report
+        assert settings["model"] in report
+        assert settings["reasoning_effort"] in report
+        assert "Источники" in report
+        assert "localhost" not in report
+        assert "codex_thread_id" not in report
+        assert "Authorization" not in report
+
+        pdf = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={"scope": "analysis", "format": "pdf"},
+        )
+        assert pdf.status_code == 200, pdf.text
+        assert pdf.headers["content-type"].startswith("application/pdf")
+        assert pdf.content.startswith(b"%PDF-")
+
+        selected = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={"scope": "selected_answers", "format": "markdown", "selected_keys": [insights[0]["key"]]},
+        )
+        assert selected.status_code == 200, selected.text
+        assert insights[0]["question"] in selected.text
+        assert all(item["question"] not in selected.text for item in insights[1:])
+        invalid_selection = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={"scope": "selected_answers", "format": "markdown", "selected_keys": ["missing-answer"]},
+        )
+        assert invalid_selection.status_code == 422
+
+        chat = compose_client.get(f"/api/v1/documents/{document_id}/chat").json()
+        sent = compose_client.post(
+            f"/api/v1/chats/{chat['id']}/messages",
+            json={"text": "Перечисли подтверждённые факты"},
+            timeout=90,
+        )
+        assert sent.status_code == 200, sent.text
+        saved_messages = compose_client.get(f"/api/v1/chats/{chat['id']}/messages").json()
+        assistant = next(item for item in saved_messages if item["role"] == "assistant")
+        assert assistant["model"] == settings["model"]
+        assert assistant["reasoning_effort"] == settings["reasoning_effort"]
+        conversation = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={"scope": "conversation", "format": "markdown"},
+        )
+        assert conversation.status_code == 200, conversation.text
+        assert conversation.text.index("### Вы ·") < conversation.text.index("### Ассистент ·")
+        assert "Синтетический ответ" in conversation.text
+        assert "reasoning:" in conversation.text
+
+        before_exports = compose_client.post("/api/v1/__e2e/provider", json={"mode": "ready"}).json()
+        assert before_exports["complete_calls"] == 1
+        assert before_exports["chat_calls"] == 1
+        active_after_export = compose_client.get(f"/api/v1/documents/{document_id}").json()
+        assert active_after_export["active_version"] == document["active_version"]
+        original = compose_client.get(f"/api/v1/documents/{document_id}/file")
+        assert original.status_code == 200
+        assert original.content == (FIXTURES / "sample.txt").read_bytes()
+    finally:
+        deleted = compose_client.delete(f"/api/v1/documents/{document_id}")
+        assert deleted.status_code == 204, deleted.text

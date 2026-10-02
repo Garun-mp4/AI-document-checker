@@ -6,9 +6,7 @@ the application's actual implementations. Never import this from app/.
 import asyncio
 import json
 import uuid
-
-from fastapi import HTTPException, Request
-from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
 
 from app import main
 from app.config import settings
@@ -16,6 +14,8 @@ from app.database import SessionLocal
 from app.models import Chat, Chunk, Document, Message
 from app.services.codex import CodexService, CodexUnavailable
 from app.services.codex_preferences import model_display_name
+from fastapi import HTTPException, Request
+from sqlalchemy import delete, select
 
 
 class DeterministicCodex(CodexService):
@@ -25,6 +25,8 @@ class DeterministicCodex(CodexService):
         super().__init__()
         self.stream_release = asyncio.Event()
         self.stream_release.set()
+        self.complete_calls = 0
+        self.chat_calls = 0
 
     async def start(self):
         pass
@@ -51,6 +53,7 @@ class DeterministicCodex(CodexService):
         }
 
     async def complete(self, payload, output_schema):
+        self.complete_calls += 1
         await self.require_ready()
         sources = {source["label"]: source["excerpt"] for source in payload["sources"]}
         return json.dumps({"insights": [
@@ -59,7 +62,8 @@ class DeterministicCodex(CodexService):
             for question in payload["questions"]
         ]}, ensure_ascii=False)
 
-    async def stream_chat(self, payload, existing_thread_id=None):
+    async def stream_chat(self, payload, existing_thread_id=None, *, model=None, reasoning_effort=None):
+        self.chat_calls += 1
         await self.require_ready()
         yield {"kind": "thread", "thread_id": existing_thread_id or str(uuid.uuid4())}
         yield {"kind": "delta", "text": "**Синтетический ответ**\n\n"}
@@ -94,7 +98,10 @@ async def control(request: Request):
     app.state.markdown_failure = data.get('markdown_failure', False)
     app.state.hold_stage = data.get('hold_stage')
     app.state.hold_complete = data.get('hold_complete', False)
-    return {'mode': provider.mode}
+    if data.get('reset_counters'):
+        provider.complete_calls = 0
+        provider.chat_calls = 0
+    return {'mode': provider.mode, 'complete_calls': provider.complete_calls, 'chat_calls': provider.chat_calls}
 
 
 @app.post("/api/v1/__e2e/citation")
@@ -136,6 +143,85 @@ async def seed_citation(request: Request):
         session.add(message)
         await session.commit()
         return {"chat_id": str(chat.id), "message_id": str(message.id), "source_id": str(source.id)}
+
+
+@app.post("/api/v1/__e2e/library/seed")
+async def seed_chat_library(request: Request):
+    """Create isolated newer chats and older messages for library acceptance tests."""
+    data = await request.json()
+    try:
+        target_document_id = uuid.UUID(str(data.get("target_document_id", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid target document id") from exc
+    count = data.get("count", 31)
+    marker = data.get("marker", "")
+    if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 50:
+        raise HTTPException(status_code=422, detail="Seed count must be between 0 and 50")
+    if not isinstance(marker, str) or not marker or len(marker) > 120:
+        raise HTTPException(status_code=422, detail="A marker of at most 120 characters is required")
+
+    now = datetime.now(timezone.utc)
+    created_ids = []
+    async with SessionLocal() as session:
+        target = await session.get(Document, target_document_id)
+        target_chat = await session.scalar(select(Chat).where(Chat.document_id == target_document_id))
+        if target is None or target_chat is None:
+            raise HTTPException(status_code=404, detail="Target document chat not found")
+        for index in range(16):
+            session.add(Message(
+                chat_id=target_chat.id,
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"Тестовое старое сообщение {index + 1}",
+                citations=[],
+                created_at=now - timedelta(days=32 - index),
+            ))
+        matched_message = Message(
+            chat_id=target_chat.id,
+            role="assistant",
+            content=f"Найденное старое сообщение: {marker}",
+            citations=[],
+            created_at=now - timedelta(days=15),
+        )
+        session.add(matched_message)
+        base = now + timedelta(minutes=5)
+        for index in range(count):
+            document_id = uuid.uuid4()
+            moment = base + timedelta(seconds=index)
+            session.add(Document(
+                id=document_id,
+                filename=f"library-seed-{index + 1:02}.txt",
+                storage_path=f"/tmp/library-seed-{document_id}.txt",
+                file_type="txt",
+                file_size=1,
+                status="ready",
+                error_message=None,
+                chunk_count=0,
+                metadata_json={},
+                created_at=moment,
+                updated_at=moment,
+            ))
+            await session.flush()
+            session.add(Chat(document_id=document_id, created_at=moment))
+            created_ids.append(str(document_id))
+        await session.commit()
+        await session.refresh(matched_message)
+        return {"document_ids": created_ids, "target_message_id": str(matched_message.id)}
+
+
+@app.delete("/api/v1/__e2e/library/seed")
+async def remove_seeded_chats(request: Request):
+    data = await request.json()
+    raw_ids = data.get("document_ids", [])
+    if not isinstance(raw_ids, list) or len(raw_ids) > 50:
+        raise HTTPException(status_code=422, detail="Seed document ids must be a list of at most 50 items")
+    try:
+        document_ids = [uuid.UUID(str(value)) for value in raw_ids]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid seeded document id") from exc
+    async with SessionLocal() as session:
+        await session.execute(delete(Document).where(Document.id.in_(document_ids)))
+        await session.commit()
+    return {"deleted": len(document_ids)}
 
 
 @app.get('/api/v1/__e2e/worker-control')

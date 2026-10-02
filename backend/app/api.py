@@ -8,8 +8,10 @@ import mimetypes
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -22,7 +24,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, update
 
 from app.config import settings
 from app.database import SessionLocal
@@ -37,9 +39,13 @@ from app.models import (
 )
 from app.schemas import (
     AppVersionOut,
+    ChatLibraryPageOut,
     ChatOut,
+    ChatSettingsOut,
     ChatSummaryOut,
+    ChatUpdateIn,
     CodexPreferencesIn,
+    DocumentExportIn,
     DocumentOut,
     DocumentPreviewOut,
     DocumentSearchOut,
@@ -53,13 +59,25 @@ from app.schemas import (
     TablePreviewOut,
 )
 from app.services.artifact_response import artifact_response
-from app.services.chat_library import build_chat_summary
+from app.services.chat_library import get_chat_settings, list_chat_library as query_chat_library
 from app.services.citations import format_source_markers
 from app.services.codex import (
     CodexModelUnavailable,
     CodexNeedsLogin,
     CodexPreferenceError,
     CodexUnavailable,
+)
+from app.services.document_export import (
+    MAX_EXPORT_SOURCES,
+    ExportAnswer,
+    ExportError,
+    ExportMessage,
+    ExportSnapshot,
+    ExportSource,
+    render_export,
+)
+from app.services.document_export import (
+    safe_filename as export_filename,
 )
 from app.services.document_search import (
     original_search_source_cache,
@@ -173,6 +191,7 @@ async def _message_out(session, chat: Chat, message: Message) -> MessageOut:
     return MessageOut(
         id=str(message.id), role=message.role, content=message.content,
         citations=await _sources_for_ids(session, chat.document_id, message.citations or []),
+        model=message.model, reasoning_effort=message.reasoning_effort,
         created_at=message.created_at,
     )
 
@@ -215,30 +234,60 @@ async def list_documents() -> list[DocumentOut]:
 
 @router.get("/chats", response_model=list[ChatSummaryOut])
 async def list_chat_library() -> list[ChatSummaryOut]:
-    """List persisted document conversations ordered by their last activity."""
+    """Compatibility list for API clients; summaries never load full histories."""
+    async with SessionLocal() as session:
+        page = await query_chat_library(session, limit=None)
+        return page.items
+
+
+@router.get("/chats/library", response_model=ChatLibraryPageOut)
+async def paginated_chat_library(
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> ChatLibraryPageOut:
+    """Search and page through chat summaries without fetching message bodies."""
+    async with SessionLocal() as session:
+        return await query_chat_library(session, query=q, offset=offset, limit=limit)
+
+
+@router.get("/chats/{chat_id}", response_model=ChatSettingsOut)
+async def read_chat_settings(chat_id: uuid.UUID) -> ChatSettingsOut:
+    async with SessionLocal() as session:
+        result = await get_chat_settings(session, chat_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        return result
+
+
+@router.patch("/chats/{chat_id}", response_model=ChatSettingsOut)
+async def update_chat_settings(chat_id: uuid.UUID, body: ChatUpdateIn) -> ChatSettingsOut:
+    changes: dict[str, Any] = {"revision": Chat.revision + 1}
+    if "title" in body.model_fields_set:
+        changes["title"] = body.title
+    if "pinned" in body.model_fields_set and body.pinned is not None:
+        changes["pinned_at"] = (
+            case((Chat.pinned_at.is_(None), datetime.now(timezone.utc)), else_=Chat.pinned_at)
+            if body.pinned
+            else None
+        )
 
     async with SessionLocal() as session:
-        pairs = (await session.execute(
-            select(Chat, Document)
-            .join(Document, Document.id == Chat.document_id)
-            .order_by(Chat.created_at.desc())
-        )).all()
-        if not pairs:
-            return []
-        chat_ids = [chat.id for chat, _ in pairs]
-        messages = (await session.execute(
-            select(Message)
-            .where(Message.chat_id.in_(chat_ids))
-            .order_by(Message.created_at, Message.id)
-        )).scalars().all()
-        messages_by_chat: dict[uuid.UUID, list[Message]] = {chat_id: [] for chat_id in chat_ids}
-        for message in messages:
-            messages_by_chat.setdefault(message.chat_id, []).append(message)
-        summaries = [
-            build_chat_summary(chat, document, messages_by_chat.get(chat.id, []))
-            for chat, document in pairs
-        ]
-        return sorted(summaries, key=lambda item: item.last_activity_at, reverse=True)
+        changed_id = await session.scalar(
+            update(Chat)
+            .where(Chat.id == chat_id, Chat.revision == body.expected_revision)
+            .values(**changes)
+            .returning(Chat.id)
+        )
+        if changed_id is None:
+            if await session.get(Chat, chat_id) is None:
+                raise HTTPException(status_code=404, detail="Чат не найден.")
+            raise HTTPException(status_code=409, detail="Чат изменился в другой вкладке. Обновите библиотеку и повторите действие.")
+        await session.commit()
+        result = await get_chat_settings(session, chat_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        return result
 
 
 @router.post("/documents", response_model=DocumentOut, status_code=status.HTTP_202_ACCEPTED)
@@ -767,6 +816,164 @@ async def document_insights(document_id: uuid.UUID) -> list[InsightOut]:
         ) for item in insights]
 
 
+@router.post("/documents/{document_id}/export")
+async def export_document(document_id: uuid.UUID, body: DocumentExportIn) -> Response:
+    """Export the currently persisted analysis or chat without calling Codex."""
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.status != "ready":
+            raise HTTPException(status_code=409, detail="Экспорт станет доступен после завершения обработки документа.")
+
+        version = await session.get(DocumentVersion, (document_id, document.active_version))
+        if version is None or version.state != "ready":
+            raise HTTPException(status_code=409, detail="Для документа нет готовой версии результатов.")
+
+        insights: list[Insight] = []
+        messages: list[Message] = []
+        citation_lists: list[list[str]] = []
+        if body.scope in {"analysis", "selected_answers"}:
+            insights = (await session.execute(
+                select(Insight)
+                .where(Insight.document_id == document_id, Insight.version == version.number)
+                .order_by(Insight.created_at, Insight.id)
+            )).scalars().all()
+            if not insights:
+                raise HTTPException(status_code=409, detail="В сохранённой версии нет ответов анализа для экспорта.")
+            if body.scope == "selected_answers":
+                existing_keys = {item.key for item in insights}
+                missing_keys = set(body.selected_keys) - existing_keys
+                if missing_keys:
+                    raise HTTPException(status_code=422, detail="Один или несколько выбранных ответов больше недоступны.")
+                insights = [item for item in insights if item.key in set(body.selected_keys)]
+            citation_lists.extend([list(item.citations or []) for item in insights])
+        else:
+            chat = (await session.execute(select(Chat).where(Chat.document_id == document_id))).scalar_one_or_none()
+            if chat is None:
+                raise HTTPException(status_code=409, detail="Для документа ещё нет сохранённой переписки.")
+            messages = (await session.execute(
+                select(Message).where(Message.chat_id == chat.id)
+                .order_by(Message.created_at, Message.id).limit(2_001)
+            )).scalars().all()
+            if len(messages) > 2_000:
+                raise HTTPException(status_code=413, detail="Переписка слишком длинная для одного экспорта.")
+            citation_lists.extend([list(item.citations or []) for item in messages])
+
+        flattened_ids = [value for citations in citation_lists for value in citations]
+        if len(flattened_ids) > MAX_EXPORT_SOURCES:
+            raise HTTPException(status_code=413, detail="В экспорте слишком много ссылок на источники.")
+        parsed_ids: list[uuid.UUID] = []
+        for value in flattened_ids:
+            try:
+                parsed_ids.append(uuid.UUID(value))
+            except (ValueError, TypeError, AttributeError):
+                if body.scope != "conversation":
+                    raise HTTPException(status_code=409, detail="Не удалось проверить связь ответа с источником.") from None
+        chunk_rows = (await session.execute(
+            select(Chunk).where(Chunk.document_id == document_id, Chunk.id.in_(set(parsed_ids)))
+        )).scalars().all() if parsed_ids else []
+        chunks_by_id = {str(chunk.id): chunk for chunk in chunk_rows}
+
+        def resolve_sources(values: list[str], *, strict_active: bool) -> tuple[ExportSource, ...]:
+            result: list[ExportSource] = []
+            for index, value in enumerate(values):
+                try:
+                    source_id = str(uuid.UUID(value))
+                except (ValueError, TypeError, AttributeError):
+                    source_id = ""
+                chunk = chunks_by_id.get(source_id) if source_id else None
+                if chunk is None or (strict_active and chunk.version != version.chunk_version):
+                    if strict_active:
+                        raise HTTPException(status_code=409, detail="Источник ответа не соответствует сохранённой версии документа.")
+                    result.append(ExportSource(
+                        id=f"unavailable-{index}", text="", locator={}, ordinal=index,
+                        unavailable=True,
+                    ))
+                    continue
+                locator = chunk.locator if isinstance(chunk.locator, dict) else {}
+                result.append(ExportSource(
+                    id=source_id,
+                    text=str(locator.get("source_text") or chunk.text)[:MAX_EXPORT_SOURCES],
+                    locator=locator,
+                    ordinal=chunk.ordinal,
+                    is_derived=chunk.is_derived,
+                    version=chunk.version,
+                ))
+            return tuple(result)
+
+        if body.scope in {"analysis", "selected_answers"}:
+            export_insights = tuple(ExportAnswer(
+                key=item.key,
+                question=item.question,
+                answer=item.answer,
+                citations=resolve_sources(list(item.citations or []), strict_active=True),
+            ) for item in insights)
+            export_messages: tuple[ExportMessage, ...] = ()
+        else:
+            export_insights = ()
+            export_messages = tuple(ExportMessage(
+                role=item.role,
+                content=item.content,
+                citations=resolve_sources(list(item.citations or []), strict_active=False),
+                created_at=item.created_at,
+                model=item.model,
+                reasoning_effort=item.reasoning_effort,
+            ) for item in messages)
+
+        job = (await session.execute(
+            select(ProcessingJob)
+            .where(ProcessingJob.document_id == document_id,
+                   ProcessingJob.version == version.number,
+                   ProcessingJob.state == "succeeded")
+            .order_by(ProcessingJob.finished_at.desc().nullslast(), ProcessingJob.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        parameters = job.parameters if job and isinstance(job.parameters, dict) else {}
+        snapshot = ExportSnapshot(
+            filename=document.filename,
+            file_type=document.file_type,
+            exported_at=datetime.now(timezone.utc),
+            processing_version=version.number,
+            chunk_version=version.chunk_version,
+            model=parameters.get("model") if isinstance(parameters.get("model"), str) else None,
+            reasoning_effort=parameters.get("reasoning_effort") if isinstance(parameters.get("reasoning_effort"), str) else None,
+            analysis_source=document.analysis_source,
+            markdown_status=document.markdown_status,
+            markdown_converter_version=document.markdown_converter_version,
+            ocr_status=document.ocr_status,
+            ocr_language=document.ocr_language,
+            ocr_page_count=document.ocr_page_count,
+            ocr_confidence=document.ocr_confidence,
+            ocr_error=document.ocr_error,
+            insights=export_insights,
+            messages=export_messages,
+        )
+
+    try:
+        content = render_export(snapshot, body.scope, body.format, set(body.selected_keys))
+    except ExportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Document export failed for %s (%s)", document_id, type(exc).__name__, exc_info=False)
+        raise HTTPException(status_code=500, detail="Не удалось сформировать экспорт. Повторите попытку.") from None
+
+    filename = export_filename(snapshot.filename, body.format)
+    ascii_filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename).strip("._") or "report"
+    media_type = "text/markdown; charset=utf-8" if body.format == "markdown" else "application/pdf"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{quote(filename, safe="")}',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
 @router.get("/documents/{document_id}/chat", response_model=ChatOut)
 async def document_chat(document_id: uuid.UUID) -> ChatOut:
     async with SessionLocal() as session:
@@ -800,6 +1007,9 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except CodexUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    response_model = settings.codex_model
+    response_reasoning_effort = settings.codex_reasoning_effort
 
     async with SessionLocal() as session:
         chat = await session.get(Chat, chat_id)
@@ -867,7 +1077,12 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
                 "ordinal": chunk.ordinal,
                 "is_derived": chunk.is_derived,
             } for label, chunk in source_map.items()]})
-            async for item in codex.stream_chat(payload, codex_thread_id):
+            async for item in codex.stream_chat(
+                payload,
+                codex_thread_id,
+                model=response_model,
+                reasoning_effort=response_reasoning_effort,
+            ):
                 if item["kind"] == "thread":
                     thread_id = item["thread_id"]
                     async with SessionLocal() as session:
@@ -893,6 +1108,8 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
                     role="assistant",
                     content=answer,
                     citations=[str(chunk.id) for chunk in citations],
+                    model=response_model,
+                    reasoning_effort=response_reasoning_effort,
                 ))
                 await session.commit()
             citation_data = [{

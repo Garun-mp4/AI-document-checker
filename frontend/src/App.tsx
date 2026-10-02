@@ -10,12 +10,14 @@ import {
   ChevronRight,
   CircleHelp,
   Clock3,
+  Download,
   FileCode2,
   FileSpreadsheet,
   FileText,
   FileUp,
   LoaderCircle,
   Maximize2,
+  MoreHorizontal,
   Menu,
   MessageSquareText,
   Minimize2,
@@ -24,6 +26,10 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
+  Pencil,
+  Pin,
+  PinOff,
+  Search,
   RotateCw,
   Send,
   ShieldCheck,
@@ -31,7 +37,8 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import type { ChatMessage, ChatRecord, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import { createPortal } from 'react-dom'
+import type { ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
@@ -49,6 +56,9 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
 const DEFAULT_CODEX_REASONING = 'medium'
 const ALLOWED_CODEX_MODELS = new Set(['gpt-6-luna', 'gpt-6.1-sol'])
+const CHAT_LIBRARY_PAGE_SIZE = 30
+
+type ChatLibraryActionMenu = { chatId: string; top: number; left: number }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -179,6 +189,20 @@ function summaryToDocument(summary: ChatSummary): DocumentRecord {
 
 function App() {
   const [chats, setChats] = useState<ChatSummary[]>([])
+  const [chatLibraryTotal, setChatLibraryTotal] = useState(0)
+  const [chatLibraryHasMore, setChatLibraryHasMore] = useState(false)
+  const [chatLibraryLoading, setChatLibraryLoading] = useState(false)
+  const [chatLibraryLoadingMore, setChatLibraryLoadingMore] = useState(false)
+  const [chatLibraryError, setChatLibraryError] = useState('')
+  const [chatSearch, setChatSearch] = useState('')
+  const [debouncedChatSearch, setDebouncedChatSearch] = useState('')
+  const [chatActionMenu, setChatActionMenu] = useState<ChatLibraryActionMenu | null>(null)
+  const [renameTargetId, setRenameTargetId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [chatSettingsPendingId, setChatSettingsPendingId] = useState<string | null>(null)
+  const [renameError, setRenameError] = useState('')
+  const [pendingMessageNavigation, setPendingMessageNavigation] = useState<string | null>(null)
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY))
   const [newChatOpen, setNewChatOpen] = useState(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true')
   const [document, setDocument] = useState<DocumentRecord | null>(null)
@@ -232,17 +256,29 @@ function App() {
   const [previewTab, setPreviewTab] = useState<'original' | 'markdown'>('original')
   const [markdownRebuilding, setMarkdownRebuilding] = useState(false)
   const [markdownLoadingMore, setMarkdownLoadingMore] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportScope, setExportScope] = useState<'analysis' | 'selected_answers' | 'conversation'>('analysis')
+  const [exportFormat, setExportFormat] = useState<'markdown' | 'pdf'>('pdf')
+  const [exportSelectedKeys, setExportSelectedKeys] = useState<string[]>([])
+  const [exportPending, setExportPending] = useState(false)
+  const [exportError, setExportError] = useState('')
   const [previewPage, setPreviewPage] = useState(1)
   const { check: buildVersionCheck, recheck: recheckBuildVersion } = useBuildVersion()
   const fileInput = useRef<HTMLInputElement>(null)
+  const librarySearchRef = useRef<HTMLInputElement>(null)
+  const chatMenuRef = useRef<HTMLDivElement>(null)
+  const chatMenuTriggerRef = useRef<HTMLButtonElement | null>(null)
   const chatInputRef = useRef<HTMLTextAreaElement>(null)
   const workArea = useRef<HTMLElement>(null)
   const conversation = useRef<HTMLDivElement>(null)
   const authDetailsRef = useRef<HTMLDivElement>(null)
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
   const reasoningTriggerRef = useRef<HTMLButtonElement>(null)
+  const exportTriggerRef = useRef<HTMLButtonElement>(null)
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null)
   const searchNavigationRef = useRef(0)
+  const skipNextChatAutoScrollRef = useRef(false)
+  const chatLibraryRequestRef = useRef(0)
   const selectedIdRef = useRef(selectedId)
   const documentRef = useRef(document)
   const markdownDocumentRef = useRef(markdownDocument)
@@ -254,6 +290,68 @@ function App() {
     setToast(message)
     window.setTimeout(() => setToast(''), 4_500)
   }, [])
+
+  const closeExportDialog = useCallback(() => {
+    if (exportPending) return
+    setExportOpen(false)
+    window.requestAnimationFrame(() => exportTriggerRef.current?.focus())
+  }, [exportPending])
+
+  const startExport = useCallback(() => {
+    setExportScope('analysis')
+    setExportSelectedKeys(insights.map((insight) => insight.key))
+    setExportError('')
+    setExportOpen(true)
+  }, [insights])
+
+  const downloadExport = useCallback(async () => {
+    if (!document || exportPending) return
+    setExportPending(true)
+    setExportError('')
+    try {
+      const response = await fetch(`${API}/documents/${document.id}/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope: exportScope,
+          format: exportFormat,
+          selected_keys: exportScope === 'selected_answers' ? exportSelectedKeys : [],
+        }),
+      })
+      if (!response.ok) {
+        let message = `Не удалось подготовить экспорт (${response.status}).`
+        try {
+          const errorBody = await response.json() as { detail?: string }
+          if (errorBody.detail) message = errorBody.detail
+        } catch {
+          // Keep the status-based message if the proxy returned a non-JSON body.
+        }
+        throw new Error(message)
+      }
+      const expectedType = exportFormat === 'pdf' ? 'application/pdf' : 'text/markdown'
+      if (!response.headers.get('content-type')?.includes(expectedType)) {
+        throw new Error('Сервер вернул файл в неожиданном формате. Повторите экспорт.')
+      }
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = window.document.createElement('a')
+      const extension = exportFormat === 'pdf' ? '.pdf' : '.md'
+      const filename = document.filename.replace(/\.[^.]+$/, '') + extension
+      anchor.href = objectUrl
+      anchor.download = filename
+      anchor.hidden = true
+      window.document.body.append(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000)
+      setExportOpen(false)
+      window.requestAnimationFrame(() => exportTriggerRef.current?.focus())
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'Не удалось подготовить экспорт. Повторите попытку.')
+    } finally {
+      setExportPending(false)
+    }
+  }, [document, exportFormat, exportPending, exportScope, exportSelectedKeys])
 
   const updateDocumentInLibrary = useCallback((record: DocumentRecord) => {
     setChats((current) => current.map((item) => item.document_id === record.id ? {
@@ -270,20 +368,208 @@ function App() {
   }, [])
 
   const refreshLibrary = useCallback(async (preferredDocumentId?: string) => {
+    const requestId = ++chatLibraryRequestRef.current
+    setChatLibraryLoading(true)
+    setChatLibraryError('')
     try {
-      const result = await api<ChatSummary[]>(`${API}/chats`)
-      setChats(result)
-      setSelectedId((current) => preferredDocumentId ?? (newChatOpen ? null : current && result.some((item) => item.document_id === current) ? current : result[0]?.document_id ?? null))
+      const params = new URLSearchParams({ offset: '0', limit: String(CHAT_LIBRARY_PAGE_SIZE) })
+      if (debouncedChatSearch) params.set('q', debouncedChatSearch)
+      const result = await api<ChatLibraryPage>(`${API}/chats/library?${params}`)
+      if (requestId !== chatLibraryRequestRef.current) return
+      setChats(result.items)
+      setChatLibraryTotal(result.total)
+      setChatLibraryHasMore(result.has_more)
+      setSelectedId((current) => preferredDocumentId ?? (newChatOpen ? null : current ?? result.items[0]?.document_id ?? null))
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Не удалось загрузить библиотеку документов.')
+      if (requestId === chatLibraryRequestRef.current) {
+        setChatLibraryError(error instanceof Error ? error.message : 'Не удалось загрузить чаты.')
+      }
+    } finally {
+      if (requestId === chatLibraryRequestRef.current) setChatLibraryLoading(false)
     }
-  }, [newChatOpen, showToast])
+  }, [debouncedChatSearch, newChatOpen])
 
   useEffect(() => {
     void refreshLibrary()
-    const timer = window.setInterval(() => void refreshLibrary(), 8_000)
-    return () => window.clearInterval(timer)
   }, [refreshLibrary])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedChatSearch(chatSearch.trim()), 250)
+    return () => window.clearTimeout(timer)
+  }, [chatSearch])
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (window.document.visibilityState === 'visible') void refreshLibrary()
+    }
+    window.document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => window.document.removeEventListener('visibilitychange', refreshWhenVisible)
+  }, [refreshLibrary])
+
+  const loadMoreChats = useCallback(async () => {
+    if (!chatLibraryHasMore || chatLibraryLoadingMore || chatSearch.trim() !== debouncedChatSearch) return
+    const requestId = chatLibraryRequestRef.current
+    setChatLibraryLoadingMore(true)
+    setChatLibraryError('')
+    try {
+      const params = new URLSearchParams({ offset: String(chats.length), limit: String(CHAT_LIBRARY_PAGE_SIZE) })
+      if (debouncedChatSearch) params.set('q', debouncedChatSearch)
+      const result = await api<ChatLibraryPage>(`${API}/chats/library?${params}`)
+      if (requestId !== chatLibraryRequestRef.current) return
+      setChats((current) => {
+        const knownIds = new Set(current.map((item) => item.id))
+        return [...current, ...result.items.filter((item) => !knownIds.has(item.id))]
+      })
+      setChatLibraryTotal(result.total)
+      setChatLibraryHasMore(result.has_more)
+    } catch (error) {
+      if (requestId === chatLibraryRequestRef.current) {
+        setChatLibraryError(error instanceof Error ? error.message : 'Не удалось загрузить следующую страницу чатов.')
+      }
+    } finally {
+      setChatLibraryLoadingMore(false)
+    }
+  }, [chatLibraryHasMore, chatLibraryLoadingMore, chatSearch, debouncedChatSearch, chats.length])
+
+  const selectLibraryChat = useCallback((item: ChatSummary) => {
+    setPendingMessageNavigation(item.search_message_id)
+    setHighlightedMessageId(null)
+    setNewChatOpen(false)
+    setSelectedId(item.document_id)
+    setMobileLibraryOpen(false)
+    if (selectedId === item.document_id && item.search_message_id) {
+      void api<ChatMessage[]>(`${API}/chats/${item.id}/messages`)
+        .then(setMessages)
+        .catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Не удалось открыть найденное сообщение.'))
+    }
+  }, [selectedId, showToast])
+
+  const openChatActionMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>, item: ChatSummary) => {
+    event.stopPropagation()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const menuWidth = 220
+    const menuHeight = item.custom_title ? 190 : 150
+    setChatActionMenu({
+      chatId: item.id,
+      left: Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8)),
+      top: Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - menuHeight - 8)),
+    })
+    chatMenuTriggerRef.current = event.currentTarget
+    window.requestAnimationFrame(() => chatMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus())
+  }, [])
+
+  const closeChatActionMenu = useCallback((restoreFocus = false) => {
+    setChatActionMenu(null)
+    if (restoreFocus) window.requestAnimationFrame(() => chatMenuTriggerRef.current?.focus())
+  }, [])
+
+  useEffect(() => {
+    if (!chatActionMenu) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!chatMenuRef.current?.contains(target) && !chatMenuTriggerRef.current?.contains(target)) {
+        setChatActionMenu(null)
+      }
+    }
+    window.document.addEventListener('pointerdown', onPointerDown)
+    return () => window.document.removeEventListener('pointerdown', onPointerDown)
+  }, [chatActionMenu])
+
+  const beginChatRename = useCallback((item: ChatSummary) => {
+    setSidebarCollapsed(false)
+    setRenameTargetId(item.id)
+    setRenameDraft(item.custom_title ?? item.title)
+    setRenameError('')
+    closeChatActionMenu()
+  }, [closeChatActionMenu])
+
+  const updateChatSettings = useCallback(async (
+    item: ChatSummary,
+    changes: { title?: string | null; pinned?: boolean },
+  ): Promise<ChatSettings> => {
+    const current = chats.find((chatItem) => chatItem.id === item.id) ?? item
+    return await api<ChatSettings>(`${API}/chats/${item.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: current.revision, ...changes }),
+    })
+  }, [chats])
+
+  const toggleChatPin = useCallback(async (item: ChatSummary) => {
+    closeChatActionMenu()
+    setChatSettingsPendingId(item.id)
+    try {
+      await updateChatSettings(item, { pinned: !item.pinned })
+      await refreshLibrary()
+      showToast(item.pinned ? 'Чат откреплён.' : 'Чат закреплён.')
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('изменился в другой вкладке')) await refreshLibrary()
+      showToast(error instanceof Error ? error.message : 'Не удалось изменить закрепление чата.')
+    } finally {
+      setChatSettingsPendingId(null)
+    }
+  }, [closeChatActionMenu, refreshLibrary, showToast, updateChatSettings])
+
+  const saveChatRename = useCallback(async (item: ChatSummary) => {
+    const title = renameDraft.trim()
+    if (!title) {
+      setRenameError('Введите название чата.')
+      return
+    }
+    setChatSettingsPendingId(item.id)
+    setRenameError('')
+    try {
+      await updateChatSettings(item, { title })
+      setRenameTargetId(null)
+      await refreshLibrary()
+      showToast('Название чата сохранено.')
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('изменился в другой вкладке')) await refreshLibrary()
+      setRenameError(error instanceof Error ? error.message : 'Не удалось сохранить название чата.')
+    } finally {
+      setChatSettingsPendingId(null)
+    }
+  }, [refreshLibrary, renameDraft, showToast, updateChatSettings])
+
+  const resetChatTitle = useCallback(async (item: ChatSummary) => {
+    closeChatActionMenu()
+    setChatSettingsPendingId(item.id)
+    try {
+      await updateChatSettings(item, { title: null })
+      await refreshLibrary()
+      showToast('Возвращено исходное название чата.')
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('изменился в другой вкладке')) await refreshLibrary()
+      showToast(error instanceof Error ? error.message : 'Не удалось вернуть исходное название.')
+    } finally {
+      setChatSettingsPendingId(null)
+    }
+  }, [closeChatActionMenu, refreshLibrary, showToast, updateChatSettings])
+
+  const clearChatRename = useCallback(() => {
+    setRenameTargetId(null)
+    setRenameDraft('')
+    setRenameError('')
+  }, [])
+
+  const handleChatMenuKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+    if (!items.length) return
+    const current = items.indexOf(window.document.activeElement as HTMLButtonElement)
+    let next = current
+    if (event.key === 'ArrowDown') next = (current + 1) % items.length
+    else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = items.length - 1
+    else return
+    event.preventDefault()
+    items[next].focus()
+  }, [])
+
+  const focusLibrarySearch = useCallback(() => {
+    setSidebarCollapsed(false)
+    window.requestAnimationFrame(() => librarySearchRef.current?.focus())
+  }, [])
 
   useEffect(() => {
     if (selectedId) localStorage.setItem(SELECTED_CHAT_STORAGE_KEY, selectedId)
@@ -399,6 +685,23 @@ function App() {
   }, [selectedId, loadReadyData, showToast, updateDocumentInLibrary])
 
   useEffect(() => {
+    if (!pendingMessageNavigation || !selectedId || !messages.length) return
+    const target = Array.from(conversation.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])
+      .find((element) => element.dataset.messageId === pendingMessageNavigation)
+    if (!target) return
+    skipNextChatAutoScrollRef.current = true
+    scrollIntoViewRespectingMotion(target, 'center')
+    setHighlightedMessageId(pendingMessageNavigation)
+    setPendingMessageNavigation(null)
+    const timer = window.setTimeout(() => setHighlightedMessageId(null), 3_500)
+    return () => window.clearTimeout(timer)
+  }, [messages, pendingMessageNavigation, selectedId])
+
+  useEffect(() => {
+    if (skipNextChatAutoScrollRef.current) {
+      skipNextChatAutoScrollRef.current = false
+      return
+    }
     conversation.current?.scrollTo({ top: conversation.current.scrollHeight, behavior: isSending ? 'auto' : 'smooth' })
   }, [messages, isSending])
 
@@ -428,6 +731,16 @@ function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        if (chatActionMenu) {
+          event.preventDefault()
+          closeChatActionMenu(true)
+          return
+        }
+        if (renameTargetId) {
+          event.preventDefault()
+          clearChatRename()
+          return
+        }
         if (openPreferenceMenu) {
           event.preventDefault()
           setOpenPreferenceMenu(null)
@@ -435,6 +748,11 @@ function App() {
             const trigger = openPreferenceMenu === 'model' ? modelTriggerRef.current : reasoningTriggerRef.current
             trigger?.focus()
           })
+          return
+        }
+        if (exportOpen) {
+          event.preventDefault()
+          closeExportDialog()
           return
         }
         setAuthOpen(false)
@@ -445,7 +763,7 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [openPreferenceMenu])
+  }, [chatActionMenu, clearChatRename, closeChatActionMenu, closeExportDialog, exportOpen, openPreferenceMenu, renameTargetId])
 
   useEffect(() => {
     if (!openPreferenceMenu) return
@@ -461,8 +779,8 @@ function App() {
   }, [authOpen])
 
   useEffect(() => {
-    if (!authOpen && !deleteTarget) return
-    const dialog = window.document.querySelector<HTMLElement>('.modal-card')
+    if (!authOpen && !deleteTarget && !exportOpen) return
+    const dialog = window.document.querySelector<HTMLElement>(exportOpen ? '.export-dialog' : '.modal-card')
     if (!dialog) return
     const focusableSelector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
     const getFocusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => element.offsetParent !== null)
@@ -482,7 +800,7 @@ function App() {
     }
     window.document.addEventListener('keydown', onKeyDown)
     return () => window.document.removeEventListener('keydown', onKeyDown)
-  }, [authOpen, deleteTarget])
+  }, [authOpen, deleteTarget, exportOpen])
 
   const uploadFile = useCallback(async (file?: File) => {
     if (!file) return
@@ -777,12 +1095,14 @@ function App() {
     try {
       await api<void>(`${API}/documents/${deleteTarget.id}`, { method: 'DELETE' })
       setChats((current) => current.filter((item) => item.document_id !== deleteTarget.id))
+      setChatLibraryTotal((current) => Math.max(0, current - 1))
       if (selectedId === deleteTarget.id) setSelectedId(null)
       setDeleteTarget(null)
+      void refreshLibrary()
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось удалить документ.')
     }
-  }, [deleteTarget, selectedId, showToast])
+  }, [deleteTarget, refreshLibrary, selectedId, showToast])
 
   const sendMessage = useCallback(async () => {
     const text = chatInput.trim()
@@ -963,6 +1283,62 @@ function App() {
     mobileLibraryOpen ? 'mobile-library-open' : '',
     mobileChatOpen ? 'mobile-chat-open' : '',
   ].filter(Boolean).join(' ')
+  const pinnedChats = chats.filter((item) => item.pinned)
+  const recentChats = chats.filter((item) => !item.pinned)
+  const activeMenuItem = chatActionMenu ? chats.find((item) => item.id === chatActionMenu.chatId) : null
+
+  const renderChatRow = (item: ChatSummary) => {
+    const isRenaming = renameTargetId === item.id
+    return (
+      <div key={item.id} className={`document-row ${selectedId === item.document_id ? 'selected' : ''} ${item.pinned ? 'is-pinned' : ''}`} data-chat-id={item.id}>
+        {isRenaming ? (
+          <form className="chat-rename-form" onSubmit={(event) => { event.preventDefault(); void saveChatRename(item) }}>
+            <input
+              autoFocus
+              aria-label="Название чата"
+              aria-invalid={Boolean(renameError)}
+              maxLength={72}
+              value={renameDraft}
+              onChange={(event) => { setRenameDraft(event.target.value); setRenameError('') }}
+              onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); clearChatRename() } }}
+            />
+            <button className="icon-button" type="submit" aria-label="Сохранить название чата" title="Сохранить" disabled={chatSettingsPendingId === item.id}><Check size={15} /></button>
+            <button className="icon-button" type="button" aria-label="Отменить переименование" title="Отмена" onClick={clearChatRename} disabled={chatSettingsPendingId === item.id}><X size={15} /></button>
+            {renameError && <span className="chat-rename-error" role="alert">{renameError}</span>}
+          </form>
+        ) : (
+          <>
+            <button className="document-select" onClick={() => selectLibraryChat(item)} title={item.filename} aria-label={`Открыть чат ${item.title}`}>
+              <span className="document-type-icon">{fileIcon(item.file_type, 17)}</span>
+              <span className="document-row-text">
+                <span className="document-row-name">{item.title}</span>
+                <span className="document-row-meta">
+                  <span className={`status-dot status-${item.status}`} />
+                  {item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status)}
+                  <span className="row-meta-divider">·</span>{relativeDate(item.last_activity_at)}
+                  {item.pinned && <span className="chat-pinned-indicator"><Pin size={11} /> Закреплён</span>}
+                </span>
+                {debouncedChatSearch && <span className="chat-search-snippet">{item.search_snippet ?? item.last_message_preview ?? item.filename}</span>}
+              </span>
+            </button>
+            <button
+              className="row-actions-trigger icon-button"
+              type="button"
+              aria-label={`Действия: ${item.title}`}
+              aria-haspopup="menu"
+              aria-expanded={chatActionMenu?.chatId === item.id}
+              aria-controls="chat-actions-menu"
+              title={`Действия: ${item.title}`}
+              data-chat-actions-trigger={item.id}
+              onClick={(event) => openChatActionMenu(event, item)}
+            >
+              {chatSettingsPendingId === item.id ? <LoaderCircle className="spin" size={15} /> : <MoreHorizontal size={16} />}
+            </button>
+          </>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className={mainClasses} style={{ '--chat-width': `${chatWidth}px` } as React.CSSProperties}>
@@ -1005,30 +1381,64 @@ function App() {
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
           <span>Новый чат</span>
         </button>
-        <div className="library-list-heading">
-          <span>Недавние чаты</span><span className="count-badge">{chats.length}</span>
+        <div className="library-search-wrap">
+          <Search className="library-search-icon" size={15} aria-hidden="true" />
+          <input
+            ref={librarySearchRef}
+            type="search"
+            aria-label="Поиск по чатам"
+            placeholder="Название, файл или сообщение"
+            maxLength={120}
+            value={chatSearch}
+            onChange={(event) => setChatSearch(event.target.value)}
+          />
+          {chatSearch && <button className="library-search-clear" type="button" aria-label="Очистить поиск чатов" title="Очистить поиск" onClick={() => setChatSearch('')}><X size={14} /></button>}
+        </div>
+        <button className="library-search-collapsed-trigger icon-button" type="button" aria-label="Поиск по чатам" title="Поиск по чатам" onClick={focusLibrarySearch}><Search size={17} /></button>
+        <div className="library-list-heading library-results-heading" aria-live="polite">
+          <span>{debouncedChatSearch ? 'Результаты поиска' : 'Недавние чаты'}</span>
+          <span className="count-badge">{chatLibraryTotal}</span>
         </div>
         <div className="document-list">
-          {chats.length === 0 ? (
-            <div className="library-empty">Чаты с документами появятся здесь</div>
-          ) : chats.map((item) => (
-            <div key={item.id} className={`document-row ${selectedId === item.document_id ? 'selected' : ''}`}>
-              <button className="document-select" onClick={() => { setNewChatOpen(false); setSelectedId(item.document_id); setMobileLibraryOpen(false) }} title={item.filename} aria-label={`Открыть чат ${item.title}`}>
-                <span className="document-type-icon">{fileIcon(item.file_type, 17)}</span>
-                <span className="document-row-text">
-                  <span className="document-row-name">{item.title}</span>
-                  <span className="document-row-meta"><span className={`status-dot status-${item.status}`} />{item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status)}<span className="row-meta-divider">·</span>{relativeDate(item.last_activity_at)}</span>
-                </span>
-              </button>
-              <button className="row-delete icon-button" aria-label={`Удалить ${item.filename}`} title={`Удалить ${item.filename}`} onClick={() => setDeleteTarget(summaryToDocument(item))}><Trash2 size={15} /></button>
-            </div>
-          ))}
+          {pinnedChats.length > 0 && <>
+            <div className="library-list-heading library-group-heading"><span>Закреплённые</span><span className="count-badge">{pinnedChats.length}</span></div>
+            {pinnedChats.map(renderChatRow)}
+          </>}
+          {recentChats.length > 0 && <>
+            {pinnedChats.length > 0 && <div className="library-list-heading library-group-heading">Недавние</div>}
+            {recentChats.map(renderChatRow)}
+          </>}
+          {chats.length === 0 && chatLibraryLoading && <div className="library-loading" aria-label="Загружаю библиотеку чатов"><span /><span /><span /></div>}
+          {chats.length === 0 && !chatLibraryLoading && !chatLibraryError && <div className="library-empty">{debouncedChatSearch ? <>Ничего не найдено по запросу «{debouncedChatSearch}».<button type="button" onClick={() => setChatSearch('')}>Очистить поиск</button></> : 'Чаты с документами появятся здесь'}</div>}
+          {chatLibraryError && <div className="library-error" role="alert"><span>{chatLibraryError}</span><button type="button" onClick={() => void refreshLibrary()}>Повторить</button></div>}
+          {chatLibraryHasMore && <button className="library-load-more" type="button" onClick={() => void loadMoreChats()} disabled={chatLibraryLoadingMore || chatLibraryLoading}>
+            {chatLibraryLoadingMore ? <><LoaderCircle className="spin" size={14} /> Загружаю…</> : `Показать ещё чаты (${Math.max(0, chatLibraryTotal - chats.length)})`}
+          </button>}
         </div>
         <div className="library-footer">
           <span className="local-lock"><ShieldCheck size={14} /> История и документы хранятся локально</span>
           <span>до 25 МБ на файл</span>
         </div>
       </aside>
+
+      {chatActionMenu && activeMenuItem && createPortal(
+        <div
+          id="chat-actions-menu"
+          className="chat-actions-menu"
+          role="menu"
+          aria-label={`Действия с чатом ${activeMenuItem.title}`}
+          ref={chatMenuRef}
+          style={{ top: chatActionMenu.top, left: chatActionMenu.left }}
+          onKeyDown={handleChatMenuKeyDown}
+        >
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => beginChatRename(activeMenuItem)}><Pencil size={15} /> Переименовать</button>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => void toggleChatPin(activeMenuItem)}>{activeMenuItem.pinned ? <PinOff size={15} /> : <Pin size={15} />} {activeMenuItem.pinned ? 'Открепить чат' : 'Закрепить чат'}</button>
+          {activeMenuItem.custom_title && <button type="button" role="menuitem" tabIndex={-1} onClick={() => void resetChatTitle(activeMenuItem)}><RotateCw size={15} /> Вернуть исходное название</button>}
+          <div className="chat-actions-divider" />
+          <button type="button" role="menuitem" tabIndex={-1} className="chat-actions-delete" onClick={() => { closeChatActionMenu(); setDeleteTarget(summaryToDocument(activeMenuItem)) }}><Trash2 size={15} /> Удалить документ и чат</button>
+        </div>,
+        window.document.body,
+      )}
 
       <main id="main-content" tabIndex={-1} className={`workspace ${!selectedId || !visibleStatus ? 'workspace-empty' : ''} ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
         <BuildVersionNotice check={buildVersionCheck} busy={isUploading || isSending} onReload={() => window.location.reload()} onRetry={recheckBuildVersion} />
@@ -1054,6 +1464,7 @@ function App() {
                 </div>
               </div>
               <div className="document-toolbar-actions">
+                {visibleStatus.status === 'ready' && document && <button ref={exportTriggerRef} className="button button-light export-trigger" type="button" onClick={startExport} disabled={isSending || exportPending} title={isSending ? 'Дождитесь завершения ответа' : 'Скачать сохранённые ответы и источники'}><Download size={15} /> Экспорт</button>}
                 {visibleStatus.status === 'error' && <button className="icon-button" title="Повторить обработку" aria-label="Повторить обработку" onClick={() => void retryDocument()}><RotateCw size={16} /></button>}
               </div>
             </div>
@@ -1189,7 +1600,7 @@ function App() {
             </div>
           ) : (
             <div className="message-list">
-              {messages.map((message) => <ChatBubble key={message.id} message={message} onOpenSource={openSource} />)}
+              {messages.map((message) => <ChatBubble key={message.id} message={message} onOpenSource={openSource} highlighted={message.id === highlightedMessageId} />)}
               {isSending && streamText && <ChatBubble message={{ id: 'streaming', role: 'assistant', content: streamingContent, citations: streamingCitations, created_at: new Date().toISOString() }} onOpenSource={openSource} />}
               {isSending && <div className="assistant-thinking"><span className="thinking-mark"><span /><span /><span /></span><span>{streamText ? 'Ответ формируется' : 'Сверяю ответ с фрагментами'}</span></div>}
             </div>
@@ -1218,6 +1629,50 @@ function App() {
       </aside>
 
       <button className="mobile-scrim" type="button" aria-label="Закрыть открытые панели" onClick={() => { setMobileLibraryOpen(false); setMobileChatOpen(false) }} />
+
+      {exportOpen && document && <div className="modal-backdrop export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeExportDialog() }}>
+        <section className="modal-card export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" aria-describedby="export-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть экспорт" onClick={closeExportDialog} disabled={exportPending}><X size={19} /></button>
+          <span className="modal-eyebrow">СОХРАНЁННЫЕ РЕЗУЛЬТАТЫ</span>
+          <h2 id="export-title">Экспорт документа</h2>
+          <p id="export-description" className="modal-intro">Выберите, что включить в файл. Экспорт использует уже сохранённые ответы и не отправляет новый запрос модели.</p>
+
+          <fieldset className="export-scope-fieldset">
+            <legend>Содержимое</legend>
+            <label className={`export-scope-option ${exportScope === 'analysis' ? 'is-selected' : ''}`}>
+              <input type="radio" name="export-scope" value="analysis" checked={exportScope === 'analysis'} onChange={() => { setExportScope('analysis'); setExportError('') }} disabled={exportPending || insights.length === 0} />
+              <span><strong>Полный анализ</strong><small>{insights.length} {pluralLabel(insights.length, 'ответ', 'ответа', 'ответов')} и источники</small></span>
+            </label>
+            <label className={`export-scope-option ${exportScope === 'selected_answers' ? 'is-selected' : ''}`}>
+              <input type="radio" name="export-scope" value="selected_answers" checked={exportScope === 'selected_answers'} onChange={() => { setExportScope('selected_answers'); setExportError('') }} disabled={exportPending || insights.length === 0} />
+              <span><strong>Выбранные ответы</strong><small>Отметьте нужные карточки анализа</small></span>
+            </label>
+            <label className={`export-scope-option ${exportScope === 'conversation' ? 'is-selected' : ''}`}>
+              <input type="radio" name="export-scope" value="conversation" checked={exportScope === 'conversation'} onChange={() => { setExportScope('conversation'); setExportError('') }} disabled={exportPending || messages.length === 0} />
+              <span><strong>Текущая переписка</strong><small>{messages.length} {pluralLabel(messages.length, 'сообщение', 'сообщения', 'сообщений')} в хронологическом порядке</small></span>
+            </label>
+          </fieldset>
+
+          {exportScope === 'selected_answers' && <div className="export-answer-picker" aria-label="Выбор ответов для экспорта">
+            <div className="export-picker-heading"><strong>Ответы</strong><div><button type="button" onClick={() => setExportSelectedKeys(insights.map((insight) => insight.key))} disabled={exportPending}>Все</button><span aria-hidden="true">·</span><button type="button" onClick={() => setExportSelectedKeys([])} disabled={exportPending}>Снять выбор</button></div></div>
+            {insights.map((insight) => <label className="export-answer-option" key={insight.key}>
+              <input type="checkbox" checked={exportSelectedKeys.includes(insight.key)} disabled={exportPending} onChange={(event) => setExportSelectedKeys((current) => event.target.checked ? [...current, insight.key] : current.filter((key) => key !== insight.key))} />
+              <span><strong>{insight.question}</strong><small>{insight.answer.replace(/\s+/g, ' ').slice(0, 118)}{insight.answer.length > 118 ? '…' : ''}</small></span>
+            </label>)}
+            <p className="export-selection-count">Выбрано: {exportSelectedKeys.length} из {insights.length}</p>
+          </div>}
+
+          <fieldset className="export-format-fieldset">
+            <legend>Формат файла</legend>
+            <label className={`export-format-option ${exportFormat === 'pdf' ? 'is-selected' : ''}`}><input type="radio" name="export-format" value="pdf" checked={exportFormat === 'pdf'} onChange={() => setExportFormat('pdf')} disabled={exportPending} /><span><strong>PDF</strong><small>Для просмотра и печати</small></span></label>
+            <label className={`export-format-option ${exportFormat === 'markdown' ? 'is-selected' : ''}`}><input type="radio" name="export-format" value="markdown" checked={exportFormat === 'markdown'} onChange={() => setExportFormat('markdown')} disabled={exportPending} /><span><strong>Markdown</strong><small>Для редактирования</small></span></label>
+          </fieldset>
+
+          <p className="export-source-note"><BookOpen size={14} /> Цитаты сохраняются с привязкой к странице, абзацу или строке документа.</p>
+          {exportError && <p className="export-error" role="alert">{exportError}</p>}
+          <div className="export-actions"><button className="button button-light" type="button" onClick={closeExportDialog} disabled={exportPending}>Отмена</button><button className="button button-dark" type="button" onClick={() => void downloadExport()} disabled={exportPending || (exportScope === 'selected_answers' && exportSelectedKeys.length === 0) || (exportScope === 'conversation' && messages.length === 0)}>{exportPending ? <><LoaderCircle className="spin" size={15} /> Готовлю файл…</> : <><Download size={15} /> Скачать {exportFormat === 'pdf' ? 'PDF' : 'Markdown'}</>}</button></div>
+        </section>
+      </div>}
 
       {authOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAuthOpen(false) }}>
         <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="auth-title" aria-describedby="auth-description">
@@ -1420,9 +1875,9 @@ function EmptyWorkspace({
   )
 }
 
-function ChatBubble({ message, onOpenSource }: { message: ChatMessage; onOpenSource: (source: SourceRef) => Promise<void> }) {
+function ChatBubble({ message, onOpenSource, highlighted = false }: { message: ChatMessage; onOpenSource: (source: SourceRef) => Promise<void>; highlighted?: boolean }) {
   return (
-    <article className={`chat-message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`}>
+    <article className={`chat-message ${message.role === 'user' ? 'user-message' : 'assistant-message'} ${highlighted ? 'search-result-highlight' : ''}`} data-message-id={message.id}>
       {message.role === 'assistant' && <span className="assistant-avatar"><span /><span /><span /><span /></span>}
       <div className="message-body">
         <div className="message-author">{message.role === 'user' ? 'Вы' : 'Document Checker'}</div>

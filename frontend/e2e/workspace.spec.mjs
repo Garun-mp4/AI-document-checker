@@ -122,11 +122,13 @@ test('Delete confirmation cancels safely, then removes only the selected synthet
   const chats = await (await request.get('/api/v1/chats')).json()
   const count = chats.length
   // The library is sorted by recency; this test's newly uploaded chat is first.
-  const row = page.locator('.library .row-delete').first()
+  const row = page.locator('.library .row-actions-trigger').first()
   await row.click()
+  await page.getByRole('menuitem', { name: 'Удалить документ и чат', exact: true }).click()
   await page.getByRole('button', { name: 'Отмена', exact: true }).click()
   expect((await request.get(`/api/v1/documents/${doc.id}`)).status()).toBe(200)
   await row.click()
+  await page.getByRole('menuitem', { name: 'Удалить документ и чат', exact: true }).click()
   await page.getByRole('button', { name: 'Удалить документ', exact: true }).click()
   await expect.poll(async () => (await request.get(`/api/v1/documents/${doc.id}`)).status()).toBe(404)
   expect((await (await request.get('/api/v1/chats')).json()).length).toBe(count - 1)
