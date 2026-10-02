@@ -25,19 +25,24 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, case, delete, func, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.database import SessionLocal
 from app.models import (
+    AdditionalAnalysis,
     Chat,
     Chunk,
     Document,
+    DocumentBookmark,
     DocumentVersion,
     Insight,
     Message,
     ProcessingJob,
 )
 from app.schemas import (
+    AdditionalAnalysisCreateIn,
+    AdditionalAnalysisOut,
     AppVersionOut,
     ChatLibraryPageOut,
     ChatOut,
@@ -47,6 +52,9 @@ from app.schemas import (
     CodexPreferencesIn,
     DeleteMessagesOut,
     DocumentAnalysisVersionOut,
+    DocumentBookmarkCreateIn,
+    DocumentBookmarkOut,
+    DocumentBookmarkUpdateIn,
     DocumentExportIn,
     DocumentOut,
     DocumentPreviewOut,
@@ -64,6 +72,7 @@ from app.schemas import (
     TableCalculationOut,
     TablePreviewOut,
 )
+from app.services.additional_analysis import analyze_additional
 from app.services.artifact_response import artifact_response
 from app.services.chat_context import bounded_history
 from app.services.chat_library import get_chat_settings
@@ -77,6 +86,7 @@ from app.services.codex import (
 )
 from app.services.document_export import (
     MAX_EXPORT_SOURCES,
+    ExportAdditionalAnalysis,
     ExportAnswer,
     ExportError,
     ExportMessage,
@@ -100,7 +110,7 @@ from app.services.document_security import (
     validate_mime,
 )
 from app.services.isolated_documents import run_document_operation
-from app.services.job_queue import active_chunk_version, cancel, cleanup_files, enqueue
+from app.services.job_queue import active_chunk_version, cancel, enqueue
 from app.services.maintenance import delete_documents
 from app.services.parsing import (
     SUPPORTED_EXTENSIONS,
@@ -1049,6 +1059,194 @@ async def document_insights(document_id: uuid.UUID, version: int | None = Query(
         ) for item in insights]
 
 
+async def _bookmark_out(session, document_id: uuid.UUID, item: DocumentBookmark) -> DocumentBookmarkOut:
+    sources = await _sources_for_ids(session, document_id, [str(item.source_id)])
+    if not sources:
+        raise HTTPException(status_code=409, detail="Источник закладки больше недоступен.")
+    return DocumentBookmarkOut(
+        id=str(item.id), note=item.note, source_version=item.source_version,
+        created_at=item.created_at, updated_at=item.updated_at, source=sources[0],
+    )
+
+
+@router.get("/documents/{document_id}/bookmarks", response_model=list[DocumentBookmarkOut])
+async def document_bookmarks(document_id: uuid.UUID) -> list[DocumentBookmarkOut]:
+    async with SessionLocal() as session:
+        if await session.get(Document, document_id) is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        rows = (await session.execute(
+            select(DocumentBookmark).where(DocumentBookmark.document_id == document_id)
+            .order_by(DocumentBookmark.created_at.desc(), DocumentBookmark.id.desc())
+        )).scalars().all()
+        return [await _bookmark_out(session, document_id, item) for item in rows]
+
+
+@router.post("/documents/{document_id}/bookmarks", response_model=DocumentBookmarkOut, status_code=201)
+async def create_document_bookmark(document_id: uuid.UUID, body: DocumentBookmarkCreateIn, request: Request) -> DocumentBookmarkOut:
+    _reject_during_cache_cleanup(request)
+    try:
+        async with SessionLocal() as session, session.begin():
+            document = await session.get(Document, document_id)
+            if document is None:
+                raise HTTPException(status_code=404, detail="Документ не найден.")
+            if document.status != "ready":
+                raise HTTPException(status_code=409, detail="Добавить источник в закладки можно после обработки документа.")
+            chunk = (await session.execute(
+                select(Chunk).where(
+                    Chunk.id == body.source_id,
+                    Chunk.document_id == document_id,
+                    Chunk.version == body.source_version,
+                )
+            )).scalar_one_or_none()
+            if chunk is None:
+                raise HTTPException(status_code=409, detail="Источник не относится к указанной версии документа.")
+            existing = (await session.execute(
+                select(DocumentBookmark).where(
+                    DocumentBookmark.document_id == document_id,
+                    DocumentBookmark.source_id == body.source_id,
+                )
+            )).scalar_one_or_none()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="Этот источник уже сохранён в закладках.")
+            item = DocumentBookmark(
+                document_id=document_id, source_id=chunk.id, source_version=chunk.version, note=body.note,
+            )
+            session.add(item)
+            await session.flush()
+            return await _bookmark_out(session, document_id, item)
+    except IntegrityError as exc:
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        if constraint == "uq_document_bookmarks_source":
+            raise HTTPException(status_code=409, detail="Этот источник уже сохранён в закладках.") from exc
+        raise
+
+
+@router.patch("/documents/{document_id}/bookmarks/{bookmark_id}", response_model=DocumentBookmarkOut)
+async def update_document_bookmark(
+    document_id: uuid.UUID, bookmark_id: uuid.UUID, body: DocumentBookmarkUpdateIn, request: Request,
+) -> DocumentBookmarkOut:
+    _reject_during_cache_cleanup(request)
+    async with SessionLocal() as session, session.begin():
+        item = (await session.execute(select(DocumentBookmark).where(
+            DocumentBookmark.id == bookmark_id,
+            DocumentBookmark.document_id == document_id,
+        ))).scalar_one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail="Закладка не найдена.")
+        item.note = body.note
+        await session.flush()
+        return await _bookmark_out(session, document_id, item)
+
+
+@router.delete("/documents/{document_id}/bookmarks/{bookmark_id}", status_code=204)
+async def delete_document_bookmark(document_id: uuid.UUID, bookmark_id: uuid.UUID, request: Request) -> Response:
+    _reject_during_cache_cleanup(request)
+    async with SessionLocal() as session, session.begin():
+        item = (await session.execute(select(DocumentBookmark).where(
+            DocumentBookmark.id == bookmark_id,
+            DocumentBookmark.document_id == document_id,
+        ))).scalar_one_or_none()
+        if item is None:
+            raise HTTPException(status_code=404, detail="Закладка не найдена.")
+        await session.delete(item)
+    return Response(status_code=204)
+
+
+@router.get("/documents/{document_id}/analysis/additional", response_model=list[AdditionalAnalysisOut])
+async def list_additional_analyses(
+    document_id: uuid.UUID, version: int | None = Query(default=None, ge=1),
+) -> list[AdditionalAnalysisOut]:
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        selected_number = version if version is not None else document.active_version
+        analysis_version = await session.get(DocumentVersion, (document_id, selected_number))
+        if analysis_version is None or analysis_version.state != "ready":
+            raise HTTPException(status_code=404, detail="Готовая версия анализа не найдена.")
+        rows = (await session.execute(
+            select(AdditionalAnalysis).where(
+                AdditionalAnalysis.document_id == document_id,
+                AdditionalAnalysis.analysis_version == selected_number,
+            ).order_by(AdditionalAnalysis.created_at, AdditionalAnalysis.id)
+        )).scalars().all()
+        result = []
+        for item in rows:
+            result.append(AdditionalAnalysisOut(
+                id=str(item.id), mode=item.mode, answer=item.answer,
+                citations=await _sources_for_ids(session, document_id, item.citations or []),
+                analysis_version=item.analysis_version, source_version=item.source_version,
+                model=item.model, reasoning_effort=item.reasoning_effort, created_at=item.created_at,
+            ))
+        return result
+
+
+@router.post("/documents/{document_id}/analysis/additional", response_model=AdditionalAnalysisOut, status_code=201)
+async def create_additional_analysis(
+    document_id: uuid.UUID, body: AdditionalAnalysisCreateIn, request: Request,
+) -> AdditionalAnalysisOut:
+    _reject_during_cache_cleanup(request)
+    codex = request.app.state.codex
+    try:
+        model, effort = await codex.validate_choice(body.model, body.reasoning_effort)
+    except CodexNeedsLogin as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CodexModelUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CodexUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.status != "ready":
+            raise HTTPException(status_code=409, detail="Дождитесь завершения обработки документа.")
+        version = await session.get(DocumentVersion, (document_id, body.analysis_version))
+        if version is None or version.state != "ready":
+            raise HTTPException(status_code=409, detail="Выбранная версия анализа недоступна.")
+        if version.chunk_version != body.expected_source_version:
+            raise HTTPException(status_code=409, detail="Источники выбранной версии изменились. Обновите страницу.")
+        source_version = version.chunk_version
+
+    try:
+        result = await analyze_additional(
+            document_id, codex, source_version=source_version, mode=body.mode,
+            model=model, reasoning_effort=effort,
+        )
+    except CodexNeedsLogin as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CodexModelUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CodexUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async with SessionLocal() as session, session.begin():
+        version = await session.get(DocumentVersion, (document_id, body.analysis_version))
+        if version is None or version.state != "ready" or version.chunk_version != source_version:
+            raise HTTPException(status_code=409, detail="Версия документа изменилась во время анализа. Повторите запрос.")
+        item = AdditionalAnalysis(
+            document_id=document_id,
+            analysis_version=body.analysis_version,
+            source_version=source_version,
+            mode=body.mode,
+            answer=result.answer,
+            citations=result.citations,
+            model=model,
+            reasoning_effort=effort,
+        )
+        session.add(item)
+        await session.flush()
+        return AdditionalAnalysisOut(
+            id=str(item.id), mode=item.mode, answer=item.answer,
+            citations=await _sources_for_ids(session, document_id, item.citations),
+            analysis_version=item.analysis_version, source_version=item.source_version,
+            model=item.model, reasoning_effort=item.reasoning_effort, created_at=item.created_at,
+        )
+
+
 @router.get("/documents/{document_id}/versions", response_model=list[DocumentAnalysisVersionOut])
 async def document_analysis_versions(document_id: uuid.UUID) -> list[DocumentAnalysisVersionOut]:
     async with SessionLocal() as session:
@@ -1121,6 +1319,7 @@ async def export_document(document_id: uuid.UUID, body: DocumentExportIn) -> Res
             raise HTTPException(status_code=409, detail="Для документа нет готовой версии результатов.")
 
         insights: list[Insight] = []
+        additional_analyses: list[AdditionalAnalysis] = []
         messages: list[Message] = []
         citation_lists: list[list[str]] = []
         if body.scope in {"analysis", "selected_answers"}:
@@ -1138,6 +1337,18 @@ async def export_document(document_id: uuid.UUID, body: DocumentExportIn) -> Res
                     raise HTTPException(status_code=422, detail="Один или несколько выбранных ответов больше недоступны.")
                 insights = [item for item in insights if item.key in set(body.selected_keys)]
             citation_lists.extend([list(item.citations or []) for item in insights])
+            requested_additional_ids = set(body.selected_additional_analysis_ids)
+            if requested_additional_ids:
+                additional_analyses = (await session.execute(
+                    select(AdditionalAnalysis).where(
+                        AdditionalAnalysis.document_id == document_id,
+                        AdditionalAnalysis.analysis_version == version.number,
+                        AdditionalAnalysis.id.in_(requested_additional_ids),
+                    ).order_by(AdditionalAnalysis.created_at, AdditionalAnalysis.id)
+                )).scalars().all()
+                if {item.id for item in additional_analyses} != requested_additional_ids:
+                    raise HTTPException(status_code=422, detail="Один или несколько дополнительных результатов больше недоступны для этой версии.")
+                citation_lists.extend([list(item.citations or []) for item in additional_analyses])
         else:
             chat = (await session.execute(select(Chat).where(Chat.document_id == document_id))).scalar_one_or_none()
             if chat is None:
@@ -1199,9 +1410,15 @@ async def export_document(document_id: uuid.UUID, body: DocumentExportIn) -> Res
                 answer=item.answer,
                 citations=resolve_sources(list(item.citations or []), strict_active=True),
             ) for item in insights)
+            export_additional = tuple(ExportAdditionalAnalysis(
+                id=str(item.id), mode=item.mode, answer=item.answer,
+                citations=resolve_sources(list(item.citations or []), strict_active=True),
+                model=item.model, reasoning_effort=item.reasoning_effort,
+            ) for item in additional_analyses)
             export_messages: tuple[ExportMessage, ...] = ()
         else:
             export_insights = ()
+            export_additional = ()
             export_messages = tuple(ExportMessage(
                 role=item.role,
                 content=item.content,
@@ -1237,11 +1454,15 @@ async def export_document(document_id: uuid.UUID, body: DocumentExportIn) -> Res
             ocr_confidence=document.ocr_confidence,
             ocr_error=document.ocr_error,
             insights=export_insights,
+            additional_analyses=export_additional,
             messages=export_messages,
         )
 
     try:
-        content = render_export(snapshot, body.scope, body.format, set(body.selected_keys))
+        content = render_export(
+            snapshot, body.scope, body.format, set(body.selected_keys),
+            {str(item) for item in body.selected_additional_analysis_ids},
+        )
     except ExportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

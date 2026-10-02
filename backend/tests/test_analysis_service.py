@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from app.models import Document
-from app.services import analysis
+from app.services import additional_analysis, analysis
 from app.services.analysis import NO_EVIDENCE, _format_number, analyze_document
 
 
@@ -51,9 +51,11 @@ class _Codex:
     def __init__(self, response):
         self.response = response
         self.payloads = []
+        self.preferences = []
 
-    async def complete(self, payload, _schema):
+    async def complete(self, payload, _schema, **preferences):
         self.payloads.append(payload)
+        self.preferences.append(preferences)
         return self.response
 
 
@@ -152,3 +154,68 @@ def test_analyze_document_fills_missing_answers_with_no_evidence(monkeypatch: py
     assert len(insights) == 7
     assert all(item.answer == NO_EVIDENCE for item in insights)
     assert all(item.citations == [] for item in insights)
+
+
+def test_additional_analysis_persists_only_sources_from_the_selected_document_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_id = uuid4()
+    source = SimpleNamespace(id=source_id, text="Выполнить проверку до 15 ноября.", locator={"label": "Абзац 4"})
+    seen = {}
+
+    async def fake_search(document_id, query, *, limit, version):
+        seen.update(document_id=document_id, query=query, limit=limit, version=version)
+        return [source]
+
+    monkeypatch.setattr(additional_analysis, "search_chunks", fake_search)
+    codex = _Codex(json.dumps({"insights": [{
+        "key": "tasks", "answer": "Проверить документ до 15 ноября [S01].",
+        "citations": ["S01", "S99"], "not_found": False,
+    }]}))
+    document_id = uuid4()
+
+    result = asyncio.run(additional_analysis.analyze_additional(
+        document_id, codex, source_version=9, mode="tasks", model="gpt-6-luna", reasoning_effort="medium",
+    ))
+
+    assert seen == {"document_id": document_id, "query": additional_analysis.MODE_QUESTIONS["tasks"][1], "limit": 8, "version": 9}
+    assert codex.payloads[0]["questions"][0]["available_sources"] == ["S01"]
+    assert "исполнителя и срок" in codex.payloads[0]["purpose"]
+    assert "не указан" in codex.payloads[0]["purpose"]
+    assert result.answer == "Проверить документ до 15 ноября 〔1〕."
+    assert result.citations == [str(source_id)]
+    assert codex.preferences == [{"model": "gpt-6-luna", "reasoning_effort": "medium"}]
+
+
+def test_additional_risk_mode_keeps_interpretations_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = SimpleNamespace(id=uuid4(), text="Срок не указан.", locator={"label": "Абзац 2"})
+
+    async def fake_search(*_args, **_kwargs):
+        return [source]
+
+    monkeypatch.setattr(additional_analysis, "search_chunks", fake_search)
+    codex = _Codex(json.dumps({"insights": [{
+        "key": "risks", "answer": "Не указан срок выполнения [S01].",
+        "citations": ["S01"], "not_found": False,
+    }]}))
+
+    result = asyncio.run(additional_analysis.analyze_additional(
+        uuid4(), codex, source_version=2, mode="risks", model="gpt-6.1-sol", reasoning_effort="high",
+    ))
+
+    assert "интерпретацию" in codex.payloads[0]["purpose"]
+    assert result.answer.endswith("〔1〕.")
+
+
+def test_additional_analysis_without_sources_does_not_call_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(additional_analysis, "search_chunks", fake_search)
+    codex = _Codex("should not be parsed")
+
+    result = asyncio.run(additional_analysis.analyze_additional(
+        uuid4(), codex, source_version=1, mode="brief", model="gpt-6-luna", reasoning_effort="low",
+    ))
+
+    assert result.answer == NO_EVIDENCE
+    assert result.citations == []
+    assert codex.payloads == []

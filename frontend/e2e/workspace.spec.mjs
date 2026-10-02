@@ -61,14 +61,25 @@ test('Stream Markdown, citations, reload, real container restart and new chat', 
 })
 
 test('No evidence and provider stream error are explicit and recoverable', async ({ page, request }) => {
+  test.setTimeout(240_000)
   await upload(page, 'sample.txt')
   await showChat(page)
   await page.getByLabel('Сообщение для чата', { exact: true }).fill('нет доказательств')
+  const noEvidenceResponse = page.waitForResponse(response =>
+    response.url().includes('/api/v1/chats/') && response.url().endsWith('/messages') && response.request().method() === 'POST',
+    { timeout: 90_000 },
+  )
   await page.getByRole('button', { name: 'Отправить вопрос', exact: true }).click()
+  expect((await noEvidenceResponse).ok()).toBeTruthy()
   await expect(page.locator('.assistant-message').last()).toContainText('не найдено достаточно подтверждений')
   await provider(request, { mode: 'stream_error' })
   await page.getByLabel('Сообщение для чата', { exact: true }).fill('Проверить ошибку')
+  const errorResponse = page.waitForResponse(response =>
+    response.url().includes('/api/v1/chats/') && response.url().endsWith('/messages') && response.request().method() === 'POST',
+    { timeout: 90_000 },
+  )
   await page.getByRole('button', { name: 'Отправить вопрос', exact: true }).click()
+  expect((await errorResponse).ok()).toBeTruthy()
   await expect(page.locator('.toast-message')).toContainText('Не удалось получить ответ от Codex')
   await provider(request)
   await expect(page.getByLabel('Сообщение для чата', { exact: true })).toBeEnabled()

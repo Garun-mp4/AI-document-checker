@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any, Literal
-import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -231,6 +231,57 @@ class InsightOut(BaseModel):
     reasoning_effort: str | None = None
 
 
+class DocumentBookmarkCreateIn(BaseModel):
+    source_id: uuid.UUID
+    source_version: int = Field(ge=0)
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        value = value.strip() if value is not None else None
+        return value or None
+
+
+class DocumentBookmarkUpdateIn(BaseModel):
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        value = value.strip() if value is not None else None
+        return value or None
+
+
+class DocumentBookmarkOut(BaseModel):
+    id: str
+    note: str | None
+    source_version: int
+    created_at: datetime
+    updated_at: datetime
+    source: SourceOut
+
+
+class AdditionalAnalysisCreateIn(BaseModel):
+    mode: Literal["brief", "detailed", "tasks", "risks"]
+    model: str = Field(min_length=1, max_length=100)
+    reasoning_effort: str = Field(min_length=1, max_length=20)
+    analysis_version: int = Field(ge=1)
+    expected_source_version: int = Field(ge=0)
+
+
+class AdditionalAnalysisOut(BaseModel):
+    id: str
+    mode: Literal["brief", "detailed", "tasks", "risks"]
+    answer: str
+    citations: list[SourceOut]
+    analysis_version: int
+    source_version: int
+    model: str
+    reasoning_effort: str
+    created_at: datetime
+
+
 class MessageOut(BaseModel):
     id: str
     role: str
@@ -250,6 +301,7 @@ class DocumentExportIn(BaseModel):
     scope: Literal["analysis", "selected_answers", "conversation"]
     format: Literal["markdown", "pdf"] = "markdown"
     selected_keys: list[str] = Field(default_factory=list, max_length=7)
+    selected_additional_analysis_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
 
     @field_validator("selected_keys")
     @classmethod
@@ -264,6 +316,10 @@ class DocumentExportIn(BaseModel):
             raise ValueError("Выберите хотя бы один ответ для экспорта.")
         if self.scope != "selected_answers" and self.selected_keys:
             raise ValueError("Список ответов допустим только для выбранного экспорта.")
+        if self.scope == "conversation" and self.selected_additional_analysis_ids:
+            raise ValueError("Дополнительные результаты можно включить только в экспорт анализа.")
+        if len(self.selected_additional_analysis_ids) != len(set(self.selected_additional_analysis_ids)):
+            raise ValueError("Укажите уникальные дополнительные результаты.")
         return self
 
 

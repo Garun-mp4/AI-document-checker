@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from pypdf import PdfReader
+
 from app.services.document_export import (
+    ExportAdditionalAnalysis,
     ExportAnswer,
     ExportError,
     ExportMessage,
@@ -14,7 +17,6 @@ from app.services.document_export import (
     safe_filename,
     sanitize_markdown,
 )
-from pypdf import PdfReader
 
 
 @pytest.fixture
@@ -72,6 +74,43 @@ def test_selected_export_contains_only_requested_answer(snapshot: ExportSnapshot
     assert "Обзор подтверждён" not in result
     with pytest.raises(ExportError, match="хотя бы один ответ"):
         build_markdown(snapshot, "selected_answers", set())
+
+
+def test_export_includes_only_selected_additional_results_with_source_provenance(snapshot: ExportSnapshot) -> None:
+    first = ExportAdditionalAnalysis(
+        id="saved-analysis-1", mode="tasks", answer="Проверить до 15 ноября 〔1〕.",
+        citations=snapshot.insights[0].citations, model="gpt-6-luna", reasoning_effort="medium",
+    )
+    second = ExportAdditionalAnalysis(
+        id="saved-analysis-2", mode="risks", answer="Есть неуточнённое условие 〔1〕.",
+        citations=snapshot.insights[0].citations,
+    )
+    snapshot_with_modes = ExportSnapshot(**{
+        **snapshot.__dict__, "additional_analyses": (first, second),
+    })
+
+    result = build_markdown(snapshot_with_modes, "analysis", selected_additional_ids={first.id})
+
+    assert "## Дополнительные результаты" in result
+    assert "### Задачи" in result
+    assert "Проверить до 15 ноября [1]" in result
+    assert "Абзац 9" in result
+    assert "### Риски и неясности" not in result
+    assert "saved-analysis-1" not in result
+
+
+def test_conversation_export_does_not_mix_saved_additional_analyses(snapshot: ExportSnapshot) -> None:
+    with_additional = ExportSnapshot(**{
+        **snapshot.__dict__,
+        "additional_analyses": (ExportAdditionalAnalysis(
+            id="saved-analysis-1", mode="brief", answer="Отдельное резюме.",
+        ),),
+    })
+
+    result = build_markdown(with_additional, "conversation", selected_additional_ids={"saved-analysis-1"})
+
+    assert "## Переписка" in result
+    assert "Отдельное резюме" not in result
 
 
 def test_conversation_export_keeps_chronology_and_historical_model_metadata(snapshot: ExportSnapshot) -> None:

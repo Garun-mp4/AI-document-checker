@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -16,7 +17,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -24,11 +25,22 @@ from sqlalchemy import func, select, text
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Chat, Chunk, Document, DocumentVersion, Insight, MaintenanceEvent, Message, ProcessingJob
+from app.models import (
+    AdditionalAnalysis,
+    Chat,
+    Chunk,
+    Document,
+    DocumentBookmark,
+    DocumentVersion,
+    Insight,
+    MaintenanceEvent,
+    Message,
+    ProcessingJob,
+)
 from app.schemas import MaintenanceExecuteIn, MaintenancePlanIn
-from app.services.document_security import owned_storage, remove_storage
+from app.services.document_security import owned_storage, read_storage, remove_storage
 from app.services.job_queue import ACTIVE, cancel, cleanup_files
-from app.services.parsing import DocumentParsingError, SUPPORTED_EXTENSIONS
+from app.services.parsing import DocumentParsingError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/maintenance", tags=["local data"])
@@ -191,10 +203,14 @@ def _document_file_fingerprints(document: Document, versions: list[DocumentVersi
     root = _root(settings.upload_dir)
     names: set[str] = set()
     document_id = str(document.id)
+    original_name: str | None = None
     for value in (document.storage_path, document.markdown_path, document.markdown_map_path):
         if value:
             try:
-                names.add(owned_storage(value, document_id).name)
+                name = owned_storage(value, document_id).name
+                names.add(name)
+                if value == document.storage_path:
+                    original_name = name
             except DocumentParsingError:
                 continue
     for version in versions:
@@ -223,7 +239,14 @@ def _document_file_fingerprints(document: Document, versions: list[DocumentVersi
             fingerprints[name] = None
             continue
         kind = "file" if stat.S_ISREG(info.st_mode) else "symlink" if stat.S_ISLNK(info.st_mode) else "other"
-        fingerprints[name] = (kind, info.st_dev, info.st_ino, info.st_nlink, info.st_size, info.st_mtime_ns)
+        fingerprint: tuple[Any, ...] = (kind, info.st_dev, info.st_ino, info.st_nlink, info.st_size, info.st_mtime_ns)
+        if name == original_name and kind == "file":
+            try:
+                original = read_storage(root / name, settings.max_upload_bytes)
+            except (DocumentParsingError, OSError) as exc:
+                raise ValueError("Не удалось проверить целостность оригинала перед удалением.") from exc
+            fingerprint += (hashlib.sha256(original).hexdigest(),)
+        fingerprints[name] = fingerprint
     return fingerprints
 
 
@@ -264,7 +287,6 @@ def _temp_entries(
         item = _entry(Path(child.path), "document", root)
         if not item or item.kind != "file" or item.mtime_ns / 1_000_000_000 > threshold:
             continue
-        candidate = Path(child.path)
         if name in referenced_names:
             continue
         if name.startswith(".artifact-"):
@@ -429,12 +451,15 @@ def _document_file_size(document: Document, versions: list[DocumentVersion]) -> 
 async def _query_doc_counts(session, document_ids: list[uuid.UUID]) -> dict[str, dict[str, int]]:
     if not document_ids:
         return {}
-    output = {str(document_id): {"messages": 0, "chunks": 0, "insights": 0, "versions": 0} for document_id in document_ids}
+    count_fields = ("messages", "chunks", "insights", "versions", "bookmarks", "additional_analyses")
+    output = {str(document_id): {field: 0 for field in count_fields} for document_id in document_ids}
     statements = (
         ("messages", select(Chat.document_id, func.count(Message.id)).join(Message, Message.chat_id == Chat.id).where(Chat.document_id.in_(document_ids)).group_by(Chat.document_id)),
         ("chunks", select(Chunk.document_id, func.count(Chunk.id)).where(Chunk.document_id.in_(document_ids)).group_by(Chunk.document_id)),
         ("insights", select(Insight.document_id, func.count(Insight.id)).where(Insight.document_id.in_(document_ids)).group_by(Insight.document_id)),
         ("versions", select(DocumentVersion.document_id, func.count()).where(DocumentVersion.document_id.in_(document_ids)).group_by(DocumentVersion.document_id)),
+        ("bookmarks", select(DocumentBookmark.document_id, func.count(DocumentBookmark.id)).where(DocumentBookmark.document_id.in_(document_ids)).group_by(DocumentBookmark.document_id)),
+        ("additional_analyses", select(AdditionalAnalysis.document_id, func.count(AdditionalAnalysis.id)).where(AdditionalAnalysis.document_id.in_(document_ids)).group_by(AdditionalAnalysis.document_id)),
     )
     for field, statement in statements:
         for document_id, count in (await session.execute(statement)).all():
@@ -548,12 +573,15 @@ async def _delete_documents_locked(request: Request, ids: list[uuid.UUID], *, ac
     cancelled_chats = await _active_chat_tasks(request, chat_ids)
     cancelled_jobs = await _stop_document_jobs(ids)
     file_bytes = 0
-    file_counts = {"documents": len(docs), "messages": 0, "chunks": 0, "insights": 0, "versions": 0, "originals": 0, "markdown": 0, "maps": 0}
+    file_counts = {"documents": len(docs), "messages": 0, "chunks": 0, "insights": 0, "versions": 0,
+                   "bookmarks": 0, "additional_analyses": 0, "originals": 0, "markdown": 0, "maps": 0}
     for document in docs:
         file_counts["messages"] += counts[str(document.id)]["messages"]
         file_counts["chunks"] += counts[str(document.id)]["chunks"]
         file_counts["insights"] += counts[str(document.id)]["insights"]
         file_counts["versions"] += counts[str(document.id)]["versions"]
+        file_counts["bookmarks"] += counts[str(document.id)]["bookmarks"]
+        file_counts["additional_analyses"] += counts[str(document.id)]["additional_analyses"]
         _, categories = _document_file_size(document, version_map.get(document.id, []))
         for category, size in categories.items():
             file_counts[category] += 1 if size else 0
@@ -577,7 +605,11 @@ async def _delete_documents_locked(request: Request, ids: list[uuid.UUID], *, ac
             await session.delete(document)
     errors = 0
     from app.services.document_search import original_search_source_cache
-    from app.services.preview_cache import preview_response_cache, table_response_cache, table_search_response_cache
+    from app.services.preview_cache import (
+        preview_response_cache,
+        table_response_cache,
+        table_search_response_cache,
+    )
     for document_id in ids:
         original_search_source_cache.remove_document(str(document_id))
         preview_response_cache.remove_document(str(document_id))
@@ -743,7 +775,8 @@ async def create_maintenance_plan(body: MaintenancePlanIn, request: Request) -> 
             grouped = _group_versions(versions)
             names = []
             signature = {}
-            totals = {"messages": 0, "chunks": 0, "insights": 0, "versions": 0, "originals": 0, "markdown": 0, "maps": 0}
+            totals = {"messages": 0, "chunks": 0, "insights": 0, "versions": 0,
+                      "bookmarks": 0, "additional_analyses": 0, "originals": 0, "markdown": 0, "maps": 0}
             total_bytes = 0
             for doc in docs:
                 _, categories = _document_file_size(doc, grouped.get(doc.id, []))
@@ -752,7 +785,7 @@ async def create_maintenance_plan(body: MaintenancePlanIn, request: Request) -> 
                               "original_bytes": categories["originals"], "markdown_bytes": categories["markdown"],
                               "map_bytes": categories["maps"], **counts[str(doc.id)]})
                 signature[str(doc.id)] = _document_plan_signature(doc, grouped.get(doc.id, []), counts[str(doc.id)])
-                for field in ("messages", "chunks", "insights", "versions"):
+                for field in ("messages", "chunks", "insights", "versions", "bookmarks", "additional_analyses"):
                     totals[field] += counts[str(doc.id)][field]
                 for field, category in (("originals", "originals"), ("markdown", "markdown"), ("maps", "maps")):
                     totals[field] += 1 if categories[category] else 0

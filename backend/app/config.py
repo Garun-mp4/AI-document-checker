@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     codex_home: str = "./data/codex"
     codex_model: str = "gpt-6-luna"
     codex_reasoning_effort: str = "medium"
+    additional_analysis_max_sources: int = Field(default=8, ge=1, le=20)
+    additional_analysis_max_source_chars: int = Field(default=1_200, ge=100, le=5_000)
     local_ui_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     max_upload_bytes: int = 25 * 1024 * 1024
     model_context_chars: int = 42_000

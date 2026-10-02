@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -148,6 +149,44 @@ class Insight(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
 
     document: Mapped[Document] = relationship(back_populates="insights")
+
+
+class DocumentBookmark(Base):
+    __tablename__ = "document_bookmarks"
+    __table_args__ = (UniqueConstraint("document_id", "source_id", name="uq_document_bookmarks_source"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False)
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=func.now())
+
+
+class AdditionalAnalysis(Base):
+    __tablename__ = "additional_analyses"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id", "analysis_version"],
+            ["document_versions.document_id", "document_versions.number"],
+            ondelete="CASCADE",
+            name="fk_additional_analyses_document_version",
+        ),
+        CheckConstraint("mode IN ('brief','detailed','tasks','risks')", name="ck_additional_analyses_mode"),
+        Index("ix_additional_analyses_document_version_created", "document_id", "analysis_version", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    analysis_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    citations: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    model: Mapped[str] = mapped_column(String(120), nullable=False)
+    reasoning_effort: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
 
 
 class DocumentVersion(Base):

@@ -61,6 +61,16 @@ class ExportAnswer:
 
 
 @dataclass(frozen=True)
+class ExportAdditionalAnalysis:
+    id: str
+    mode: str
+    answer: str
+    citations: tuple[ExportSource, ...] = ()
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True)
 class ExportMessage:
     role: str
     content: str
@@ -88,6 +98,7 @@ class ExportSnapshot:
     ocr_confidence: float | None = None
     ocr_error: str | None = None
     insights: tuple[ExportAnswer, ...] = ()
+    additional_analyses: tuple[ExportAdditionalAnalysis, ...] = ()
     messages: tuple[ExportMessage, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -241,13 +252,22 @@ def _source_notes(sources: tuple[ExportSource, ...]) -> str:
     return "\n".join(lines)
 
 
-def build_markdown(snapshot: ExportSnapshot, scope: ExportScope, selected_keys: set[str] | None = None) -> str:
+def build_markdown(
+    snapshot: ExportSnapshot,
+    scope: ExportScope,
+    selected_keys: set[str] | None = None,
+    selected_additional_ids: set[str] | None = None,
+) -> str:
     insights = snapshot.insights
     if scope == "selected_answers":
         selected = selected_keys or set()
         insights = tuple(item for item in insights if item.key in selected)
         if not insights:
             raise ExportError("Выберите хотя бы один ответ для экспорта.")
+    selected_additional = set(selected_additional_ids or ())
+    additional_analyses = tuple(
+        item for item in snapshot.additional_analyses if item.id in selected_additional
+    ) if scope in {"analysis", "selected_answers"} else ()
     sections = [
         "# Отчёт по документу",
         "",
@@ -281,6 +301,24 @@ def build_markdown(snapshot: ExportSnapshot, scope: ExportScope, selected_keys: 
             notes = _source_notes(insight.citations)
             if notes:
                 sections.extend([notes, ""])
+        if additional_analyses:
+            sections.extend(["## Дополнительные результаты", ""])
+            mode_titles = {"brief": "Кратко", "detailed": "Подробно", "tasks": "Задачи", "risks": "Риски и неясности"}
+            for item in additional_analyses:
+                sections.extend([
+                    f"### {mode_titles.get(item.mode, 'Дополнительный анализ')}",
+                    "",
+                    sanitize_markdown(_replace_citation_markers(item.answer)),
+                    "",
+                ])
+                if item.model or item.reasoning_effort:
+                    sections.extend([
+                        f"_Модель: {sanitize_markdown(item.model or 'не сохранена')} · reasoning: {sanitize_markdown(item.reasoning_effort or 'не сохранён')}._",
+                        "",
+                    ])
+                notes = _source_notes(item.citations)
+                if notes:
+                    sections.extend([notes, ""])
     else:
         if not snapshot.messages:
             raise ExportError("В переписке пока нет сообщений для экспорта.")
@@ -481,8 +519,13 @@ def _build_story(markdown: str, snapshot: ExportSnapshot) -> list[Any]:
     return story
 
 
-def build_pdf(snapshot: ExportSnapshot, scope: ExportScope, selected_keys: set[str] | None = None) -> bytes:
-    markdown = build_markdown(snapshot, scope, selected_keys)
+def build_pdf(
+    snapshot: ExportSnapshot,
+    scope: ExportScope,
+    selected_keys: set[str] | None = None,
+    selected_additional_ids: set[str] | None = None,
+) -> bytes:
+    markdown = build_markdown(snapshot, scope, selected_keys, selected_additional_ids)
     _register_fonts()
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=42, leftMargin=42, topMargin=44, bottomMargin=42,
@@ -511,7 +554,8 @@ def build_pdf(snapshot: ExportSnapshot, scope: ExportScope, selected_keys: set[s
 
 
 def render_export(snapshot: ExportSnapshot, scope: ExportScope, export_format: ExportFormat,
-                  selected_keys: set[str] | None = None) -> bytes:
+                  selected_keys: set[str] | None = None,
+                  selected_additional_ids: set[str] | None = None) -> bytes:
     if export_format == "markdown":
-        return build_markdown(snapshot, scope, selected_keys).encode("utf-8")
-    return build_pdf(snapshot, scope, selected_keys)
+        return build_markdown(snapshot, scope, selected_keys, selected_additional_ids).encode("utf-8")
+    return build_pdf(snapshot, scope, selected_keys, selected_additional_ids)

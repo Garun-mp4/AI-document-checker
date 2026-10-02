@@ -91,3 +91,29 @@ test('workspace layout is user-selectable, responsive, persistent, and preserves
   await expect(page.getByRole('status').filter({ hasText: 'табличных документов' })).toBeVisible()
   await expect(page.locator('.original-csv-table')).toBeVisible()
 })
+
+test('small desktop height keeps workspace panels usable without page-level scrolling', async ({ page }) => {
+  const consoleErrors = []
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await page.setViewportSize({ width: 1280, height: 600 })
+  await upload(page, 'sample.txt')
+  const shell = page.locator('.app-shell')
+  await expect.poll(() => shell.evaluate(element => Math.round(element.getBoundingClientRect().height))).toBe(600)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBeTruthy()
+
+  const libraryToggle = page.getByRole('button', { name: 'Свернуть библиотеку', exact: true })
+  await libraryToggle.click()
+  await expect.poll(() => page.locator('#chat-library').evaluate(element => Math.round(element.getBoundingClientRect().width))).toBe(72)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBeTruthy()
+
+  const chatToggle = page.locator('.chat-visibility-toggle')
+  await expect(chatToggle).toBeVisible()
+  await chatToggle.click()
+  await expect(shell).toHaveClass(/chat-hidden/)
+  await expect(chatToggle).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
+  await chatToggle.click()
+  await expect(shell).not.toHaveClass(/chat-hidden/)
+  await expect(page.locator('.chat-panel')).toBeVisible()
+  expect(consoleErrors, 'No console errors while collapsing and restoring workspace panels').toEqual([])
+})

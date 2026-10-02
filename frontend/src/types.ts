@@ -261,6 +261,29 @@ export interface Insight {
   reasoning_effort?: string | null
 }
 
+export type AdditionalAnalysisMode = 'brief' | 'detailed' | 'tasks' | 'risks'
+
+export interface AdditionalAnalysis {
+  id: string
+  mode: AdditionalAnalysisMode
+  answer: string
+  citations: SourceRef[]
+  analysis_version: number
+  source_version: number
+  model: string
+  reasoning_effort: string
+  created_at: string
+}
+
+export interface DocumentBookmark {
+  id: string
+  note: string | null
+  source_version: number
+  created_at: string
+  updated_at: string
+  source: SourceRef
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'

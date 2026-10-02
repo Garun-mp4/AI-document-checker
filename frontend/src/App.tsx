@@ -2,6 +2,8 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlignLeft,
   ArrowUp,
+  Bookmark,
+  BookmarkPlus,
   BookOpen,
   Calculator,
   Check,
@@ -39,7 +41,7 @@ import {
   X,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import type { ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import type { AdditionalAnalysis, AdditionalAnalysisMode, ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentBookmark, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
@@ -261,6 +263,14 @@ function App() {
   const [processingJob, setProcessingJob] = useState<ProcessingJob | null>(null)
   const [processingActionPending, setProcessingActionPending] = useState(false)
   const [insights, setInsights] = useState<Insight[]>([])
+  const [additionalAnalyses, setAdditionalAnalyses] = useState<AdditionalAnalysis[]>([])
+  const [additionalAnalysisMode, setAdditionalAnalysisMode] = useState<AdditionalAnalysisMode | null>(null)
+  const [additionalAnalysisError, setAdditionalAnalysisError] = useState('')
+  const [documentBookmarks, setDocumentBookmarks] = useState<DocumentBookmark[]>([])
+  const [bookmarksExpanded, setBookmarksExpanded] = useState(false)
+  const [bookmarkEditingId, setBookmarkEditingId] = useState<string | null>(null)
+  const [bookmarkNoteDraft, setBookmarkNoteDraft] = useState('')
+  const [bookmarkPending, setBookmarkPending] = useState(false)
   const [analysisVersions, setAnalysisVersions] = useState<DocumentAnalysisVersion[]>([])
   const [selectedAnalysisVersion, setSelectedAnalysisVersion] = useState<number | null>(null)
   const [analysisModel, setAnalysisModel] = useState('')
@@ -324,6 +334,7 @@ function App() {
   const [exportScope, setExportScope] = useState<'analysis' | 'selected_answers' | 'conversation'>('analysis')
   const [exportFormat, setExportFormat] = useState<'markdown' | 'pdf'>('pdf')
   const [exportSelectedKeys, setExportSelectedKeys] = useState<string[]>([])
+  const [exportSelectedAdditionalIds, setExportSelectedAdditionalIds] = useState<string[]>([])
   const [exportPending, setExportPending] = useState(false)
   const [exportError, setExportError] = useState('')
   const [previewPage, setPreviewPage] = useState(1)
@@ -376,9 +387,10 @@ function App() {
   const startExport = useCallback(() => {
     setExportScope('analysis')
     setExportSelectedKeys(insights.map((insight) => insight.key))
+    setExportSelectedAdditionalIds(additionalAnalyses.map((analysis) => analysis.id))
     setExportError('')
     setExportOpen(true)
-  }, [insights])
+  }, [additionalAnalyses, insights])
 
   const downloadExport = useCallback(async () => {
     if (!document || exportPending) return
@@ -392,6 +404,7 @@ function App() {
           scope: exportScope,
           format: exportFormat,
           selected_keys: exportScope === 'selected_answers' ? exportSelectedKeys : [],
+          selected_additional_analysis_ids: exportScope === 'conversation' ? [] : exportSelectedAdditionalIds,
         }),
       })
       if (!response.ok) {
@@ -427,7 +440,7 @@ function App() {
     } finally {
       setExportPending(false)
     }
-  }, [document, exportFormat, exportPending, exportScope, exportSelectedKeys])
+  }, [document, exportFormat, exportPending, exportScope, exportSelectedAdditionalIds, exportSelectedKeys])
 
   const updateDocumentInLibrary = useCallback((record: DocumentRecord) => {
     setChats((current) => current.map((item) => item.document_id === record.id ? {
@@ -732,14 +745,18 @@ function App() {
 
   const loadReadyData = useCallback(async (documentId: string) => {
     try {
-      const [cardData, chatData, previewData, markdownData, versionData] = await Promise.all([
+      const [cardData, chatData, previewData, markdownData, versionData, additionalData, bookmarkData] = await Promise.all([
         api<Insight[]>(`${API}/documents/${documentId}/insights`),
         api<ChatRecord>(`${API}/documents/${documentId}/chat`),
         api<DocumentPreview>(`${API}/documents/${documentId}/preview`),
         api<MarkdownDocument>(`${API}/documents/${documentId}/markdown`),
         api<DocumentAnalysisVersion[]>(`${API}/documents/${documentId}/versions`),
+        api<AdditionalAnalysis[]>(`${API}/documents/${documentId}/analysis/additional`),
+        api<DocumentBookmark[]>(`${API}/documents/${documentId}/bookmarks`),
       ])
       setInsights(cardData)
+      setAdditionalAnalyses(additionalData)
+      setDocumentBookmarks(bookmarkData)
       setChat(chatData)
       setAnalysisVersions(versionData)
       setSelectedAnalysisVersion(null)
@@ -762,6 +779,8 @@ function App() {
       setDocument(null)
       setProcessingJob(null)
       setInsights([])
+      setAdditionalAnalyses([])
+      setDocumentBookmarks([])
       setAnalysisVersions([])
       setSelectedAnalysisVersion(null)
       setDocumentPreview(null)
@@ -775,6 +794,10 @@ function App() {
     setDocument(null)
     setProcessingJob(null)
     setInsights([])
+    setAdditionalAnalyses([])
+    setAdditionalAnalysisError('')
+    setDocumentBookmarks([])
+    setBookmarkEditingId(null)
     setAnalysisVersions([])
     setSelectedAnalysisVersion(null)
     setDocumentPreview(null)
@@ -1149,6 +1172,10 @@ function App() {
     setSelectedId(null)
     setDocument(null)
     setInsights([])
+    setAdditionalAnalyses([])
+    setAdditionalAnalysisError('')
+    setDocumentBookmarks([])
+    setBookmarkEditingId(null)
     setDocumentPreview(null)
     setMarkdownDocument(null)
     setPreviewTab('original')
@@ -1625,7 +1652,12 @@ function App() {
     if (!document) return
     setSelectedAnalysisVersion(version)
     try {
-      setInsights(await api<Insight[]>(`${API}/documents/${document.id}/insights?version=${version}`))
+      const [cards, additional] = await Promise.all([
+        api<Insight[]>(`${API}/documents/${document.id}/insights?version=${version}`),
+        api<AdditionalAnalysis[]>(`${API}/documents/${document.id}/analysis/additional?version=${version}`),
+      ])
+      setInsights(cards)
+      setAdditionalAnalyses(additional)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось загрузить выбранную версию анализа.')
     }
@@ -1762,6 +1794,91 @@ function App() {
     : analysisReasoningOptions.some((item) => item.value === codex?.reasoning_effort)
       ? codex?.reasoning_effort ?? ''
       : analysisReasoningOptions[0]?.value ?? ''
+  const addSelectedBookmark = useCallback(async () => {
+    if (!document || !selectedSource || bookmarkPending) return
+    const rawVersion = selectedSource.locator.processing_version
+    const sourceVersion = typeof rawVersion === 'number' ? rawVersion : Number(rawVersion)
+    if (!Number.isInteger(sourceVersion) || sourceVersion < 0) {
+      showToast('Не удалось определить версию источника для закладки.')
+      return
+    }
+    setBookmarkPending(true)
+    try {
+      const saved = await api<DocumentBookmark>(`${API}/documents/${document.id}/bookmarks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_id: selectedSource.id, source_version: sourceVersion }),
+      })
+      setDocumentBookmarks((current) => [saved, ...current.filter((item) => item.id !== saved.id)])
+      setBookmarksExpanded(true)
+      showToast('Источник сохранён в закладках.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось сохранить закладку.')
+    } finally {
+      setBookmarkPending(false)
+    }
+  }, [bookmarkPending, document, selectedSource, showToast])
+  const saveBookmarkNote = useCallback(async (bookmarkId: string) => {
+    if (!document || bookmarkPending) return
+    setBookmarkPending(true)
+    try {
+      const updated = await api<DocumentBookmark>(`${API}/documents/${document.id}/bookmarks/${bookmarkId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: bookmarkNoteDraft }),
+      })
+      setDocumentBookmarks((current) => current.map((item) => item.id === bookmarkId ? updated : item))
+      setBookmarkEditingId(null)
+      setBookmarkNoteDraft('')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось сохранить заметку.')
+    } finally {
+      setBookmarkPending(false)
+    }
+  }, [bookmarkNoteDraft, bookmarkPending, document, showToast])
+  const removeBookmark = useCallback(async (bookmarkId: string) => {
+    if (!document || bookmarkPending) return
+    setBookmarkPending(true)
+    try {
+      await api<void>(`${API}/documents/${document.id}/bookmarks/${bookmarkId}`, { method: 'DELETE' })
+      setDocumentBookmarks((current) => current.filter((item) => item.id !== bookmarkId))
+      if (bookmarkEditingId === bookmarkId) setBookmarkEditingId(null)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось удалить закладку.')
+    } finally {
+      setBookmarkPending(false)
+    }
+  }, [bookmarkEditingId, bookmarkPending, document, showToast])
+  const runAdditionalAnalysis = useCallback(async (mode: AdditionalAnalysisMode) => {
+    if (!document || !codex || !displayedAnalysisVersion || additionalAnalysisMode) return
+    const selectedModel = effectiveAnalysisModel
+    const selectedEffort = effectiveAnalysisReasoning
+    const modelOption = codex.models.find((item) => item.id === selectedModel)
+    if (!authReady || !modelOption?.reasoning_efforts.some((item) => item.value === selectedEffort)) {
+      setAdditionalAnalysisError('Подключите Codex и выберите доступные модель и уровень reasoning.')
+      return
+    }
+    setAdditionalAnalysisMode(mode)
+    setAdditionalAnalysisError('')
+    try {
+      const result = await api<AdditionalAnalysis>(`${API}/documents/${document.id}/analysis/additional`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          model: selectedModel,
+          reasoning_effort: selectedEffort,
+          analysis_version: displayedAnalysisVersion.number,
+          expected_source_version: displayedAnalysisVersion.source_version,
+        }),
+      })
+      setAdditionalAnalyses((current) => [...current, result])
+    } catch (error) {
+      setAdditionalAnalysisError(error instanceof Error ? error.message : 'Дополнительный анализ не выполнен. Повторите попытку.')
+    } finally {
+      setAdditionalAnalysisMode(null)
+    }
+  }, [additionalAnalysisMode, authReady, codex, document, displayedAnalysisVersion, effectiveAnalysisModel, effectiveAnalysisReasoning])
   const anyChatSending = Object.values(sendingChats).some(Boolean)
   const activeJob = Boolean(processingJob && ['queued', 'running', 'cancelling'].includes(processingJob.state))
   const activeStatus = visibleStatus ? ['queued', 'extracting', 'ocr', 'indexing', 'analyzing'].includes(visibleStatus.status) || (visibleStatus.status === 'ready' && activeJob) : false
@@ -2052,6 +2169,32 @@ function App() {
                         <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю предпросмотр…</div>
                       ) : (
                         <>
+                          <div className="bookmark-tools">
+                            <button className="bookmark-list-toggle" type="button" aria-expanded={bookmarksExpanded} onClick={() => setBookmarksExpanded((value) => !value)}>
+                              <Bookmark size={15} /><span>Закладки</span><span className="bookmark-count">{documentBookmarks.length}</span><ChevronDown size={14} className={bookmarksExpanded ? 'is-expanded' : ''} />
+                            </button>
+                            {selectedSource && <button className="button button-light bookmark-add-button" type="button" onClick={() => void addSelectedBookmark()} disabled={bookmarkPending || documentBookmarks.some((item) => item.source.id === selectedSource.id)}>
+                              <BookmarkPlus size={14} />{documentBookmarks.some((item) => item.source.id === selectedSource.id) ? 'Источник сохранён' : 'Добавить источник'}
+                            </button>}
+                          </div>
+                          {bookmarksExpanded && <div className="bookmark-list" aria-label="Сохранённые источники">
+                            {documentBookmarks.length === 0 ? <p className="bookmark-empty">Сохраняйте важные источники с заметками.</p> : documentBookmarks.map((bookmark) => (
+                              <article className="bookmark-entry" key={bookmark.id}>
+                                <button className="bookmark-source" type="button" onClick={() => void openSource(bookmark.source)} title={bookmark.source.text}>
+                                  <BookOpen size={13} /><span>{locatorText(bookmark.source)}</span><ChevronRight size={12} />
+                                </button>
+                                {bookmarkEditingId === bookmark.id ? <div className="bookmark-note-editor">
+                                  <input aria-label="Заметка к закладке" maxLength={500} value={bookmarkNoteDraft} onChange={(event) => setBookmarkNoteDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveBookmarkNote(bookmark.id) } if (event.key === 'Escape') { setBookmarkEditingId(null); setBookmarkNoteDraft('') } }} placeholder="Добавить заметку…" />
+                                  <button className="icon-button" type="button" aria-label="Сохранить заметку" onClick={() => void saveBookmarkNote(bookmark.id)} disabled={bookmarkPending}><Check size={14} /></button>
+                                  <button className="icon-button" type="button" aria-label="Отменить редактирование заметки" onClick={() => { setBookmarkEditingId(null); setBookmarkNoteDraft('') }} disabled={bookmarkPending}><X size={14} /></button>
+                                </div> : <div className="bookmark-note">{bookmark.note || <span>Без заметки</span>}</div>}
+                                <div className="bookmark-entry-actions">
+                                  {bookmarkEditingId !== bookmark.id && <button className="icon-button" type="button" aria-label={bookmark.note ? 'Изменить заметку' : 'Добавить заметку'} title={bookmark.note ? 'Изменить заметку' : 'Добавить заметку'} onClick={() => { setBookmarkEditingId(bookmark.id); setBookmarkNoteDraft(bookmark.note ?? '') }}><Pencil size={13} /></button>}
+                                  <button className="icon-button" type="button" aria-label="Удалить закладку" title="Удалить закладку" onClick={() => void removeBookmark(bookmark.id)} disabled={bookmarkPending}><Trash2 size={13} /></button>
+                                </div>
+                              </article>
+                            ))}
+                          </div>}
                           <div className="preview-tabs" role="tablist" aria-label="Представление документа">
                             <button type="button" role="tab" aria-selected={previewTab === 'original'} className={`preview-tab ${previewTab === 'original' ? 'is-active' : ''}`} onClick={() => { setSearchScope('original'); setPreviewTab('original') }}>Оригинал</button>
                             <button type="button" role="tab" aria-selected={previewTab === 'markdown'} className={`preview-tab ${previewTab === 'markdown' ? 'is-active' : ''}`} onClick={() => { setSearchScope('markdown'); setPreviewTab('markdown') }}>Markdown</button>
@@ -2122,6 +2265,32 @@ function App() {
                     ))}
                     {insights.length === 0 && <div className="insights-empty"><LoaderCircle className="spin" size={18} /> Загружаю карточки анализа…</div>}
                   </div>
+                  <section className="additional-analysis-panel" aria-labelledby="additional-analysis-title" data-testid="additional-analysis-panel">
+                    <div className="additional-analysis-heading">
+                      <div><h3 id="additional-analysis-title">Дополнительный анализ</h3><p>Новые ответы сохраняются отдельно и привязаны к выбранной версии источников.</p></div>
+                    </div>
+                    <div className="additional-analysis-actions" role="group" aria-label="Режим дополнительного анализа">
+                      {([
+                        ['brief', 'Кратко'],
+                        ['detailed', 'Подробно'],
+                        ['tasks', 'Задачи'],
+                        ['risks', 'Риски и неясности'],
+                      ] as const).map(([mode, label]) => <button key={mode} className="button button-light" type="button" onClick={() => void runAdditionalAnalysis(mode)} disabled={!authReady || !displayedAnalysisVersion || activeJob || additionalAnalysisMode !== null}>
+                        {additionalAnalysisMode === mode ? <><LoaderCircle className="spin" size={14} /> Готовлю…</> : label}
+                      </button>)}
+                    </div>
+                    {additionalAnalysisError && <p className="additional-analysis-error" role="alert">{additionalAnalysisError}</p>}
+                    {additionalAnalyses.length > 0 && <div className="additional-analysis-results">
+                      {additionalAnalyses.map((result) => <article className="additional-analysis-result" key={result.id} data-analysis-mode={result.mode}>
+                        <div className="additional-analysis-result-heading"><div><span className="section-eyebrow">{({ brief: 'КРАТКО', detailed: 'ПОДРОБНО', tasks: 'ЗАДАЧИ', risks: 'РИСКИ И НЕЯСНОСТИ' } as const)[result.mode]}</span><h4>{({ brief: 'Краткое содержание', detailed: 'Подробный разбор', tasks: 'Задачи и поручения', risks: 'Риски и неясности' } as const)[result.mode]}</h4></div><span className="additional-analysis-version">v{result.analysis_version} · источники v{result.source_version}</span></div>
+                        <div className={`additional-analysis-answer ${result.citations.length === 0 ? 'no-evidence' : ''}`}><CitationText text={result.answer} citations={result.citations} onOpenSource={openSource} /></div>
+                        <div className="insight-citations">
+                          {result.citations.length ? result.citations.map((source) => <button key={source.id} className="citation-chip" data-source-id={source.id} onClick={() => void openSource(source)} title={source.text}><BookOpen size={12} /><span>{locatorText(source)}</span><ChevronRight size={12} /></button>) : <span className="no-citation">Подтверждение не найдено</span>}
+                        </div>
+                        <p className="additional-analysis-meta">{result.model} · {result.reasoning_effort} · {new Date(result.created_at).toLocaleString('ru-RU')}</p>
+                      </article>)}
+                    </div>}
+                  </section>
                   <div className="citation-note"><ShieldCheck size={14} /><span>Ответы основаны на фрагментах документа. Нажмите на источник, чтобы открыть его место.</span></div>
                 </section>
                 </div>
@@ -2214,7 +2383,7 @@ function App() {
             <legend>Содержимое</legend>
             <label className={`export-scope-option ${exportScope === 'analysis' ? 'is-selected' : ''}`}>
               <input type="radio" name="export-scope" value="analysis" checked={exportScope === 'analysis'} onChange={() => { setExportScope('analysis'); setExportError('') }} disabled={exportPending || insights.length === 0} />
-              <span><strong>Полный анализ</strong><small>{insights.length} {pluralLabel(insights.length, 'ответ', 'ответа', 'ответов')} и источники</small></span>
+              <span><strong>Полный анализ</strong><small>{insights.length} {pluralLabel(insights.length, 'ответ', 'ответа', 'ответов')}, выбранные дополнительные результаты и источники</small></span>
             </label>
             <label className={`export-scope-option ${exportScope === 'selected_answers' ? 'is-selected' : ''}`}>
               <input type="radio" name="export-scope" value="selected_answers" checked={exportScope === 'selected_answers'} onChange={() => { setExportScope('selected_answers'); setExportError('') }} disabled={exportPending || insights.length === 0} />
@@ -2233,6 +2402,15 @@ function App() {
               <span><strong>{insight.question}</strong><small>{insight.answer.replace(/\s+/g, ' ').slice(0, 118)}{insight.answer.length > 118 ? '…' : ''}</small></span>
             </label>)}
             <p className="export-selection-count">Выбрано: {exportSelectedKeys.length} из {insights.length}</p>
+          </div>}
+
+          {exportScope !== 'conversation' && additionalAnalyses.length > 0 && <div className="export-answer-picker" aria-label="Выбор дополнительных результатов для экспорта">
+            <div className="export-picker-heading"><strong>Дополнительный анализ</strong><div><button type="button" onClick={() => setExportSelectedAdditionalIds(additionalAnalyses.map((item) => item.id))} disabled={exportPending}>Все</button><span aria-hidden="true">·</span><button type="button" onClick={() => setExportSelectedAdditionalIds([])} disabled={exportPending}>Снять выбор</button></div></div>
+            {additionalAnalyses.map((item) => <label className="export-answer-option" key={item.id}>
+              <input type="checkbox" checked={exportSelectedAdditionalIds.includes(item.id)} disabled={exportPending} onChange={(event) => setExportSelectedAdditionalIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />
+              <span><strong>{({ brief: 'Кратко', detailed: 'Подробно', tasks: 'Задачи', risks: 'Риски и неясности' } as const)[item.mode]}</strong><small>{item.answer.replace(/\s+/g, ' ').slice(0, 118)}{item.answer.length > 118 ? '…' : ''}</small></span>
+            </label>)}
+            <p className="export-selection-count">Выбрано: {exportSelectedAdditionalIds.length} из {additionalAnalyses.length}</p>
           </div>}
 
           <fieldset className="export-format-fieldset">

@@ -482,6 +482,68 @@ def test_compose_exports_saved_analysis_and_conversation_without_new_model_calls
         assert len(insights) == 7
         settings = compose_client.get("/api/v1/codex/status").json()
 
+        source = insights[0]["citations"][0]
+        source_version = insights[0]["source_version"]
+        bookmark = compose_client.post(
+            f"/api/v1/documents/{document_id}/bookmarks",
+            json={"source_id": source["id"], "source_version": source_version, "note": " Проверить источник "},
+        )
+        assert bookmark.status_code == 201, bookmark.text
+        assert bookmark.json()["source"]["id"] == source["id"]
+        assert bookmark.json()["note"] == "Проверить источник"
+        duplicate_bookmark = compose_client.post(
+            f"/api/v1/documents/{document_id}/bookmarks",
+            json={"source_id": source["id"], "source_version": source_version},
+        )
+        assert duplicate_bookmark.status_code == 409
+        stale_bookmark = compose_client.post(
+            f"/api/v1/documents/{document_id}/bookmarks",
+            json={"source_id": source["id"], "source_version": source_version + 1},
+        )
+        assert stale_bookmark.status_code == 409
+        updated_bookmark = compose_client.patch(
+            f"/api/v1/documents/{document_id}/bookmarks/{bookmark.json()['id']}",
+            json={"note": "Проверить оригинал"},
+        )
+        assert updated_bookmark.status_code == 200, updated_bookmark.text
+        assert updated_bookmark.json()["note"] == "Проверить оригинал"
+        assert compose_client.get(f"/api/v1/documents/{document_id}/bookmarks").json()[0]["note"] == "Проверить оригинал"
+
+        additional_results = {}
+        for mode in ("brief", "detailed", "tasks", "risks"):
+            result = compose_client.post(
+                f"/api/v1/documents/{document_id}/analysis/additional",
+                json={
+                    "mode": mode,
+                    "model": settings["model"],
+                    "reasoning_effort": settings["reasoning_effort"],
+                    "analysis_version": insights[0]["version"],
+                    "expected_source_version": source_version,
+                },
+                timeout=90,
+            )
+            assert result.status_code == 201, result.text
+            additional_results[mode] = result.json()
+            assert result.json()["mode"] == mode
+            assert result.json()["analysis_version"] == insights[0]["version"]
+            assert result.json()["source_version"] == source_version
+            assert result.json()["model"] == settings["model"]
+            assert result.json()["reasoning_effort"] == settings["reasoning_effort"]
+            assert result.json()["citations"]
+            assert all(item["id"] == source["id"] for item in result.json()["citations"])
+
+        listed_additional = compose_client.get(f"/api/v1/documents/{document_id}/analysis/additional")
+        assert listed_additional.status_code == 200, listed_additional.text
+        assert {item["mode"] for item in listed_additional.json()} == {"brief", "detailed", "tasks", "risks"}
+        stale_analysis = compose_client.post(
+            f"/api/v1/documents/{document_id}/analysis/additional",
+            json={
+                "mode": "brief", "model": settings["model"], "reasoning_effort": settings["reasoning_effort"],
+                "analysis_version": insights[0]["version"], "expected_source_version": source_version + 1,
+            },
+        )
+        assert stale_analysis.status_code == 409
+
         markdown = compose_client.post(
             f"/api/v1/documents/{document_id}/export",
             json={"scope": "analysis", "format": "markdown"},
@@ -500,6 +562,26 @@ def test_compose_exports_saved_analysis_and_conversation_without_new_model_calls
         assert "localhost" not in report
         assert "codex_thread_id" not in report
         assert "Authorization" not in report
+
+        selected_additional = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={
+                "scope": "analysis", "format": "markdown",
+                "selected_additional_analysis_ids": [additional_results["tasks"]["id"]],
+            },
+        )
+        assert selected_additional.status_code == 200, selected_additional.text
+        assert "## Дополнительные результаты" in selected_additional.text
+        assert "### Задачи" in selected_additional.text
+        assert "### Кратко" not in selected_additional.text
+        invalid_conversation_extra = compose_client.post(
+            f"/api/v1/documents/{document_id}/export",
+            json={
+                "scope": "conversation", "format": "markdown",
+                "selected_additional_analysis_ids": [additional_results["tasks"]["id"]],
+            },
+        )
+        assert invalid_conversation_extra.status_code == 422
 
         pdf = compose_client.post(
             f"/api/v1/documents/{document_id}/export",
@@ -543,13 +625,18 @@ def test_compose_exports_saved_analysis_and_conversation_without_new_model_calls
         assert "reasoning:" in conversation.text
 
         before_exports = compose_client.post("/api/v1/__e2e/provider", json={"mode": "ready"}).json()
-        assert before_exports["complete_calls"] == 1
+        assert before_exports["complete_calls"] == 5
         assert before_exports["chat_calls"] == 1
         active_after_export = compose_client.get(f"/api/v1/documents/{document_id}").json()
         assert active_after_export["active_version"] == document["active_version"]
         original = compose_client.get(f"/api/v1/documents/{document_id}/file")
         assert original.status_code == 200
         assert original.content == (FIXTURES / "sample.txt").read_bytes()
+        removed_bookmark = compose_client.delete(
+            f"/api/v1/documents/{document_id}/bookmarks/{bookmark.json()['id']}"
+        )
+        assert removed_bookmark.status_code == 204
+        assert compose_client.get(f"/api/v1/documents/{document_id}/bookmarks").json() == []
     finally:
         deleted = compose_client.delete(f"/api/v1/documents/{document_id}")
         assert deleted.status_code == 204, deleted.text

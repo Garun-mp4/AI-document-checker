@@ -1,4 +1,4 @@
-param([switch]$KeepRunning, [switch]$M15Only)
+param([switch]$KeepRunning, [switch]$M15Only, [string]$PlaywrightGrep)
 $ErrorActionPreference = 'Stop'
 $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $taskPython = Join-Path $taskRoot 'backend/.venv/Scripts/python.exe'
@@ -59,8 +59,19 @@ try {
         finally { Pop-Location }
     } else {
         Push-Location frontend
-        try { Run-Checked npm @('run', 'test:e2e') }
+        try {
+            if ([string]::IsNullOrWhiteSpace($PlaywrightGrep)) {
+                Run-Checked npm @('run', 'test:e2e')
+            } else {
+                Run-Checked npm @('run', 'test:e2e', '--', '--grep', $PlaywrightGrep)
+            }
+        }
         finally { Pop-Location }
+        if ([string]::IsNullOrWhiteSpace($PlaywrightGrep)) {
+            Run-Checked $taskPython @('backend/tests/e2e_support/migration_acceptance.py')
+        } else {
+            Write-Host 'Migration acceptance skipped: a filtered browser run does not guarantee a persisted cited document.'
+        }
         Run-Checked $taskPython @('backend/tests/e2e_support/queue_acceptance.py')
         Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$taskPort/api/v1/__e2e/provider" -ContentType 'application/json' -Body '{"mode":"disconnected"}' | Out-Null
         Push-Location backend
