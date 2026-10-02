@@ -1,8 +1,59 @@
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
-import { test, expect, provider, upload, showChat, originalVisible } from './helpers.mjs'
+import { test, expect, provider, upload, showChat, originalVisible, fixtures } from './helpers.mjs'
 
 test.beforeEach(async ({ request }) => provider(request))
+
+test('Unified AI composer keeps attachment, model, voice, keyboard, and narrow-layout flows', async ({ page, request }) => {
+  test.setTimeout(240_000)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+
+  const emptyComposer = page.locator('.empty-chat-compose-area .ai-composer')
+  await expect(emptyComposer.getByLabel('Вопрос по документу', { exact: true })).toBeDisabled()
+  await expect(emptyComposer.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeDisabled()
+  await emptyComposer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
+  await expect(page.locator('.toast-message')).toContainText('Функция голосового ввода находится в разработке')
+
+  await emptyComposer.locator('.ai-composer-model-control').click()
+  await expect(page.getByRole('heading', { name: 'Вход в Codex' })).toBeVisible()
+  await page.getByRole('button', { name: 'Закрыть', exact: true }).click()
+
+  const fileChooserPromise = page.waitForEvent('filechooser')
+  await emptyComposer.getByRole('button', { name: 'Прикрепить документ', exact: true }).click()
+  const fileChooser = await fileChooserPromise
+  const uploadResponsePromise = page.waitForResponse(response => response.url().endsWith('/api/v1/documents') && response.request().method() === 'POST')
+  await fileChooser.setFiles(path.join(fixtures, 'sample.txt'))
+  const uploadResponse = await uploadResponsePromise
+  expect(uploadResponse.status(), await uploadResponse.text()).toBe(202)
+  const document = await uploadResponse.json()
+  await expect.poll(async () => (await (await request.get(`/api/v1/documents/${document.id}`)).json()).status, { timeout: 150_000 }).toBe('ready')
+  await expect(page.getByRole('heading', { name: 'sample.txt', exact: true })).toBeVisible()
+  await showChat(page)
+
+  const composerInput = page.getByLabel('Сообщение для чата', { exact: true })
+  await expect(composerInput).toBeEnabled()
+  await expect(page.locator('.chat-panel .ai-composer-model-control')).toBeVisible()
+  await composerInput.fill('Первая строка')
+  await composerInput.press('Shift+Enter')
+  await composerInput.press('End')
+  await composerInput.type('Вторая строка')
+  await expect(composerInput).toHaveValue('Первая строка\nВторая строка')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await showChat(page)
+  await expect.poll(() => page.locator('.chat-panel .ai-composer').evaluate(element => {
+    const toolbar = element.querySelector('.ai-composer-toolbar')
+    return element.scrollWidth <= element.clientWidth + 1 && toolbar.scrollWidth <= toolbar.clientWidth + 1
+  }), { message: 'Composer controls fit a narrow mobile chat panel' }).toBeTruthy()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Composer must not create page-level horizontal overflow').toBeTruthy()
+  await expect(page.getByRole('button', { name: 'Голосовой ввод', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeVisible()
+  await composerInput.fill('Проверка отправки клавишей Enter')
+  const messageResponsePromise = page.waitForResponse(response => response.url().includes('/api/v1/chats/') && response.url().endsWith('/messages') && response.request().method() === 'POST')
+  await composerInput.press('Enter')
+  expect((await messageResponsePromise).status()).toBe(200)
+})
 
 test('Stream Markdown, citations, reload, real container restart and new chat', async ({ page, request }) => {
   test.setTimeout(240_000)

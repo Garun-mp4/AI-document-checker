@@ -29,13 +29,11 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
-  Paperclip,
   Pencil,
   Pin,
   PinOff,
   Search,
   RotateCw,
-  Send,
   ShieldCheck,
   Trash2,
   TriangleAlert,
@@ -45,6 +43,7 @@ import { createPortal } from 'react-dom'
 import type { AdditionalAnalysis, AdditionalAnalysisMode, ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentBookmark, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { DocumentLayoutSelector } from './components/DocumentLayoutSelector'
 import type { AnalysisLayoutMode } from './components/DocumentLayoutSelector'
+import { AIComposer } from './components/AIComposer'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
@@ -2279,6 +2278,10 @@ function App() {
           isApplicationChat ? <ApplicationHelpWorkspace /> : <EmptyWorkspace
               isUploading={isUploading}
               onChoose={() => fileInput.current?.click()}
+              onOpenModelSettings={() => setAuthOpen(true)}
+              onVoiceInput={() => showToast('Функция голосового ввода находится в разработке')}
+              modelName={codexModelLabel(codex)}
+              reasoningName={codexReasoningLabel(codex?.reasoning_effort)}
               onStartApplicationHelp={() => void startApplicationHelpChat()}
               documentsCount={chats.length}
               onToggleLibrary={() => setSidebarCollapsed((value) => !value)}
@@ -2570,22 +2573,23 @@ function App() {
         </div>
         <div className="chat-compose-area">
           {!authReady && ((isApplicationChat && chat) || document?.status === 'ready') && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
-          <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}>
-            <textarea
-              ref={chatInputRef}
-              rows={2}
-              name="chat-message"
-              autoComplete="off"
-              value={chatInput}
-              onChange={(event) => setChatInput(event.target.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() } }}
-              placeholder={isApplicationChat ? 'Спросите о работе приложения…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
-              aria-label="Сообщение для чата"
-              maxLength={4_000}
-              disabled={(!isApplicationChat && (!document || document.status !== 'ready')) || !authReady || isSending}
-            />
-            <div className="composer-footer"><span>{isApplicationChat ? 'Ответы проверяются по функциям приложения' : 'Ответы проверяются по источникам'}</span><button className="send-button" type="submit" aria-label="Отправить вопрос" disabled={!chatInput.trim() || !chat || !authReady || isSending}><Send size={15} /></button></div>
-          </form>
+          <AIComposer
+            inputRef={chatInputRef}
+            value={chatInput}
+            onChange={setChatInput}
+            onSend={() => void sendMessage()}
+            onAttach={() => fileInput.current?.click()}
+            onOpenModelSettings={() => setAuthOpen(true)}
+            onVoiceInput={() => showToast('Функция голосового ввода находится в разработке')}
+            placeholder={isApplicationChat ? 'Спросите о работе приложения…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
+            inputLabel="Сообщение для чата"
+            helperText={isApplicationChat ? 'Ответы проверяются по функциям приложения' : 'Ответы проверяются по источникам'}
+            modelName={codexModelLabel(codex)}
+            reasoningName={codexReasoningLabel(codex?.reasoning_effort)}
+            inputDisabled={(!isApplicationChat && (!document || document.status !== 'ready')) || !authReady || isSending}
+            sendDisabled={!chatInput.trim() || !chat || !authReady || isSending}
+            attachmentDisabled={isUploading}
+          />
           <p className="chat-footnote">{isApplicationChat ? 'В Codex передаются только выбранные сведения о приложении и история этого чата. Документы не читаются.' : 'Текст документа обрабатывается локально. В Codex передаются выбранные фрагменты.'}</p>
         </div>
       </aside>
@@ -2830,6 +2834,10 @@ function processingDescription(status: DocumentRecord['status']): string {
 function EmptyWorkspace({
   isUploading,
   onChoose,
+  onOpenModelSettings,
+  onVoiceInput,
+  modelName,
+  reasoningName,
   onStartApplicationHelp,
   documentsCount,
   onToggleLibrary,
@@ -2837,6 +2845,10 @@ function EmptyWorkspace({
 }: {
   isUploading: boolean
   onChoose: () => void
+  onOpenModelSettings: () => void
+  onVoiceInput: () => void
+  modelName: string
+  reasoningName: string
   onStartApplicationHelp: () => void
   documentsCount: number
   onToggleLibrary: () => void
@@ -2872,16 +2884,22 @@ function EmptyWorkspace({
         {documentsCount > 0 && <p className="empty-library-note">Выберите сохранённый чат слева, чтобы продолжить работу.</p>}
       </div>
       <div className="empty-chat-compose-area">
-        <div className="empty-chat-composer">
-          <textarea rows={1} name="chat-message" autoComplete="off" placeholder="Задайте вопрос по документу…" aria-label="Вопрос по документу" disabled />
-          <div className="empty-chat-footer">
-            <span>Чат станет доступен после загрузки документа</span>
-            <div className="empty-chat-actions">
-              <button className="icon-button" type="button" aria-label="Прикрепить документ" title="Прикрепить документ" onClick={onChoose}><Paperclip size={18} /></button>
-              <button className="send-button" type="button" aria-label="Отправить вопрос" disabled><Send size={15} /></button>
-            </div>
-          </div>
-        </div>
+        <AIComposer
+          value=""
+          onChange={() => undefined}
+          onSend={() => undefined}
+          onAttach={onChoose}
+          onOpenModelSettings={onOpenModelSettings}
+          onVoiceInput={onVoiceInput}
+          placeholder="Задайте вопрос по документу…"
+          inputLabel="Вопрос по документу"
+          helperText="Чат станет доступен после загрузки документа"
+          modelName={modelName}
+          reasoningName={reasoningName}
+          inputDisabled
+          sendDisabled
+          attachmentDisabled={isUploading}
+        />
         <p className="empty-chat-footnote">Ответы будут сопровождаться цитатами из документа.</p>
       </div>
     </div>

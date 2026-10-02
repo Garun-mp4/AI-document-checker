@@ -13,6 +13,7 @@ const originalViewer = await readFile(resolve(root, 'src/components/OriginalDocu
 const styles = await readFile(resolve(root, 'src/styles.css'), 'utf8')
 const appHelpTargets = await readFile(resolve(root, 'src/appHelpUiTargets.ts'), 'utf8')
 const searchToolbar = await readFile(resolve(root, 'src/components/DocumentSearchToolbar.tsx'), 'utf8')
+const aiComposer = await readFile(resolve(root, 'src/components/AIComposer.tsx'), 'utf8')
 const backendAppHelp = await readFile(resolve(root, '../backend/app/services/app_help.py'), 'utf8')
 
 test('sidebar collapse has persistent state and an accessible control contract', () => {
@@ -96,6 +97,23 @@ test('new chat opens the empty workspace instead of the file picker', () => {
   assert.doesNotMatch(newChatButton, /fileInput\.current\?\.click\(\)/)
   assert.match(app, /<div className="empty-workspace">/)
   assert.match(app, /Загрузите документ\.<br \/>/)
+})
+
+test('AI composers share accessible attachment, model, voice, send, and keyboard behavior', () => {
+  assert.match(app, /<AIComposer[\s\S]*?onAttach=\{\(\) => fileInput\.current\?\.click\(\)\}[\s\S]*?onOpenModelSettings=\{\(\) => setAuthOpen\(true\)\}[\s\S]*?onVoiceInput=\{\(\) => showToast\('Функция голосового ввода находится в разработке'\)\}/)
+  assert.match(app, /<AIComposer[\s\S]*?inputLabel="Вопрос по документу"[\s\S]*?inputDisabled[\s\S]*?sendDisabled/)
+  assert.match(aiComposer, /className="ai-composer"/)
+  assert.match(aiComposer, /aria-label="Прикрепить документ"/)
+  assert.match(aiComposer, /aria-label=\{`Модель \$\{modelName\}, уровень анализа \$\{reasoningName\}\. Настроить`\}/)
+  assert.match(aiComposer, /aria-label="Голосовой ввод"/)
+  assert.match(aiComposer, /aria-label="Отправить вопрос"/)
+  assert.match(aiComposer, /event\.key !== 'Enter' \|\| event\.shiftKey \|\| event\.nativeEvent\.isComposing/)
+  assert.match(aiComposer, /maxHeight = 120/)
+  assert.match(styles, /--radius-composer:\s*22px/)
+  assert.match(styles, /@container \(max-width: 420px\)/)
+  assert.match(styles, /\.ai-composer-send:hover:not\(:disabled\)/)
+  assert.match(styles, /\.ai-composer, \.ai-composer button \{ transition: none; \}/)
+  assert.doesNotMatch(aiComposer, /getUserMedia|MediaRecorder/)
 })
 
 test('empty workspace fits the desktop viewport without page scrolling', () => {

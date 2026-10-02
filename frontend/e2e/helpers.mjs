@@ -46,8 +46,9 @@ export async function upload(page, name, expected = 'ready') {
 }
 
 export async function showChat(page) {
-  if (await page.getByRole('button', { name: 'Открыть чат', exact: true }).count()) {
-    await page.getByRole('button', { name: 'Открыть чат', exact: true }).click()
+  const chatToggle = page.locator('.chat-visibility-toggle[aria-label="Открыть чат"]')
+  if (await chatToggle.count()) {
+    await chatToggle.click()
   }
   await expect(page.getByLabel('Сообщение для чата', { exact: true })).toBeVisible()
 }
