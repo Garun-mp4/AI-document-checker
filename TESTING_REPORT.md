@@ -598,5 +598,8 @@ Targeted browser reruns допускаются через `-PlaywrightGrep`. Mig
 | Проверка | Результат |
 |---|---|
 | Полный acceptance runner | **PASS**: frontend contracts/build, backend unit, Compose/Linux security, Playwright, migration, queue, API integration, maintenance и backup/restore |
-| Актуальный Compose образ приложения (`lab2ai_document-checker`) | **Результат добавляется после пересборки и проверки фактически отданной сборки** |
-| Git delivery | **Результат добавляется после проверки remote, commit и push в `origin/main`** |
+| Актуальный Compose образ приложения (`lab2ai_document-checker`) | **PASS**: пересобраны API/worker/web, PostgreSQL/API/worker/web прошли health/wait; миграция `0011` применилась к прежнему DB volume |
+| Фактически отданная сборка | **PASS**: `build_id=m16-20261002-cd4d52d`, commit `cd4d52dc8af0fb1a9b0e6d0088ec8c276c34756d`; `/api/v1/version` и `/build-info.json` совпали, index и JS asset отвечали HTTP 200 |
+| Проверка после restart production-сервисов | **PASS**: API и worker снова healthy, web running; build IDs/commit совпали, количество существующих документов и чатов не изменилось |
+| Chromium smoke фактически установленного приложения | **PASS**: на 1440×900 и 390×844 React workspace отрисован, горизонтального overflow, `pageerror` и console errors нет |
+| Git delivery | **PASS**: commit `cd4d52d` находится на `main` и успешно отправлен в `origin/main`; финальная запись M16 включена в следующий документационный commit |
