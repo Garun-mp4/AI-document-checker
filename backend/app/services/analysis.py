@@ -109,7 +109,8 @@ def _csv_metrics(metadata: dict[str, Any], derived: dict[str, uuid.UUID]) -> tup
 
 
 async def analyze_document(document_id: uuid.UUID, codex: CodexService, *, version: int,
-                           snapshot: dict, before_request=None) -> list[Insight]:
+                           snapshot: dict, before_request=None, model: str | None = None,
+                           reasoning_effort: str | None = None) -> list[Insight]:
     file_type = snapshot['file_type']
     metadata = dict(snapshot.get('metadata_json') or snapshot.get('metadata') or {})
 
@@ -181,7 +182,12 @@ async def analyze_document(document_id: uuid.UUID, codex: CodexService, *, versi
     if search_questions and sources:
         if before_request:
             await before_request()
-        raw = await codex.complete(payload, ANALYSIS_SCHEMA)
+        preferences = {}
+        if model is not None:
+            preferences["model"] = model
+        if reasoning_effort is not None:
+            preferences["reasoning_effort"] = reasoning_effort
+        raw = await codex.complete(payload, ANALYSIS_SCHEMA, **preferences)
         try:
             parsed = json.loads(raw)
             model_rows = {item["key"]: item for item in parsed.get("insights", []) if isinstance(item, dict) and isinstance(item.get("key"), str)}

@@ -46,10 +46,6 @@ async def enqueue(session, document: Document, operation: str = 'process', *, pa
         operation = 'analysis' if base else 'process'
     number = document.next_version or 1
     document.next_version = number + 1
-    session.add(DocumentVersion(document_id=document.id, number=number,
-                                chunk_version=base.chunk_version if base else number,
-                                state='indexed' if base else 'staging',
-                                snapshot=dict(base.snapshot) if base else {}))
     job_parameters = {'model': settings.codex_model,
                       'reasoning_effort': settings.codex_reasoning_effort,
                       'ocr': {'enabled': settings.ocr_enabled, 'languages': settings.ocr_languages,
@@ -57,6 +53,12 @@ async def enqueue(session, document: Document, operation: str = 'process', *, pa
                       'converter_version': '0.1.8'}
     if parameters:
         job_parameters.update(parameters)
+    session.add(DocumentVersion(document_id=document.id, number=number,
+                                chunk_version=base.chunk_version if base else number,
+                                state='indexed' if base else 'staging',
+                                snapshot=dict(base.snapshot) if base else {},
+                                analysis_model=job_parameters.get('model'),
+                                analysis_reasoning_effort=job_parameters.get('reasoning_effort')))
     job = ProcessingJob(document_id=document.id, operation=operation, version=number,
                         input_version=document.input_checksum, state='queued', stage='queued',
                         parameters=job_parameters)

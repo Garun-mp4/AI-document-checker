@@ -198,6 +198,10 @@ export interface Insight {
   question: string
   answer: string
   citations: SourceRef[]
+  version?: number | null
+  source_version?: number | null
+  model?: string | null
+  reasoning_effort?: string | null
 }
 
 export interface ChatMessage {
@@ -206,11 +210,29 @@ export interface ChatMessage {
   content: string
   citations: SourceRef[]
   created_at: string
+  context_epoch?: number
+  reply_to_message_id?: string | null
+  generation_status?: 'complete' | 'streaming' | 'interrupted'
+  generation_error?: string | null
+  model?: string | null
+  reasoning_effort?: string | null
+  source_version?: number | null
 }
 
 export interface ChatRecord {
   id: string
   document_id: string
+  context_epoch?: number
+}
+
+export interface DocumentAnalysisVersion {
+  number: number
+  source_version: number
+  state: string
+  model: string | null
+  reasoning_effort: string | null
+  created_at: string
+  is_active: boolean
 }
 
 export interface CodexStatus {

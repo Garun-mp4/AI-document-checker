@@ -21,7 +21,11 @@ def request(path, data=None):
 class RemoteCodex:
     async def complete(self, payload, schema, **preferences):
         async with httpx.AsyncClient(trust_env=False, timeout=120) as client:
-            reply = await client.post('http://api:8000/api/v1/__e2e/complete', json={'payload': payload, 'schema': schema})
+            reply = await client.post('http://api:8000/api/v1/__e2e/complete', json={
+                'payload': payload,
+                'schema': schema,
+                'preferences': preferences,
+            })
             reply.raise_for_status()
             response = reply.json()
         if 'error' in response:

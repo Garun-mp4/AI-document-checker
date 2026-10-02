@@ -8,14 +8,15 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException, Request
+from sqlalchemy import delete, select
+
 from app import main
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Chat, Chunk, Document, Message
 from app.services.codex import CodexService, CodexUnavailable
 from app.services.codex_preferences import model_display_name
-from fastapi import HTTPException, Request
-from sqlalchemy import delete, select
 
 
 class DeterministicCodex(CodexService):
@@ -52,7 +53,7 @@ class DeterministicCodex(CodexService):
             "user_code": None, "error": "Synthetic unavailable model" if self.mode == "unavailable" else None,
         }
 
-    async def complete(self, payload, output_schema):
+    async def complete(self, payload, output_schema, **preferences):
         self.complete_calls += 1
         await self.require_ready()
         sources = {source["label"]: source["excerpt"] for source in payload["sources"]}
@@ -61,6 +62,16 @@ class DeterministicCodex(CodexService):
              "citations": question["available_sources"][:1], "not_found": not question["available_sources"]}
             for question in payload["questions"]
         ]}, ensure_ascii=False)
+
+    async def validate_choice(self, model, reasoning_effort):
+        options = await self.status()
+        selected = next((item for item in options["models"] if item["id"] == model), None)
+        if not options["authenticated"] or not selected or reasoning_effort not in {
+            item["value"] for item in selected["reasoning_efforts"]
+        }:
+            from app.services.codex import CodexModelUnavailable
+            raise CodexModelUnavailable("Synthetic model unavailable")
+        return model, reasoning_effort
 
     async def stream_chat(self, payload, existing_thread_id=None, *, model=None, reasoning_effort=None):
         self.chat_calls += 1
@@ -228,13 +239,15 @@ async def remove_seeded_chats(request: Request):
 async def worker_control():
     return {'mode': app.state.codex.mode, 'markdown_failure': getattr(app.state, 'markdown_failure', False),
             'hold_stage': getattr(app.state, 'hold_stage', None),
-            'complete_calls': getattr(app.state, 'complete_calls', 0)}
+            'complete_calls': getattr(app.state, 'complete_calls', 0),
+            'last_complete_preferences': getattr(app.state, 'last_complete_preferences', {})}
 
 
 @app.post('/api/v1/__e2e/complete')
 async def complete(request: Request):
     data = await request.json()
     app.state.complete_calls = getattr(app.state, 'complete_calls', 0) + 1
+    app.state.last_complete_preferences = data.get('preferences', {})
     while getattr(app.state, 'hold_complete', False):
         await asyncio.sleep(.1)
     try:

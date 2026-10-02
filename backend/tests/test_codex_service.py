@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.services.codex import CodexNeedsLogin, CodexPreferenceError, CodexService
+from app.services.codex import (
+    CodexModelUnavailable,
+    CodexNeedsLogin,
+    CodexPreferenceError,
+    CodexService,
+)
 
 
 class _FakeClient:
@@ -136,3 +141,49 @@ def test_set_preferences_rejects_models_outside_product_allowlist(tmp_path) -> N
 
     with pytest.raises(CodexPreferenceError, match="поддерживаемый список"):
         asyncio.run(service.set_preferences("gpt-6-astra", "medium"))
+
+
+def test_validate_choice_keeps_one_off_analysis_preferences_out_of_saved_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(settings, "codex_home", str(tmp_path))
+    monkeypatch.setattr(settings, "codex_model", "gpt-6-luna")
+    monkeypatch.setattr(settings, "codex_reasoning_effort", "medium")
+    service = CodexService()
+
+    async def fake_status(*, refresh: bool):
+        assert refresh is True
+        return {
+            "authenticated": True,
+            "models": [{
+                "id": "gpt-6.1-sol",
+                "reasoning_efforts": [{"value": "high"}],
+            }],
+        }
+
+    monkeypatch.setattr(service, "status", fake_status)
+
+    result = asyncio.run(service.validate_choice("GPT-6.1-Sol", "HIGH"))
+
+    assert result == ("gpt-6.1-sol", "high")
+    assert settings.codex_model == "gpt-6-luna"
+    assert settings.codex_reasoning_effort == "medium"
+    assert not service._preferences_file.exists()
+
+
+def test_validate_choice_rejects_an_unavailable_model_without_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(settings, "codex_home", str(tmp_path))
+    service = CodexService()
+
+    async def fake_status(*, refresh: bool):
+        return {
+            "authenticated": True,
+            "models": [{"id": "gpt-6-luna", "reasoning_efforts": [{"value": "medium"}]}],
+        }
+
+    monkeypatch.setattr(service, "status", fake_status)
+
+    with pytest.raises(CodexModelUnavailable, match="недоступны"):
+        asyncio.run(service.validate_choice("gpt-6.1-sol", "high"))

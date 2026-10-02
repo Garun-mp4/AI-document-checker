@@ -296,4 +296,5 @@ async def get_chat_settings(session: AsyncSession, chat_id: Any) -> ChatSettings
         custom_title=chat.title,
         pinned=chat.pinned_at is not None,
         revision=chat.revision,
+        context_epoch=chat.context_epoch,
     )

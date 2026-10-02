@@ -24,7 +24,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from sqlalchemy import case, func, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 
 from app.config import settings
 from app.database import SessionLocal
@@ -45,6 +45,8 @@ from app.schemas import (
     ChatSummaryOut,
     ChatUpdateIn,
     CodexPreferencesIn,
+    DeleteMessagesOut,
+    DocumentAnalysisVersionOut,
     DocumentExportIn,
     DocumentOut,
     DocumentPreviewOut,
@@ -54,12 +56,16 @@ from app.schemas import (
     MessageOut,
     OcrReprocessIn,
     ProcessingJobOut,
+    ReanalyzeIn,
     SendMessageIn,
     SourceOut,
+    StartChatContextOut,
     TablePreviewOut,
 )
 from app.services.artifact_response import artifact_response
-from app.services.chat_library import get_chat_settings, list_chat_library as query_chat_library
+from app.services.chat_context import bounded_history
+from app.services.chat_library import get_chat_settings
+from app.services.chat_library import list_chat_library as query_chat_library
 from app.services.citations import format_source_markers
 from app.services.codex import (
     CodexModelUnavailable,
@@ -193,6 +199,11 @@ async def _message_out(session, chat: Chat, message: Message) -> MessageOut:
         citations=await _sources_for_ids(session, chat.document_id, message.citations or []),
         model=message.model, reasoning_effort=message.reasoning_effort,
         created_at=message.created_at,
+        context_epoch=message.context_epoch,
+        reply_to_message_id=str(message.reply_to_message_id) if message.reply_to_message_id else None,
+        generation_status=message.generation_status,
+        generation_error=message.generation_error,
+        source_version=message.source_version,
     )
 
 
@@ -802,18 +813,81 @@ async def rebuild_document_markdown(document_id: uuid.UUID, request: Request) ->
 
 
 @router.get("/documents/{document_id}/insights", response_model=list[InsightOut])
-async def document_insights(document_id: uuid.UUID) -> list[InsightOut]:
+async def document_insights(document_id: uuid.UUID, version: int | None = Query(default=None, ge=1)) -> list[InsightOut]:
     async with SessionLocal() as session:
         document = await session.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
+        selected_number = version if version is not None else document.active_version
+        analysis_version = await session.get(DocumentVersion, (document_id, selected_number))
+        if analysis_version is None or analysis_version.state != "ready":
+            raise HTTPException(status_code=404, detail="Готовая версия анализа не найдена.")
         insights = (await session.execute(
-            select(Insight).where(Insight.document_id == document_id, Insight.version == document.active_version).order_by(Insight.created_at, Insight.id)
+            select(Insight).where(Insight.document_id == document_id, Insight.version == selected_number).order_by(Insight.created_at, Insight.id)
         )).scalars().all()
         return [InsightOut(
             id=str(item.id), key=item.key, question=item.question, answer=item.answer,
             citations=await _sources_for_ids(session, document_id, item.citations or []),
+            version=analysis_version.number, source_version=analysis_version.chunk_version,
+            model=analysis_version.analysis_model,
+            reasoning_effort=analysis_version.analysis_reasoning_effort,
         ) for item in insights]
+
+
+@router.get("/documents/{document_id}/versions", response_model=list[DocumentAnalysisVersionOut])
+async def document_analysis_versions(document_id: uuid.UUID) -> list[DocumentAnalysisVersionOut]:
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        versions = (await session.execute(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.state == "ready",
+            ).order_by(DocumentVersion.number.desc())
+        )).scalars().all()
+        return [DocumentAnalysisVersionOut(
+            number=item.number, source_version=item.chunk_version, state=item.state,
+            model=item.analysis_model, reasoning_effort=item.analysis_reasoning_effort,
+            created_at=item.created_at, is_active=item.number == document.active_version,
+        ) for item in versions]
+
+
+@router.post("/documents/{document_id}/analysis/rebuild", status_code=202)
+async def rebuild_document_analysis(document_id: uuid.UUID, body: ReanalyzeIn, request: Request) -> dict[str, Any]:
+    codex = request.app.state.codex
+    try:
+        model, effort = await codex.validate_choice(body.model, body.reasoning_effort)
+    except CodexNeedsLogin as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CodexModelUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CodexUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.status != "ready":
+            raise HTTPException(status_code=409, detail="Дождитесь завершения текущей обработки документа.")
+        active = await session.get(DocumentVersion, (document_id, document.active_version))
+        if active is None or active.state != "ready":
+            raise HTTPException(status_code=409, detail="Нет готовой версии анализа для повторного запуска.")
+        if active.chunk_version != body.expected_source_version:
+            raise HTTPException(status_code=409, detail="Источник документа изменился. Обновите страницу и повторите запуск.")
+    try:
+        job = await request.app.state.processor.retry(
+            document_id, "analysis",
+            parameters={"model": model, "reasoning_effort": effort},
+            reject_if_active=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Документ не найден.") from exc
+    return {"job_id": str(job.id), "version": job.version, "source_version": body.expected_source_version,
+            "model": model, "reasoning_effort": effort, "state": job.state}
 
 
 @router.post("/documents/{document_id}/export")
@@ -980,11 +1054,28 @@ async def document_chat(document_id: uuid.UUID) -> ChatOut:
         chat = (await session.execute(select(Chat).where(Chat.document_id == document_id))).scalar_one_or_none()
         if chat is None:
             raise HTTPException(status_code=404, detail="Чат появится после завершения индексации документа.")
-        return ChatOut(id=str(chat.id), document_id=str(chat.document_id))
+        return ChatOut(id=str(chat.id), document_id=str(chat.document_id), context_epoch=chat.context_epoch)
+
+
+def _chat_generation_tasks(request: Request) -> dict[str, asyncio.Task]:
+    tasks = getattr(request.app.state, "chat_generation_tasks", None)
+    if tasks is None:
+        tasks = {}
+        request.app.state.chat_generation_tasks = tasks
+    return tasks
+
+
+def _chat_generation_buffers(request: Request) -> dict[str, list[str]]:
+    buffers = getattr(request.app.state, "chat_generation_buffers", None)
+    if buffers is None:
+        buffers = {}
+        request.app.state.chat_generation_buffers = buffers
+    return buffers
 
 
 @router.get("/chats/{chat_id}/messages", response_model=list[MessageOut])
-async def chat_messages(chat_id: uuid.UUID) -> list[MessageOut]:
+async def chat_messages(chat_id: uuid.UUID, request: Request) -> list[MessageOut]:
+    tasks = _chat_generation_tasks(request)
     async with SessionLocal() as session:
         chat = await session.get(Chat, chat_id)
         if chat is None:
@@ -992,14 +1083,19 @@ async def chat_messages(chat_id: uuid.UUID) -> list[MessageOut]:
         messages = (await session.execute(
             select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at, Message.id)
         )).scalars().all()
+        recovered = False
+        for message in messages:
+            if message.generation_status == "streaming" and str(message.id) not in tasks:
+                message.generation_status = "interrupted"
+                message.generation_error = "Ответ был прерван до завершения. Сохранённый фрагмент можно повторить."
+                recovered = True
+        if recovered:
+            await session.commit()
         return [await _message_out(session, chat, message) for message in messages]
 
 
-@router.post("/chats/{chat_id}/messages")
-async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Request) -> StreamingResponse:
-    text = body.text.strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="Введите вопрос.")
+async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text: str | None = None,
+                                  retry_user_id: uuid.UUID | None = None) -> StreamingResponse:
     codex = request.app.state.codex
     try:
         await codex.require_ready()
@@ -1010,9 +1106,12 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
 
     response_model = settings.codex_model
     response_reasoning_effort = settings.codex_reasoning_effort
-
-    async with SessionLocal() as session:
-        chat = await session.get(Chat, chat_id)
+    tasks = _chat_generation_tasks(request)
+    buffers = _chat_generation_buffers(request)
+    user: Message | None = None
+    history: list[Message] = []
+    async with SessionLocal() as session, session.begin():
+        chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
         if chat is None:
             raise HTTPException(status_code=404, detail="Чат не найден.")
         document = await session.get(Document, chat.document_id)
@@ -1020,39 +1119,66 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
             raise HTTPException(status_code=404, detail="Документ не найден.")
         if document.status != "ready":
             raise HTTPException(status_code=409, detail="Документ ещё обрабатывается или требует повторной обработки.")
-        history = (await session.execute(
-            select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at.desc()).limit(8)
-        )).scalars().all()
-        history.reverse()
-        codex_thread_id = chat.codex_thread_id
+        active_rows = (await session.execute(select(Message).where(
+            Message.chat_id == chat_id,
+            Message.generation_status == "streaming",
+        ).with_for_update())).scalars().all()
+        for active in active_rows:
+            if str(active.id) in tasks:
+                raise HTTPException(status_code=409, detail="Дождитесь завершения или остановите текущий ответ.")
+            active.generation_status = "interrupted"
+            active.generation_error = "Ответ был прерван до завершения. Сохранённый фрагмент можно повторить."
+
+        if retry_user_id is not None:
+            user = await session.get(Message, retry_user_id)
+            if user is None or user.chat_id != chat_id or user.role != "user" or user.context_epoch != chat.context_epoch:
+                raise HTTPException(status_code=404, detail="Вопрос не найден в текущем контексте чата.")
+            text = user.content
+            history = (await session.execute(select(Message).where(
+                Message.chat_id == chat_id,
+                Message.context_epoch == chat.context_epoch,
+                or_(Message.created_at < user.created_at,
+                    and_(Message.created_at == user.created_at, Message.id < user.id)),
+            ).order_by(Message.created_at.desc(), Message.id.desc()).limit(32))).scalars().all()
+            history.reverse()
+        else:
+            history = (await session.execute(select(Message).where(
+                Message.chat_id == chat_id,
+                Message.context_epoch == chat.context_epoch,
+            ).order_by(Message.created_at.desc(), Message.id.desc()).limit(32))).scalars().all()
+            history.reverse()
+
         document_id = document.id
         file_type = document.file_type
-        session.add(Message(chat_id=chat_id, role="user", content=text, citations=[]))
-        await session.commit()
+        context_epoch = chat.context_epoch
+        active_version = await session.get(DocumentVersion, (document_id, document.active_version))
+        if active_version is None or active_version.state != "ready":
+            raise HTTPException(status_code=409, detail="Нет готовой версии источников для ответа.")
+        source_version = active_version.chunk_version
+        previous_messages = bounded_history(history, exclude_id=user.id if user else None)
+        retrieval_query = " ".join([item["text"] for item in previous_messages[-4:]] + [text or ""])[-1_500:]
 
-    retrieval_query = " ".join([item.content for item in history[-4:]] + [text])[-1_500:]
-    chunks = await search_chunks(document_id, retrieval_query, limit=8)
+    chunks = await search_chunks(document_id, retrieval_query, limit=8, version=source_version)
     if file_type == "csv" and re.search(
         r"сумм|средн|миним|максим|итог|количеств|агрегат|скольк|посчит|вычисл|рассчит|подсчит|average|sum|total",
-        retrieval_query,
-        re.IGNORECASE,
+        retrieval_query, re.IGNORECASE,
     ):
         async with SessionLocal() as session:
-            derived = (await session.execute(
-                select(Chunk).where(Chunk.document_id == document_id, Chunk.is_derived.is_(True), Chunk.version == await active_chunk_version(session, document)).order_by(Chunk.ordinal)
-            )).scalars().all()
+            derived = (await session.execute(select(Chunk).where(
+                Chunk.document_id == document_id, Chunk.is_derived.is_(True), Chunk.version == source_version,
+            ).order_by(Chunk.ordinal))).scalars().all()
         table_summary = next((chunk for chunk in derived if not chunk.locator.get("column")), None)
         numeric_sources = [chunk for chunk in derived if chunk.locator.get("column")]
         if numeric_sources:
             query_lower = retrieval_query.casefold()
             named_sources = [chunk for chunk in numeric_sources if str(chunk.locator.get("column", "")).casefold() in query_lower]
-            selected_derived = ([table_summary] if table_summary else []) + (named_sources or numeric_sources[:7])
-            selected_derived = selected_derived[:8]
+            selected_derived = (([table_summary] if table_summary else []) + (named_sources or numeric_sources[:7]))[:8]
             selected_ids = {chunk.id for chunk in selected_derived}
             chunks = (selected_derived + [chunk for chunk in chunks if chunk.id not in selected_ids])[:8]
         elif table_summary:
             chunks = [table_summary, *chunks[:7]]
-    sources = []
+
+    sources: list[dict[str, str]] = []
     source_map: dict[str, Chunk] = {}
     for index, chunk in enumerate(chunks, start=1):
         label = f"S{index:02d}"
@@ -1060,76 +1186,208 @@ async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Re
         sources.append({"label": label, "location": str(chunk.locator.get("label", "Фрагмент документа")), "excerpt": chunk.text[:1_500]})
     payload = {
         "question": text,
-        "previous_messages": [{"role": item.role, "text": item.content[-2_000:]} for item in history[-8:]],
+        "previous_messages": previous_messages,
         "sources": sources,
         "instruction": "Ответь по-русски и поставь метку [Sxx] после каждого подтверждённого факта. Если источники не дают ответа, прямо скажи об этом без меток.",
     }
 
+    async with SessionLocal() as session, session.begin():
+        chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
+        if chat is None or chat.context_epoch != context_epoch:
+            raise HTTPException(status_code=409, detail="Контекст чата изменился. Повторите запрос.")
+        active = (await session.execute(select(Message.id).where(
+            Message.chat_id == chat_id, Message.generation_status == "streaming",
+        ).limit(1))).scalar_one_or_none()
+        if active is not None:
+            raise HTTPException(status_code=409, detail="В этом чате уже формируется ответ.")
+        latest_document = await session.get(Document, document_id)
+        latest_version = await session.get(DocumentVersion, (document_id, latest_document.active_version)) if latest_document else None
+        if latest_version is None or latest_version.chunk_version != source_version:
+            raise HTTPException(status_code=409, detail="Версия документа изменилась. Повторите запрос.")
+        if retry_user_id is None:
+            user = Message(chat_id=chat_id, role="user", content=text or "", citations=[],
+                           model=response_model, reasoning_effort=response_reasoning_effort,
+                           context_epoch=context_epoch, source_version=source_version)
+            session.add(user)
+            await session.flush()
+        else:
+            user = await session.get(Message, retry_user_id)
+            if user is None or user.context_epoch != chat.context_epoch:
+                raise HTTPException(status_code=404, detail="Вопрос больше недоступен для повтора.")
+        assistant = Message(chat_id=chat_id, role="assistant", content="", citations=[],
+                             model=response_model, reasoning_effort=response_reasoning_effort,
+                             context_epoch=context_epoch, reply_to_message_id=user.id,
+                             generation_status="streaming", source_version=source_version)
+        session.add(assistant)
+        await session.flush()
+        user_id, assistant_id = user.id, assistant.id
+        chat.codex_thread_id = None
+
+    async def persist_interrupted(content: str, error: str) -> None:
+        async with SessionLocal() as session, session.begin():
+            message = await session.get(Message, assistant_id, with_for_update=True)
+            if message and message.generation_status == "streaming":
+                message.content = content[-8_000:]
+                message.generation_status = "interrupted"
+                message.generation_error = error[:500]
+
     async def generate():
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            tasks[str(assistant_id)] = current_task
         answer_parts: list[str] = []
-        thread_id: str | None = None
+        buffers[str(assistant_id)] = answer_parts
+        persisted_length = 0
         try:
+            yield _sse("started", {"user_message_id": str(user_id), "assistant_message_id": str(assistant_id),
+                                   "context_epoch": context_epoch, "model": response_model,
+                                   "reasoning_effort": response_reasoning_effort, "source_version": source_version})
             yield _sse("sources", {"sources": [{
-                "label": label,
-                "id": str(chunk.id),
-                "text": chunk.text[:2_500],
-                "locator": chunk.locator,
-                "ordinal": chunk.ordinal,
-                "is_derived": chunk.is_derived,
+                "label": label, "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
+                "ordinal": chunk.ordinal, "is_derived": chunk.is_derived,
             } for label, chunk in source_map.items()]})
-            async for item in codex.stream_chat(
-                payload,
-                codex_thread_id,
-                model=response_model,
-                reasoning_effort=response_reasoning_effort,
-            ):
-                if item["kind"] == "thread":
-                    thread_id = item["thread_id"]
-                    async with SessionLocal() as session:
-                        chat = await session.get(Chat, chat_id)
-                        if chat:
-                            chat.codex_thread_id = thread_id
-                            await session.commit()
-                    yield _sse("thread", {"thread_id": thread_id})
-                elif item["kind"] == "delta":
-                    answer_parts.append(item["text"])
-                    yield _sse("delta", {"text": item["text"]})
+            async for item in codex.stream_chat(payload, None, model=response_model,
+                                                reasoning_effort=response_reasoning_effort):
+                if item["kind"] != "delta":
+                    continue
+                answer_parts.append(item["text"])
+                buffers[str(assistant_id)] = answer_parts
+                answer_now = "".join(answer_parts)
+                if len(answer_now) - persisted_length >= 512:
+                    async with SessionLocal() as session, session.begin():
+                        message = await session.get(Message, assistant_id, with_for_update=True)
+                        if message is None or message.generation_status != "streaming":
+                            return
+                        message.content = answer_now[-8_000:]
+                    persisted_length = len(answer_now)
+                yield _sse("delta", {"text": item["text"]})
             raw_answer = "".join(answer_parts).strip()
             found_labels = re.findall(r"\[(S\d{2})\]", raw_answer)
             valid_labels = list(dict.fromkeys(label for label in found_labels if label in source_map))
             citations = [source_map[label] for label in valid_labels]
-            if not citations:
-                answer = "В документе не найдено достаточно подтверждений для уверенного ответа."
-            else:
-                answer = format_source_markers(raw_answer, valid_labels)[:8_000].strip()
-            async with SessionLocal() as session:
-                session.add(Message(
-                    chat_id=chat_id,
-                    role="assistant",
-                    content=answer,
-                    citations=[str(chunk.id) for chunk in citations],
-                    model=response_model,
-                    reasoning_effort=response_reasoning_effort,
-                ))
-                await session.commit()
+            answer = (format_source_markers(raw_answer, valid_labels)[:8_000].strip() if citations else
+                      "В документе не найдено достаточно подтверждений для уверенного ответа.")
+            async with SessionLocal() as session, session.begin():
+                message = await session.get(Message, assistant_id, with_for_update=True)
+                if message is None or message.generation_status != "streaming":
+                    return
+                message.content = answer
+                message.citations = [str(chunk.id) for chunk in citations]
+                message.generation_status = "complete"
+                message.generation_error = None
             citation_data = [{
-                "label": label,
-                "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
+                "label": label, "id": str(chunk.id), "text": chunk.text[:2_500], "locator": chunk.locator,
                 "ordinal": chunk.ordinal, "is_derived": chunk.is_derived,
             } for label, chunk in zip(valid_labels, citations, strict=True)]
-            yield _sse("done", {"answer": answer, "citations": citation_data})
+            yield _sse("done", {"assistant_message_id": str(assistant_id), "answer": answer,
+                                 "citations": citation_data})
         except asyncio.CancelledError:
+            await persist_interrupted("".join(answer_parts), "Ответ остановлен или соединение было прервано. Частичный текст сохранён; вопрос можно повторить.")
+            raise
+        except GeneratorExit:
+            await persist_interrupted("".join(answer_parts), "Соединение было прервано до завершения. Сохранённый фрагмент можно повторить.")
             raise
         except Exception as exc:
             logger.exception("Chat answer failed for %s (%s)", chat_id, type(exc).__name__, exc_info=False)
             message = codex_error_message(exc)
-            yield _sse("error", {"message": message})
+            await persist_interrupted("".join(answer_parts), message)
+            yield _sse("error", {"assistant_message_id": str(assistant_id), "message": message})
+        finally:
+            if current_task is not None and tasks.get(str(assistant_id)) is current_task:
+                tasks.pop(str(assistant_id), None)
+            buffers.pop(str(assistant_id), None)
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-    )
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+
+@router.post("/chats/{chat_id}/messages")
+async def post_chat_message(chat_id: uuid.UUID, body: SendMessageIn, request: Request) -> StreamingResponse:
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Введите вопрос.")
+    return await _create_chat_generation(chat_id, request, text=text)
+
+
+@router.post("/chats/{chat_id}/messages/{message_id}/retry")
+async def retry_chat_question(chat_id: uuid.UUID, message_id: uuid.UUID, request: Request) -> StreamingResponse:
+    return await _create_chat_generation(chat_id, request, retry_user_id=message_id)
+
+
+@router.post("/chats/{chat_id}/messages/{message_id}/stop")
+async def stop_chat_generation(chat_id: uuid.UUID, message_id: uuid.UUID, request: Request) -> dict[str, str]:
+    tasks = _chat_generation_tasks(request)
+    buffers = _chat_generation_buffers(request)
+    partial = "".join(buffers.get(str(message_id), []))
+    async with SessionLocal() as session, session.begin():
+        chat = await session.get(Chat, chat_id)
+        message = await session.get(Message, message_id, with_for_update=True)
+        if chat is None or message is None or message.chat_id != chat_id or message.role != "assistant":
+            raise HTTPException(status_code=404, detail="Формируемый ответ не найден.")
+        if message.generation_status == "complete":
+            raise HTTPException(status_code=409, detail="Ответ уже завершён.")
+        if message.generation_status == "streaming":
+            message.content = partial[-8_000:]
+            message.generation_status = "interrupted"
+            message.generation_error = "Ответ остановлен. Частичный текст сохранён; вопрос можно повторить."
+    task = tasks.get(str(message_id))
+    if task and task is not asyncio.current_task():
+        task.cancel()
+    return {"status": "interrupted", "message_id": str(message_id)}
+
+
+@router.post("/chats/{chat_id}/context", response_model=StartChatContextOut)
+async def start_chat_context(chat_id: uuid.UUID, request: Request) -> StartChatContextOut:
+    tasks = _chat_generation_tasks(request)
+    async with SessionLocal() as session, session.begin():
+        chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        active = (await session.execute(select(Message).where(
+            Message.chat_id == chat_id, Message.generation_status == "streaming",
+        ).with_for_update())).scalars().all()
+        if any(str(item.id) in tasks for item in active):
+            raise HTTPException(status_code=409, detail="Сначала остановите текущий ответ.")
+        for item in active:
+            item.generation_status = "interrupted"
+            item.generation_error = "Ответ был прерван до завершения. Сохранённый фрагмент можно повторить."
+        count = await session.scalar(select(func.count(Message.id)).where(Message.chat_id == chat_id)) or 0
+        chat.context_epoch += 1
+        chat.codex_thread_id = None
+        return StartChatContextOut(context_epoch=chat.context_epoch, preserved_message_count=count)
+
+
+@router.delete("/chats/{chat_id}/messages/{message_id}", response_model=DeleteMessagesOut)
+async def delete_chat_message(chat_id: uuid.UUID, message_id: uuid.UUID) -> DeleteMessagesOut:
+    async with SessionLocal() as session, session.begin():
+        chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        selected = await session.get(Message, message_id, with_for_update=True)
+        if selected is None or selected.chat_id != chat_id:
+            raise HTTPException(status_code=404, detail="Сообщение не найдено.")
+        parent = selected if selected.role == "user" else None
+        if selected.role == "assistant":
+            parent = await session.get(Message, selected.reply_to_message_id) if selected.reply_to_message_id else None
+            if parent is None:
+                parent = (await session.execute(select(Message).where(
+                    Message.chat_id == chat_id, Message.role == "user",
+                    or_(Message.created_at < selected.created_at,
+                        and_(Message.created_at == selected.created_at, Message.id < selected.id)),
+                ).order_by(Message.created_at.desc(), Message.id.desc()).limit(1))).scalar_one_or_none()
+        if parent is None:
+            ids = [selected.id]
+        else:
+            related = (await session.execute(select(Message).where(
+                Message.chat_id == chat_id,
+                or_(Message.id == parent.id, Message.reply_to_message_id == parent.id),
+            ).with_for_update())).scalars().all()
+            ids = [item.id for item in related]
+        if any(item.generation_status == "streaming" for item in (related if parent else [selected])):
+            raise HTTPException(status_code=409, detail="Сначала остановите формируемый ответ.")
+        await session.execute(delete(Message).where(Message.id.in_(ids)))
+        chat.codex_thread_id = None
+    return DeleteMessagesOut(deleted_ids=[str(value) for value in ids])
 
 
 def codex_error_message(exc: Exception) -> str:

@@ -162,6 +162,20 @@ class CodexService:
         if not state["model_available"] or not state["reasoning_available"]:
             raise CodexModelUnavailable(state["error"] or "Выбранная модель недоступна.")
 
+    async def validate_choice(self, model: str, reasoning_effort: str) -> tuple[str, str]:
+        """Validate a one-off choice without changing the user's saved defaults."""
+        selected_model = model.strip().lower()
+        selected_effort = reasoning_effort.strip().lower()
+        if not selected_model or not selected_effort or selected_model not in ALLOWED_CODEX_MODELS:
+            raise CodexModelUnavailable("Выбранная модель или уровень размышления не поддерживается приложением.")
+        state = await self.status(refresh=True)
+        if not state["authenticated"]:
+            raise CodexNeedsLogin("Сначала подключите аккаунт Codex.")
+        selected = next((item for item in state.get("models", []) if item["id"] == selected_model), None)
+        if selected is None or selected_effort not in {item["value"] for item in selected["reasoning_efforts"]}:
+            raise CodexModelUnavailable("Выбранная модель или уровень размышления сейчас недоступны для аккаунта Codex.")
+        return selected_model, selected_effort
+
     async def begin_device_login(self) -> dict[str, Any]:
         async with self._login_lock:
             state = await self.status(refresh=True)

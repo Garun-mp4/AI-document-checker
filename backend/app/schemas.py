@@ -143,6 +143,10 @@ class InsightOut(BaseModel):
     question: str
     answer: str
     citations: list[SourceOut]
+    version: int | None = None
+    source_version: int | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
 
 
 class MessageOut(BaseModel):
@@ -153,6 +157,11 @@ class MessageOut(BaseModel):
     model: str | None = None
     reasoning_effort: str | None = None
     created_at: datetime
+    context_epoch: int = 0
+    reply_to_message_id: str | None = None
+    generation_status: Literal["complete", "streaming", "interrupted"] = "complete"
+    generation_error: str | None = None
+    source_version: int | None = None
 
 
 class DocumentExportIn(BaseModel):
@@ -179,6 +188,32 @@ class DocumentExportIn(BaseModel):
 class ChatOut(BaseModel):
     id: str
     document_id: str
+    context_epoch: int = 0
+
+
+class StartChatContextOut(BaseModel):
+    context_epoch: int
+    preserved_message_count: int
+
+
+class DeleteMessagesOut(BaseModel):
+    deleted_ids: list[str]
+
+
+class ReanalyzeIn(BaseModel):
+    model: str = Field(min_length=1, max_length=100)
+    reasoning_effort: str = Field(min_length=1, max_length=20)
+    expected_source_version: int = Field(ge=1)
+
+
+class DocumentAnalysisVersionOut(BaseModel):
+    number: int
+    source_version: int
+    state: str
+    model: str | None = None
+    reasoning_effort: str | None = None
+    created_at: datetime
+    is_active: bool
 
 
 class ChatSummaryOut(BaseModel):
@@ -221,6 +256,7 @@ class ChatSettingsOut(BaseModel):
     custom_title: str | None
     pinned: bool
     revision: int
+    context_epoch: int = 0
 
 
 class ChatUpdateIn(BaseModel):
@@ -241,7 +277,7 @@ class ChatUpdateIn(BaseModel):
         return normalized
 
     @model_validator(mode="after")
-    def require_an_update(self) -> "ChatUpdateIn":
+    def require_an_update(self) -> ChatUpdateIn:
         has_title_update = "title" in self.model_fields_set
         has_pin_update = "pinned" in self.model_fields_set and self.pinned is not None
         if not has_title_update and not has_pin_update:

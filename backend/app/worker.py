@@ -25,9 +25,10 @@ class JobCodex:
         self.service = service
         self.parameters = parameters
 
-    async def complete(self, payload, schema):
-        return await self.service.complete(payload, schema, model=self.parameters['model'],
-                                           reasoning_effort=self.parameters['reasoning_effort'])
+    async def complete(self, payload, schema, **preferences):
+        return await self.service.complete(payload, schema,
+                                           model=preferences.get('model', self.parameters['model']),
+                                           reasoning_effort=preferences.get('reasoning_effort', self.parameters['reasoning_effort']))
 
 
 class QueueWorker:

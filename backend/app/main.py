@@ -27,6 +27,8 @@ async def lifespan(app: FastAPI):
     codex.on_authenticated = processor.schedule_pending_analysis
     app.state.codex = codex
     app.state.processor = processor
+    app.state.chat_generation_tasks = {}
+    app.state.chat_generation_buffers = {}
     await processor.start()
     yield
     await processor.stop()

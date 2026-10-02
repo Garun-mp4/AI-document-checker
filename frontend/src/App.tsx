@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlignLeft,
   ArrowUp,
@@ -38,7 +38,7 @@ import {
   X,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import type { ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import type { ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
@@ -209,6 +209,11 @@ function App() {
   const [processingJob, setProcessingJob] = useState<ProcessingJob | null>(null)
   const [processingActionPending, setProcessingActionPending] = useState(false)
   const [insights, setInsights] = useState<Insight[]>([])
+  const [analysisVersions, setAnalysisVersions] = useState<DocumentAnalysisVersion[]>([])
+  const [selectedAnalysisVersion, setSelectedAnalysisVersion] = useState<number | null>(null)
+  const [analysisModel, setAnalysisModel] = useState('')
+  const [analysisReasoning, setAnalysisReasoning] = useState('')
+  const [analysisRequestPending, setAnalysisRequestPending] = useState(false)
   const [chat, setChat] = useState<ChatRecord | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [codex, setCodex] = useState<CodexStatus | null>(null)
@@ -242,9 +247,12 @@ function App() {
   const [codexPreferenceMessage, setCodexPreferenceMessage] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
   const [chatInput, setChatInput] = useState('')
-  const [isSending, setIsSending] = useState(false)
-  const [streamText, setStreamText] = useState('')
-  const [streamSources, setStreamSources] = useState<StreamCitation[]>([])
+  const [sendingChats, setSendingChats] = useState<Record<string, boolean>>({})
+  const [chatStreams, setChatStreams] = useState<Record<string, { text: string; sources: StreamCitation[]; assistantId: string | null }>>({})
+  const [messageDeleteTarget, setMessageDeleteTarget] = useState<ChatMessage | null>(null)
+  const [contextPending, setContextPending] = useState(false)
+  const isSending = Boolean(chat && sendingChats[chat.id])
+  const currentChatStream = chat ? chatStreams[chat.id] : undefined
   const [toast, setToast] = useState('')
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
   const [selectedSource, setSelectedSource] = useState<SourceRef | StreamCitation | null>(null)
@@ -271,6 +279,9 @@ function App() {
   const chatInputRef = useRef<HTMLTextAreaElement>(null)
   const workArea = useRef<HTMLElement>(null)
   const conversation = useRef<HTMLDivElement>(null)
+  const chatRef = useRef(chat)
+  const chatAbortControllers = useRef(new Map<string, AbortController>())
+  const stopRequestedRef = useRef(new Set<string>())
   const authDetailsRef = useRef<HTMLDivElement>(null)
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
   const reasoningTriggerRef = useRef<HTMLButtonElement>(null)
@@ -283,6 +294,7 @@ function App() {
   const documentRef = useRef(document)
   const markdownDocumentRef = useRef(markdownDocument)
   selectedIdRef.current = selectedId
+  chatRef.current = chat
   documentRef.current = document
   markdownDocumentRef.current = markdownDocument
 
@@ -600,14 +612,17 @@ function App() {
 
   const loadReadyData = useCallback(async (documentId: string) => {
     try {
-      const [cardData, chatData, previewData, markdownData] = await Promise.all([
+      const [cardData, chatData, previewData, markdownData, versionData] = await Promise.all([
         api<Insight[]>(`${API}/documents/${documentId}/insights`),
         api<ChatRecord>(`${API}/documents/${documentId}/chat`),
         api<DocumentPreview>(`${API}/documents/${documentId}/preview`),
         api<MarkdownDocument>(`${API}/documents/${documentId}/markdown`),
+        api<DocumentAnalysisVersion[]>(`${API}/documents/${documentId}/versions`),
       ])
       setInsights(cardData)
       setChat(chatData)
+      setAnalysisVersions(versionData)
+      setSelectedAnalysisVersion(null)
       setDocumentPreview(previewData)
       setMarkdownDocument(markdownData)
       setPreviewTab('original')
@@ -627,6 +642,8 @@ function App() {
       setDocument(null)
       setProcessingJob(null)
       setInsights([])
+      setAnalysisVersions([])
+      setSelectedAnalysisVersion(null)
       setDocumentPreview(null)
       setMarkdownDocument(null)
       setChat(null)
@@ -638,6 +655,8 @@ function App() {
     setDocument(null)
     setProcessingJob(null)
     setInsights([])
+    setAnalysisVersions([])
+    setSelectedAnalysisVersion(null)
     setDocumentPreview(null)
     setMarkdownDocument(null)
     setPreviewTab('original')
@@ -843,8 +862,6 @@ function App() {
     setChat(null)
     setMessages([])
     setChatInput('')
-    setStreamText('')
-    setStreamSources([])
     setSelectedSourceId(null)
     setSelectedSource(null)
     setSearchSelection(null)
@@ -1104,33 +1121,42 @@ function App() {
     }
   }, [deleteTarget, refreshLibrary, selectedId, showToast])
 
-  const sendMessage = useCallback(async () => {
-    const text = chatInput.trim()
-    if (!text || !chat || isSending) return
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(), role: 'user', content: text, citations: [], created_at: new Date().toISOString(),
+  const streamChatRequest = useCallback(async (targetChat: ChatRecord, text: string, retryUserId?: string) => {
+    if (!text.trim() || sendingChats[targetChat.id]) return
+    const temporaryUserId = retryUserId ? null : crypto.randomUUID()
+    if (temporaryUserId && chatRef.current?.id === targetChat.id) {
+      setMessages((current) => [...current, {
+        id: temporaryUserId, role: 'user', content: text, citations: [], created_at: new Date().toISOString(),
+        context_epoch: targetChat.context_epoch ?? 0, generation_status: 'complete',
+      }])
     }
-    setMessages((current) => [...current, userMessage])
-    setChatInput('')
-    setIsSending(true)
-    setStreamText('')
-    setStreamSources([])
+    setSendingChats((current) => ({ ...current, [targetChat.id]: true }))
+    setChatStreams((current) => ({ ...current, [targetChat.id]: { text: '', sources: [], assistantId: null } }))
+    const controller = new AbortController()
+    chatAbortControllers.current.set(targetChat.id, controller)
+    let assistantId: string | null = null
+    let userId = retryUserId ?? temporaryUserId ?? ''
     let streamed = ''
+    let streamSources: StreamCitation[] = []
+    let messageModel = codex?.model ?? ''
+    let messageReasoning = codex?.reasoning_effort ?? ''
+    let messageSourceVersion: number | null = null
     let receivedFinal = false
     try {
-      const response = await fetch(`${API}/chats/${chat.id}/messages`, {
+      const response = await fetch(retryUserId
+        ? `${API}/chats/${targetChat.id}/messages/${retryUserId}/retry`
+        : `${API}/chats/${targetChat.id}/messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        headers: retryUserId ? undefined : { 'Content-Type': 'application/json' },
+        body: retryUserId ? undefined : JSON.stringify({ text }),
+        signal: controller.signal,
       })
       if (!response.ok) {
         let message = `Ошибка запроса (${response.status})`
         try {
           const body = await response.json() as { detail?: string }
           if (body.detail) message = body.detail
-        } catch {
-          // Use the status message if the API returned a proxy error.
-        }
+        } catch { /* Keep the HTTP status text for non-JSON proxy responses. */ }
         throw new Error(message)
       }
       if (!response.body) throw new Error('Поток ответа недоступен.')
@@ -1148,38 +1174,187 @@ function App() {
           const event = block.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim()
           const dataLine = block.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim()
           if (event && dataLine) {
-            const data = JSON.parse(dataLine) as { text?: string; answer?: string; citations?: StreamCitation[]; sources?: StreamCitation[]; message?: string }
-            if (event === 'sources') setStreamSources(data.sources ?? [])
+            const data = JSON.parse(dataLine) as {
+              text?: string; answer?: string; citations?: StreamCitation[]; sources?: StreamCitation[]; message?: string
+              user_message_id?: string; assistant_message_id?: string; context_epoch?: number
+              model?: string; reasoning_effort?: string; source_version?: number
+            }
+            if (event === 'started') {
+              userId = data.user_message_id ?? userId
+              assistantId = data.assistant_message_id ?? null
+              messageModel = data.model ?? messageModel
+              messageReasoning = data.reasoning_effort ?? messageReasoning
+              messageSourceVersion = data.source_version ?? null
+              if (chatRef.current?.id === targetChat.id && assistantId) {
+                const currentAssistantId = assistantId
+                const activeEpoch = data.context_epoch ?? targetChat.context_epoch ?? 0
+                setMessages((current) => {
+                  const withoutTemporary = temporaryUserId ? current.filter((item) => item.id !== temporaryUserId) : current
+                  const withPersistedUser = retryUserId || withoutTemporary.some((item) => item.id === userId)
+                    ? withoutTemporary
+                    : [...withoutTemporary, { id: userId, role: 'user' as const, content: text, citations: [], created_at: new Date().toISOString(), context_epoch: activeEpoch }]
+                  const assistantMessage: ChatMessage = {
+                    id: currentAssistantId, role: 'assistant', content: '', citations: [], created_at: new Date().toISOString(),
+                    context_epoch: activeEpoch, reply_to_message_id: userId,
+                    generation_status: 'streaming', model: messageModel, reasoning_effort: messageReasoning,
+                    source_version: messageSourceVersion,
+                  }
+                  return [...withPersistedUser, assistantMessage]
+                })
+              }
+              setChatStreams((current) => ({ ...current, [targetChat.id]: { text: '', sources: [], assistantId } }))
+            }
+            if (event === 'sources') {
+              streamSources = data.sources ?? []
+              setChatStreams((current) => ({ ...current, [targetChat.id]: { text: streamed, sources: streamSources, assistantId } }))
+            }
             if (event === 'delta' && data.text) {
               streamed += data.text
-              setStreamText((current) => current + data.text)
+              const labels = Array.from(new Set(Array.from(streamed.matchAll(/\[(S\d{2})\]/g), (match) => match[1])))
+              const citations = labels.flatMap((label) => {
+                const source = streamSources.find((item) => item.label === label)
+                return source ? [source] : []
+              })
+              const content = streamed.replace(/\[(S\d{2})\]/g, (_marker, label: string) => {
+                const position = citations.findIndex((source) => source.label === label)
+                return position >= 0 ? `〔${position + 1}〕` : ''
+              })
+              setChatStreams((current) => ({ ...current, [targetChat.id]: { text: streamed, sources: streamSources, assistantId } }))
+              if (assistantId && chatRef.current?.id === targetChat.id) {
+                setMessages((current) => current.map((item) => item.id === assistantId ? { ...item, content, citations } : item))
+              }
             }
             if (event === 'done') {
               receivedFinal = true
-              const finalText = data.answer ?? streamed
-              const citations = (data.citations ?? []).map((item) => ({ ...item, locator: item.locator }))
-              setMessages((current) => [...current, {
-                id: crypto.randomUUID(), role: 'assistant', content: finalText, citations,
-                created_at: new Date().toISOString(),
-              }])
+              assistantId = data.assistant_message_id ?? assistantId
+              const citations = (data.citations ?? []).map(({ label: _label, ...item }) => item)
+              if (assistantId && chatRef.current?.id === targetChat.id) {
+                setMessages((current) => current.map((item) => item.id === assistantId ? {
+                  ...item, content: data.answer ?? streamed, citations, generation_status: 'complete', generation_error: null,
+                } : item))
+              }
               void refreshLibrary()
-              setStreamText('')
-              setStreamSources([])
             }
             if (event === 'error') throw new Error(data.message ?? 'Не удалось получить ответ.')
           }
           boundary = buffer.indexOf('\n\n')
         }
       }
-      if (!receivedFinal) throw new Error('Поток ответа завершился до получения итогового ответа. Повторите вопрос.')
+      if (!receivedFinal && !controller.signal.aborted) throw new Error('Поток ответа завершился до получения итогового ответа. Повторите вопрос.')
     } catch (error) {
-      setStreamText('')
-      setStreamSources([])
-      showToast(error instanceof Error ? error.message : 'Не удалось получить ответ от Codex.')
+      const intentionallyStopped = assistantId ? stopRequestedRef.current.has(assistantId) : controller.signal.aborted
+      if (!intentionallyStopped) showToast(error instanceof Error ? error.message : 'Не удалось получить ответ от Codex.')
     } finally {
-      setIsSending(false)
+      chatAbortControllers.current.delete(targetChat.id)
+      if (assistantId) stopRequestedRef.current.delete(assistantId)
+      setSendingChats((current) => ({ ...current, [targetChat.id]: false }))
+      setChatStreams((current) => {
+        const next = { ...current }
+        delete next[targetChat.id]
+        return next
+      })
+      if (chatRef.current?.id === targetChat.id) {
+        try {
+          setMessages(await api<ChatMessage[]>(`${API}/chats/${targetChat.id}/messages`))
+        } catch (error) {
+          showToast(error instanceof Error ? error.message : 'Не удалось обновить сохранённую переписку.')
+        }
+      }
+      void refreshLibrary()
     }
-  }, [chat, chatInput, isSending, refreshLibrary, showToast])
+  }, [codex?.model, codex?.reasoning_effort, refreshLibrary, sendingChats, showToast])
+
+  const sendMessage = useCallback(() => {
+    const text = chatInput.trim()
+    if (!text || !chat || isSending) return
+    setChatInput('')
+    void streamChatRequest(chat, text)
+  }, [chat, chatInput, isSending, streamChatRequest])
+
+  const stopChatMessage = useCallback(async (messageId: string, targetChat: ChatRecord) => {
+    stopRequestedRef.current.add(messageId)
+    try {
+      await api(`${API}/chats/${targetChat.id}/messages/${messageId}/stop`, { method: 'POST' })
+    } catch (error) {
+      if (error instanceof Error && !error.message.includes('завершён')) showToast(error.message)
+    } finally {
+      chatAbortControllers.current.get(targetChat.id)?.abort()
+    }
+  }, [showToast])
+
+  const retryChatMessage = useCallback((userMessageId: string) => {
+    if (!chat || sendingChats[chat.id]) return
+    const question = messages.find((item) => item.id === userMessageId)?.content ?? ''
+    void streamChatRequest(chat, question, userMessageId)
+  }, [chat, messages, sendingChats, streamChatRequest])
+
+  const deleteChatMessage = useCallback(async () => {
+    if (!messageDeleteTarget || !chat) return
+    try {
+      const result = await api<{ deleted_ids: string[] }>(`${API}/chats/${chat.id}/messages/${messageDeleteTarget.id}`, { method: 'DELETE' })
+      const deleted = new Set(result.deleted_ids)
+      setMessages((current) => current.filter((item) => !deleted.has(item.id)))
+      setMessageDeleteTarget(null)
+      void refreshLibrary()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось удалить сообщения.')
+    }
+  }, [chat, messageDeleteTarget, refreshLibrary, showToast])
+
+  const startNewContext = useCallback(async () => {
+    if (!chat || contextPending) return
+    setContextPending(true)
+    try {
+      const result = await api<{ context_epoch: number; preserved_message_count: number }>(`${API}/chats/${chat.id}/context`, { method: 'POST' })
+      setChat((current) => current ? { ...current, context_epoch: result.context_epoch } : current)
+      showToast(`Новый контекст начат. Сохранённые сообщения (${result.preserved_message_count}) останутся в истории и не будут передаваться модели.`)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось начать новый контекст.')
+    } finally {
+      setContextPending(false)
+    }
+  }, [chat, contextPending, showToast])
+
+  const selectAnalysisVersion = useCallback(async (version: number) => {
+    if (!document) return
+    setSelectedAnalysisVersion(version)
+    try {
+      setInsights(await api<Insight[]>(`${API}/documents/${document.id}/insights?version=${version}`))
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось загрузить выбранную версию анализа.')
+    }
+  }, [document, showToast])
+
+  const rebuildAnalysis = useCallback(async () => {
+    if (!document || !codex) return
+    const activeVersion = analysisVersions.find((item) => item.is_active)
+    if (!activeVersion) {
+      showToast('Для документа пока нет готовой версии источников.')
+      return
+    }
+    const model = analysisModel || codex.model
+    const modelOption = codex.models.find((item) => item.id === model)
+    const effort = analysisReasoning || codex.reasoning_effort
+    if (!modelOption || !modelOption.reasoning_efforts.some((item) => item.value === effort)) {
+      showToast('Выбранная модель или уровень размышления недоступны. Выберите вариант из списка.')
+      return
+    }
+    setAnalysisRequestPending(true)
+    try {
+      await api(`${API}/documents/${document.id}/analysis/rebuild`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, reasoning_effort: effort, expected_source_version: activeVersion.source_version }),
+      })
+      const jobs = await api<ProcessingJob[]>(`${API}/documents/${document.id}/jobs`)
+      setProcessingJob(jobs.find((job) => ['queued', 'running', 'cancelling'].includes(job.state)) ?? jobs[0] ?? null)
+      showToast('Повторный анализ поставлен в очередь. Текущие карточки останутся доступны до завершения.')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось запустить повторный анализ.')
+    } finally {
+      setAnalysisRequestPending(false)
+    }
+  }, [analysisModel, analysisReasoning, analysisVersions, codex, document, showToast])
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -1260,17 +1435,28 @@ function App() {
     const saved = await changeCodexReasoning(reasoningEffort)
     if (!saved) setOpenPreferenceMenu('reasoning')
   }
-  const streamedLabels = Array.from(new Set(Array.from(streamText.matchAll(/\[(S\d{2})\]/g), (match) => match[1])))
-  const streamingCitations = streamedLabels.flatMap((label) => {
-    const source = streamSources.find((item) => item.label === label)
-    return source ? [source] : []
-  })
-  const streamingContent = streamText.replace(/\[(S\d{2})\]/g, (_marker, label: string) => {
-    const position = streamingCitations.findIndex((source) => source.label === label)
-    return position >= 0 ? `〔${position + 1}〕` : ''
-  })
+  const streamText = currentChatStream?.text ?? ''
   const currentListItem = chats.find((item) => item.document_id === selectedId)
   const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
+  const activeAnalysisVersion = analysisVersions.find((item) => item.is_active)
+  const displayedAnalysisVersion = analysisVersions.find((item) => item.number === selectedAnalysisVersion) ?? activeAnalysisVersion
+  const deleteQuestion = (() => {
+    if (!messageDeleteTarget) return null
+    if (messageDeleteTarget.role === 'user') return messageDeleteTarget
+    return messages.find((item) => item.role === 'user' && item.id === messageDeleteTarget.reply_to_message_id)
+      ?? messages.slice(0, messages.findIndex((item) => item.id === messageDeleteTarget.id)).reverse().find((item) => item.role === 'user')
+      ?? null
+  })()
+  const effectiveAnalysisModel = analysisModel || codex?.model || DEFAULT_CODEX_MODEL
+  const analysisModelOptions = codex?.models ?? []
+  const chosenAnalysisModel = analysisModelOptions.find((item) => item.id === effectiveAnalysisModel)
+  const analysisReasoningOptions = chosenAnalysisModel?.reasoning_efforts ?? []
+  const effectiveAnalysisReasoning = analysisReasoningOptions.some((item) => item.value === analysisReasoning)
+    ? analysisReasoning
+    : analysisReasoningOptions.some((item) => item.value === codex?.reasoning_effort)
+      ? codex?.reasoning_effort ?? ''
+      : analysisReasoningOptions[0]?.value ?? ''
+  const anyChatSending = Object.values(sendingChats).some(Boolean)
   const activeJob = Boolean(processingJob && ['queued', 'running', 'cancelling'].includes(processingJob.state))
   const activeStatus = visibleStatus ? ['queued', 'extracting', 'ocr', 'indexing', 'analyzing'].includes(visibleStatus.status) || (visibleStatus.status === 'ready' && activeJob) : false
   const replacementFailure = visibleStatus?.status === 'ready' && processingJob?.state === 'failed'
@@ -1441,7 +1627,7 @@ function App() {
       )}
 
       <main id="main-content" tabIndex={-1} className={`workspace ${!selectedId || !visibleStatus ? 'workspace-empty' : ''} ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
-        <BuildVersionNotice check={buildVersionCheck} busy={isUploading || isSending} onReload={() => window.location.reload()} onRetry={recheckBuildVersion} />
+        <BuildVersionNotice check={buildVersionCheck} busy={isUploading || anyChatSending} onReload={() => window.location.reload()} onRetry={recheckBuildVersion} />
         <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} aria-label="Выберите документ" onChange={(event) => void uploadFile(event.target.files?.[0])} />
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
 
@@ -1546,7 +1732,31 @@ function App() {
                 <section className="insights-section" aria-labelledby="insights-title">
                   <div className="section-heading">
                     <div><span className="section-eyebrow">АНАЛИЗ ДОКУМЕНТА</span><h2 id="insights-title">Ключевые ответы</h2></div>
-                    <span className="insight-count">{insights.length || 7} тем</span>
+                    <div className="analysis-version-picker">
+                      {analysisVersions.length > 1 && <label className="analysis-version-select-wrap">
+                        <span>Версия</span>
+                        <select aria-label="Версия анализа" value={displayedAnalysisVersion?.number ?? ''} onChange={(event) => void selectAnalysisVersion(Number(event.target.value))}>
+                          {analysisVersions.map((version) => <option key={version.number} value={version.number}>
+                            {`v${version.number}${version.is_active ? ' · текущая' : ''}`}
+                          </option>)}
+                        </select>
+                      </label>}
+                      <span className="insight-count">{insights.length} тем</span>
+                    </div>
+                  </div>
+                  <div className="analysis-rebuild-panel" aria-label="Настройки повторного анализа">
+                    <label><span>Модель</span><select aria-label="Модель повторного анализа" value={effectiveAnalysisModel} onChange={(event) => { setAnalysisModel(event.target.value); setAnalysisReasoning('') }} disabled={!authReady || analysisRequestPending || activeJob}>
+                      {analysisModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                    </select></label>
+                    <label><span>Уровень размышления</span><select aria-label="Уровень размышления повторного анализа" value={effectiveAnalysisReasoning} onChange={(event) => setAnalysisReasoning(event.target.value)} disabled={!authReady || !analysisReasoningOptions.length || analysisRequestPending || activeJob}>
+                      {analysisReasoningOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select></label>
+                    <button className="button button-light" type="button" onClick={() => void rebuildAnalysis()} disabled={!authReady || !activeAnalysisVersion || activeJob || analysisRequestPending} title={!authReady ? 'Сначала подключите Codex' : 'Создать новую версию анализа без повторного OCR и индексации'}>
+                      {analysisRequestPending ? <><LoaderCircle className="spin" size={14} /> Запускаю…</> : <><RotateCw size={14} /> Повторить анализ</>}
+                    </button>
+                    {displayedAnalysisVersion && <span className="analysis-version-meta">
+                      {displayedAnalysisVersion.model || 'Модель не записана'} · {displayedAnalysisVersion.reasoning_effort || 'уровень не записан'} · источники v{displayedAnalysisVersion.source_version}
+                    </span>}
                   </div>
                   <div className="insight-grid">
                     {insights.map((insight, index) => (
@@ -1579,12 +1789,14 @@ function App() {
         <div className="chat-panel-header">
           <div className="chat-title"><span className="chat-title-icon"><MessageSquareText size={16} /></span><div><strong>Чат с документом</strong><span>{document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
           <div className="chat-header-actions">
+            {chat && <button className="icon-button chat-context-trigger" type="button" aria-label="Начать новый контекст" title="Начать новый контекст. Предыдущая переписка останется в истории, но не будет передаваться модели." onClick={() => void startNewContext()} disabled={contextPending || isSending}><RotateCw size={15} /></button>}
             <button className="icon-button desktop-chat-size" aria-label={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} title={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} onClick={() => setChatFull((value) => !value)}>{chatFull ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           </div>
         </div>
         <div className="chat-context-line">
           <span className={`context-status-dot ${document?.status === 'ready' ? 'context-ready' : ''}`} />
           <span>{document?.filename ?? 'Загрузите документ, чтобы начать'}</span>
+          {chat && <small>Контекст {chat.context_epoch ?? 0}</small>}
         </div>
         <div className="conversation" ref={conversation} aria-live="polite">
           {!document || document.status !== 'ready' ? (
@@ -1600,8 +1812,22 @@ function App() {
             </div>
           ) : (
             <div className="message-list">
-              {messages.map((message) => <ChatBubble key={message.id} message={message} onOpenSource={openSource} highlighted={message.id === highlightedMessageId} />)}
-              {isSending && streamText && <ChatBubble message={{ id: 'streaming', role: 'assistant', content: streamingContent, citations: streamingCitations, created_at: new Date().toISOString() }} onOpenSource={openSource} />}
+              {messages.map((message, index) => {
+                const epoch = message.context_epoch ?? 0
+                const previousEpoch = index > 0 ? messages[index - 1].context_epoch ?? 0 : epoch
+                return <Fragment key={message.id}>
+                  {index > 0 && epoch !== previousEpoch && <div className="chat-context-divider" role="separator"><span>Новый контекст</span><small>Предыдущая переписка сохранена и не передаётся модели</small></div>}
+                  <ChatBubble
+                    message={message}
+                    onOpenSource={openSource}
+                    highlighted={message.id === highlightedMessageId}
+                    onDelete={() => setMessageDeleteTarget(message)}
+                    onRetry={(userMessageId) => retryChatMessage(userMessageId)}
+                    onStop={(messageId) => chat && void stopChatMessage(messageId, chat)}
+                    canRetry={(message.context_epoch ?? 0) === (chat?.context_epoch ?? 0)}
+                  />
+                </Fragment>
+              })}
               {isSending && <div className="assistant-thinking"><span className="thinking-mark"><span /><span /><span /></span><span>{streamText ? 'Ответ формируется' : 'Сверяю ответ с фрагментами'}</span></div>}
             </div>
           )}
@@ -1800,6 +2026,19 @@ function App() {
         </section>
       </div>}
 
+      {messageDeleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setMessageDeleteTarget(null) }}>
+        <section className="modal-card confirm-card" role="dialog" aria-modal="true" aria-labelledby="delete-message-title" aria-describedby="delete-message-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть" onClick={() => setMessageDeleteTarget(null)}><X size={19} /></button>
+          <span className="modal-symbol"><Trash2 size={20} /></span>
+          <span className="modal-eyebrow">УДАЛЕНИЕ ИЗ ИСТОРИИ</span>
+          <h2 id="delete-message-title">{deleteQuestion ? 'Удалить вопрос и ответы?' : 'Удалить сообщение?'}</h2>
+          <p id="delete-message-description" className="modal-intro">{deleteQuestion
+            ? <>Вопрос «{deleteQuestion.content.slice(0, 130)}{deleteQuestion.content.length > 130 ? '…' : ''}» и все связанные с ним ответы будут физически удалены из переписки. Документ и другие сообщения останутся.</>
+            : <>Это сообщение будет физически удалено из переписки. Документ и остальные сообщения останутся.</>}</p>
+          <div className="confirm-actions"><button className="button button-light" onClick={() => setMessageDeleteTarget(null)}>Отмена</button><button className="button button-dark" onClick={() => void deleteChatMessage()}>{deleteQuestion ? 'Удалить вопрос и ответы' : 'Удалить сообщение'}</button></div>
+        </section>
+      </div>}
+
       {toast && <div className="toast-message" role="status" aria-live="polite">{toast}</div>}
     </div>
   )
@@ -1875,14 +2114,32 @@ function EmptyWorkspace({
   )
 }
 
-function ChatBubble({ message, onOpenSource, highlighted = false }: { message: ChatMessage; onOpenSource: (source: SourceRef) => Promise<void>; highlighted?: boolean }) {
+function ChatBubble({ message, onOpenSource, highlighted = false, onDelete, onRetry, onStop, canRetry = true }: {
+  message: ChatMessage
+  onOpenSource: (source: SourceRef) => Promise<void>
+  highlighted?: boolean
+  onDelete: () => void
+  onRetry: (userMessageId: string) => void
+  onStop: (messageId: string) => void
+  canRetry?: boolean
+}) {
+  const partial = message.role === 'assistant' && message.generation_status === 'interrupted'
+  const streaming = message.role === 'assistant' && message.generation_status === 'streaming'
   return (
-    <article className={`chat-message ${message.role === 'user' ? 'user-message' : 'assistant-message'} ${highlighted ? 'search-result-highlight' : ''}`} data-message-id={message.id}>
+    <article className={`chat-message ${message.role === 'user' ? 'user-message' : 'assistant-message'} ${partial ? 'message-interrupted' : ''} ${highlighted ? 'search-result-highlight' : ''}`} data-message-id={message.id}>
       {message.role === 'assistant' && <span className="assistant-avatar"><span /><span /><span /><span /></span>}
       <div className="message-body">
         <div className="message-author">{message.role === 'user' ? 'Вы' : 'Document Checker'}</div>
+        {message.role === 'assistant' && (message.model || message.source_version) && <div className="message-model-meta">{message.model || 'Модель'}{message.reasoning_effort ? ` · ${message.reasoning_effort}` : ''}{message.source_version ? ` · источники v${message.source_version}` : ''}</div>}
         <div className="message-text">{message.role === 'assistant' ? <ChatMarkdown text={message.content} citations={message.citations} onOpenSource={onOpenSource} /> : <CitationText text={message.content} citations={message.citations} onOpenSource={onOpenSource} />}</div>
+        {streaming && <div className="message-generation-status" role="status">Ответ формируется</div>}
+        {partial && <div className="message-interrupted-status" role="status"><strong>Ответ прерван</strong><span>{message.generation_error || 'Частичный текст сохранён. Можно повторить вопрос.'}</span></div>}
         {message.role === 'assistant' && message.citations.length > 0 && <div className="message-sources"><span>ИСТОЧНИКИ</span>{message.citations.map((source, index) => <button key={source.id} onClick={() => void onOpenSource(source)} title={source.text}><BookOpen size={12} /> {index + 1} · {locatorText(source)}</button>)}</div>}
+        <div className="message-actions">
+          {streaming && <button type="button" onClick={() => onStop(message.id)}><X size={13} /> Остановить</button>}
+          {partial && canRetry && message.reply_to_message_id && <button type="button" onClick={() => onRetry(message.reply_to_message_id!)}><RotateCw size={13} /> Повторить вопрос</button>}
+          <button type="button" aria-label="Удалить сообщение и связанные ответы" title="Физически удалить вопрос и все связанные ответы" onClick={onDelete}><Trash2 size={13} /> Удалить</button>
+        </div>
       </div>
     </article>
   )

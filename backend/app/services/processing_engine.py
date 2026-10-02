@@ -357,8 +357,11 @@ class ProcessingAttempt:
                 await asyncio.sleep(settings.queue_poll_seconds)
             if self.stage_hook:
                 await self.stage_hook(self.job, 'analysis_request')
+            parameters = getattr(self.job, 'parameters', {}) or {}
             insights = await analyze_document(self.job.document_id, self.codex,
-                version=chunk_version, snapshot=snapshot, before_request=self.before_request)
+                version=chunk_version, snapshot=snapshot, before_request=self.before_request,
+                model=parameters.get('model'),
+                reasoning_effort=parameters.get('reasoning_effort'))
             async with fenced(self.job.id, self.job.owner) as (session, document, job):
                 for insight in insights:
                     insight.version = job.version
