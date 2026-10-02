@@ -60,6 +60,8 @@ from app.schemas import (
     SendMessageIn,
     SourceOut,
     StartChatContextOut,
+    TableCalculationIn,
+    TableCalculationOut,
     TablePreviewOut,
 )
 from app.services.artifact_response import artifact_response
@@ -570,11 +572,19 @@ async def document_preview_table(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
     sheet: str | None = Query(default=None, max_length=128),
+    sort_column: int | None = Query(default=None, ge=0, le=499),
+    sort_direction: Literal["asc", "desc"] = Query(default="asc"),
+    filter_column: int | None = Query(default=None, ge=0, le=499),
+    filter_kind: Literal["text", "number", "empty"] | None = Query(default=None),
+    filter_operator: Literal["contains", "equals", "gt", "gte", "lt", "lte", "is_empty", "is_not_empty"] | None = Query(default=None),
+    filter_value: str | None = Query(default=None, max_length=256),
+    focus_row: int | None = Query(default=None, ge=1),
 ) -> TablePreviewOut:
-    """Return a paginated view of the original CSV table.
+    """Return a page from the original, fully queried table.
 
     The storage path is resolved and checked against the upload root before it
-    is read. The endpoint never accepts a filesystem path from the client.
+    is read. Sorting and filtering operate on every source row, while returned
+    row numbers remain the physical source coordinates.
     """
 
     async with SessionLocal() as session:
@@ -588,10 +598,178 @@ async def document_preview_table(
         except DocumentParsingError as exc:
             raise HTTPException(status_code=404, detail='Исходный файл недоступен.') from exc
     try:
-        payload = await run_document_operation('table', path, file_type=document.file_type, offset=offset, limit=limit, sheet=sheet)
+        payload = await run_document_operation(
+            'table', path, file_type=document.file_type, offset=offset, limit=limit, sheet=sheet,
+            sort_column=sort_column, sort_direction=sort_direction, filter_column=filter_column,
+            filter_kind=filter_kind, filter_operator=filter_operator, filter_value=filter_value,
+            focus_row=focus_row,
+        )
     except DocumentParsingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return TablePreviewOut.model_validate(payload)
+
+
+def _table_calculation_text(result: dict[str, Any], scope: str) -> str:
+    metric = result[scope]
+    scope_label = "весь документ" if scope == "document" else "текущий фильтр"
+    lines = [
+        f"Проверяемый расчёт · {scope_label}",
+        f"Лист: {result.get('sheet') or 'CSV'}",
+        f"Столбец: {result['column']}",
+        f"Строк учтено: {metric['count']}; непустых значений: {metric['non_empty_count']}; числовых: {metric['numeric_count']}; нечисловых: {metric['nonnumeric_count']}.",
+    ]
+    for label, key in (("Сумма", "sum"), ("Среднее", "average"), ("Минимум", "minimum"), ("Максимум", "maximum")):
+        if metric[key] is not None:
+            lines.append(f"{label}: {metric[key]}" + (" (округлено до 2 знаков, ROUND_HALF_UP)" if key == "average" else ""))
+    if metric.get("formula_count"):
+        lines.append(
+            f"Формул: {metric['formula_count']}; без сохранённого результата: {metric['formula_cache_missing_count']}. Формулы не вычислялись."
+        )
+    if result.get("filter"):
+        lines.append("Фильтр: " + json.dumps(result["filter"], ensure_ascii=False, sort_keys=True))
+    lines.append("Правило: " + result["rounding_rule"])
+    return "\n".join(lines)
+
+
+@router.post("/documents/{document_id}/preview/table/calculations", response_model=TableCalculationOut)
+async def calculate_document_table(document_id: uuid.UUID, request_body: TableCalculationIn) -> TableCalculationOut:
+    """Calculate exact column metrics and persist both audit scopes as sources."""
+
+    async with SessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        if document.file_type not in {"csv", "xlsx", "xls"}:
+            raise HTTPException(status_code=400, detail="Расчёты доступны только для CSV, XLSX и XLS.")
+        if document.status != "ready":
+            raise HTTPException(status_code=409, detail="Дождитесь завершения обработки документа.")
+        try:
+            path = owned_storage(document.storage_path, document_id)
+        except DocumentParsingError as exc:
+            raise HTTPException(status_code=404, detail="Исходный файл недоступен.") from exc
+        expected_version = await active_chunk_version(session, document)
+        source_checksum = document.input_checksum
+
+    filter_spec = request_body.filter.model_dump() if request_body.filter is not None else None
+    try:
+        result = await run_document_operation(
+            "table_calculate", path, file_type=document.file_type,
+            sheet=request_body.sheet, column_index=request_body.column_index,
+            filter=filter_spec,
+        )
+    except DocumentParsingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    async with SessionLocal() as session, session.begin():
+        document = (await session.execute(
+            select(Document).where(Document.id == document_id).with_for_update()
+        )).scalar_one_or_none()
+        if document is None:
+            raise HTTPException(status_code=404, detail="Документ не найден.")
+        current_version = await active_chunk_version(session, document)
+        if current_version != expected_version or document.status != "ready":
+            raise HTTPException(status_code=409, detail="Версия документа изменилась. Повторите расчёт.")
+        chunks = (await session.execute(select(Chunk).where(
+            Chunk.document_id == document_id,
+            Chunk.version == current_version,
+            Chunk.is_derived.is_(True),
+        ))).scalars().all()
+        by_key = {
+            str((chunk.locator or {}).get("calculation_key")): chunk
+            for chunk in chunks if (chunk.locator or {}).get("calculation_key")
+        }
+        def calculation_key_for_scope(calculation_scope: str) -> str:
+            identity = {
+                "version": current_version,
+                "checksum": source_checksum,
+                "sheet": result.get("sheet"),
+                "column_index": result["column_index"],
+                "scope": calculation_scope,
+                "filter": result.get("filter"),
+            }
+            return hashlib.sha256(json.dumps(
+                identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+
+        requested_keys = {
+            calculation_key_for_scope("document"),
+            calculation_key_for_scope("current_filter"),
+        }
+        if len(set(by_key).union(requested_keys)) > 200:
+            raise HTTPException(status_code=409, detail="Для этой версии документа сохранено слишком много расчётов.")
+
+        maximum_ordinal = await session.scalar(select(func.max(Chunk.ordinal)).where(
+            Chunk.document_id == document_id, Chunk.version == current_version,
+        ))
+        next_ordinal = int(maximum_ordinal or 0) + 1
+        source_by_scope: dict[str, Chunk] = {}
+        created_count = 0
+        for scope in ("document", "filtered"):
+            calculation_scope = "document" if scope == "document" else "current_filter"
+            calculation_key = calculation_key_for_scope(calculation_scope)
+            metric = result[scope]
+            locator = {
+                "kind": f"{document.file_type}_derived",
+                "source_type": "calculation",
+                "derived": True,
+                "label": f"Расчёт · {result.get('sheet') or 'CSV'} · {result['column']} · {calculation_scope}",
+                "calculation_schema": 1,
+                "calculation_key": calculation_key,
+                "calculation_scope": calculation_scope,
+                "sheet": result.get("sheet"),
+                "column": result["column"],
+                "column_index": result["column_index"],
+                "filter": result.get("filter"),
+                "source_row_count": metric["source_row_count"],
+                "source_row_start": metric.get("source_row_start"),
+                "source_row_end": metric.get("source_row_end"),
+                "source_checksum": source_checksum,
+                "rounding_rule": result["rounding_rule"],
+                "metrics": metric,
+                "calculated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            text = _table_calculation_text(result, scope)
+            chunk = by_key.get(calculation_key)
+            if chunk is None:
+                chunk = Chunk(
+                    document_id=document_id,
+                    ordinal=next_ordinal,
+                    version=current_version,
+                    text=text,
+                    locator=locator,
+                    embedding=None,
+                    is_derived=True,
+                    content_source="native",
+                )
+                session.add(chunk)
+                next_ordinal += 1
+                created_count += 1
+                by_key[calculation_key] = chunk
+            else:
+                chunk.text = text
+                chunk.locator = locator
+            source_by_scope[scope] = chunk
+        if created_count:
+            document.chunk_count += created_count
+        await session.flush()
+
+        def source_out(chunk: Chunk) -> SourceOut:
+            return SourceOut(
+                id=str(chunk.id),
+                text=chunk.text[:2_500],
+                locator=versioned_source_locator(
+                    chunk.locator, document_id=str(document.id), processing_version=chunk.version,
+                    file_type=document.file_type, is_derived=True,
+                ),
+                ordinal=chunk.ordinal,
+                is_derived=True,
+            )
+
+        return TableCalculationOut(
+            **result,
+            document_source=source_out(source_by_scope["document"]),
+            filtered_source=source_out(source_by_scope["filtered"]),
+        )
 
 
 @router.get("/documents/{document_id}/markdown", response_model=MarkdownOut)

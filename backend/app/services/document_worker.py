@@ -99,12 +99,29 @@ def execute(payload: dict, progress_callback=None):
             allow_empty=payload.get('allow_empty', False),
         ))
     if operation == 'table':
-        from app.services.preview import read_csv_table, read_spreadsheet_table
-        if payload['file_type'] == 'csv':
-            return read_csv_table(data, offset=payload['offset'], limit=payload['limit'])
-        return read_spreadsheet_table(
-            data, payload['file_type'], offset=payload['offset'], limit=payload['limit'],
+        from app.services.table_analysis import query_table
+        return query_table(
+            data,
+            payload['file_type'],
+            offset=payload['offset'],
+            limit=payload['limit'],
             sheet=payload.get('sheet'),
+            sort_column=payload.get('sort_column'),
+            sort_direction=payload.get('sort_direction', 'asc'),
+            filter_column=payload.get('filter_column'),
+            filter_kind=payload.get('filter_kind'),
+            filter_operator=payload.get('filter_operator'),
+            filter_value=payload.get('filter_value'),
+            focus_row=payload.get('focus_row'),
+        )
+    if operation == 'table_calculate':
+        from app.services.table_analysis import calculate_table
+        return calculate_table(
+            data,
+            payload['file_type'],
+            sheet=payload.get('sheet'),
+            column_index=payload['column_index'],
+            filter_spec=payload.get('filter'),
         )
     if operation == 'search_table':
         from app.services.document_search import search_table_bytes

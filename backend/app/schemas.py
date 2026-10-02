@@ -122,9 +122,50 @@ class DocumentSearchOut(BaseModel):
     matches: list[DocumentSearchMatchOut]
 
 
+class TableFormulaCellOut(BaseModel):
+    column_index: int
+    formula: str
+    has_cached_value: bool
+
+
 class TablePreviewRowOut(BaseModel):
     number: int
     cells: list[str]
+    formula_cells: list[TableFormulaCellOut] = Field(default_factory=list)
+
+
+class TableFilterOut(BaseModel):
+    column_index: int = Field(ge=0, le=499)
+    kind: Literal["text", "number", "empty"]
+    operator: Literal["contains", "equals", "gt", "gte", "lt", "lte", "is_empty", "is_not_empty"]
+    value: str = ""
+
+
+class TableFilterIn(TableFilterOut):
+    @model_validator(mode="after")
+    def validate_filter(self) -> TableFilterIn:
+        allowed = {
+            "text": {"contains", "equals"},
+            "number": {"equals", "gt", "gte", "lt", "lte"},
+            "empty": {"is_empty", "is_not_empty"},
+        }
+        if self.operator not in allowed[self.kind]:
+            raise ValueError("Условие не соответствует типу фильтра.")
+        if self.kind == "text" and not self.value.strip():
+            raise ValueError("Введите текст для фильтра.")
+        if self.kind == "number" and not self.value.strip():
+            raise ValueError("Введите число для фильтра.")
+        if self.kind == "empty" and self.value:
+            raise ValueError("Фильтр пустых значений не принимает значение.")
+        if len(self.value) > 256:
+            raise ValueError("Значение фильтра не должно превышать 256 символов.")
+        return self
+
+
+class TableCalculationIn(BaseModel):
+    sheet: str | None = Field(default=None, max_length=128)
+    column_index: int = Field(ge=0, le=499)
+    filter: TableFilterIn | None = None
 
 
 class TablePreviewOut(BaseModel):
@@ -133,8 +174,48 @@ class TablePreviewOut(BaseModel):
     offset: int
     limit: int
     total_rows: int
+    filtered_rows: int
     sheet: str | None = None
     available_sheets: list[str] = Field(default_factory=list)
+    delimiter: str | None = None
+    column_kinds: list[str] = Field(default_factory=list)
+    formula_policy: Literal["not_applicable", "detected", "cached_values_only"]
+    sort_column: int | None = None
+    sort_direction: Literal["asc", "desc"] | None = None
+    filter: TableFilterOut | None = None
+    focus_row: int | None = None
+    focus_row_visible: bool | None = None
+
+
+class TableAggregateOut(BaseModel):
+    count: int
+    non_empty_count: int
+    numeric_count: int
+    nonnumeric_count: int
+    formula_count: int
+    formula_cache_missing_count: int
+    sum: str | None
+    average: str | None
+    minimum: str | None
+    maximum: str | None
+    scope: Literal["document", "current_filter"]
+    source_row_count: int
+    source_row_start: int | None = None
+    source_row_end: int | None = None
+
+
+class TableCalculationOut(BaseModel):
+    sheet: str | None = None
+    available_sheets: list[str] = Field(default_factory=list)
+    column_index: int
+    column: str
+    filter: TableFilterOut | None = None
+    formula_policy: Literal["not_applicable", "detected", "cached_values_only"]
+    rounding_rule: str
+    document: TableAggregateOut
+    filtered: TableAggregateOut
+    document_source: SourceOut
+    filtered_source: SourceOut
 
 
 class InsightOut(BaseModel):

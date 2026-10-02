@@ -10,7 +10,7 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from typing import Any
@@ -25,6 +25,8 @@ from docx.table import Table as DocxTable
 from docx.text.paragraph import Paragraph as DocxParagraph
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+
+from app.services.numeric_values import parse_decimal
 
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".txt", ".md", ".csv", ".xml",
@@ -425,21 +427,7 @@ def _parse_plain_text(data: bytes, file_type: str) -> ParsedDocument:
 
 
 def _number(value: str) -> Decimal | None:
-    candidate = value.strip().replace("\u00a0", "").replace(" ", "")
-    if not candidate:
-        return None
-    if "," in candidate and "." not in candidate:
-        candidate = candidate.replace(",", ".")
-    elif "," in candidate and "." in candidate:
-        if candidate.rfind(",") > candidate.rfind("."):
-            candidate = candidate.replace(".", "").replace(",", ".")
-        else:
-            candidate = candidate.replace(",", "")
-    try:
-        result = Decimal(candidate)
-    except InvalidOperation:
-        return None
-    return result if result.is_finite() else None
+    return parse_decimal(value)
 
 
 def _parse_csv(data: bytes) -> ParsedDocument:
@@ -454,28 +442,29 @@ def _parse_csv(data: bytes) -> ParsedDocument:
         rows = list(csv.reader(io.StringIO(text, newline=""), dialect=dialect, delimiter=delimiter))
     except csv.Error as exc:
         raise DocumentParsingError("Не удалось разобрать строки CSV.") from exc
-    rows = [row for row in rows if any(cell.strip() for cell in row)]
-    if not rows:
+    header_index = next((index for index, row in enumerate(rows) if any(cell.strip() for cell in row)), None)
+    if header_index is None:
         raise DocumentParsingError("CSV пустой — строк не найдено.")
 
-    headers = [cell.strip() or f"Столбец {index + 1}" for index, cell in enumerate(rows[0])]
+    header_row_number = header_index + 1
+    headers = [cell.strip() or f"Столбец {index + 1}" for index, cell in enumerate(rows[header_index])]
     if len(headers) > 500:
         raise DocumentParsingError("В CSV слишком много столбцов (максимум 500).")
-    data_rows = rows[1:]
+    data_rows = list(enumerate(rows[header_index + 1:], start=header_row_number + 1))
     blocks: list[SourceBlock] = []
     header_text = "Заголовки столбцов: " + " | ".join(headers)
     blocks.append(SourceBlock(header_text, {
         "kind": "csv",
         "label": "Заголовки столбцов",
-        "row_start": 1,
-        "row_end": 1,
+        "row_start": header_row_number,
+        "row_end": header_row_number,
         "columns": headers,
     }))
 
     group: list[str] = []
-    group_start = 2
+    group_start = header_row_number + 1
     group_chars = 0
-    for row_number, row in enumerate(data_rows, start=2):
+    for row_number, row in data_rows:
         normalized = row[:len(headers)] + [""] * max(0, len(headers) - len(row))
         line = " | ".join(f"{headers[i]}: {normalized[i].strip()}" for i in range(len(headers)) if normalized[i].strip())
         if not line:
@@ -516,17 +505,17 @@ def _parse_csv(data: bytes) -> ParsedDocument:
     if group:
         blocks.append(SourceBlock("\n".join(group), {
             "kind": "csv",
-            "label": f"Строки {group_start}–{len(data_rows) + 1}",
+            "label": f"Строки {group_start}–{header_row_number + len(data_rows)}",
             "row_start": group_start,
-            "row_end": len(data_rows) + 1,
+            "row_end": header_row_number + len(data_rows),
             "columns": headers,
         }))
 
     numeric_columns: list[dict[str, Any]] = []
     for column_index, header in enumerate(headers):
-        values = [_number(row[column_index]) for row in data_rows if column_index < len(row)]
+        values = [_number(row[column_index]) for _row_number, row in data_rows if column_index < len(row)]
         numbers = [value for value in values if value is not None]
-        nonempty_count = sum(1 for row in data_rows if column_index < len(row) and row[column_index].strip())
+        nonempty_count = sum(1 for _row_number, row in data_rows if column_index < len(row) and row[column_index].strip())
         if numbers and len(numbers) >= max(2, int(nonempty_count * 0.75)):
             total = sum(numbers, Decimal(0))
             numeric_columns.append({
@@ -542,6 +531,9 @@ def _parse_csv(data: bytes) -> ParsedDocument:
         "row_count": len(data_rows),
         "column_count": len(headers),
         "columns": headers,
+        "header_row": header_row_number,
+        "data_start_row": header_row_number + 1,
+        "row_end": header_row_number + len(data_rows),
         "delimiter": delimiter,
         "encoding": encoding,
         "numeric_columns": numeric_columns,
@@ -859,8 +851,7 @@ def _spreadsheet_blocks(rows_by_sheet: Iterable[tuple[str, list[list[str]]]], fi
         sheet_count += 1
         if sheet_count > 200:
             raise DocumentParsingError("В таблице слишком много листов (максимум 200).")
-        rows = [row for row in rows if any(str(cell).strip() for cell in row)]
-        if not rows:
+        if not rows or not any(str(cell).strip() for cell in rows[0]):
             continue
         if len(rows) > SPREADSHEET_MAX_ROWS:
             raise DocumentParsingError("В таблице слишком много строк (максимум 100 000 на лист).")

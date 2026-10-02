@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BookOpen, ChevronDown, LoaderCircle, Settings2, TriangleAlert, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { ArrowDown, ArrowUp, ArrowUpDown, BookOpen, Calculator, ChevronDown, Filter, LoaderCircle, Settings2, TriangleAlert, X } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 import * as pdfjsLib from 'pdfjs-dist'
-import type { DocumentPreview, DocumentRecord, PreviewBlock, SourceRef, StreamCitation, TablePreview } from '../types'
+import type { DocumentPreview, DocumentRecord, PreviewBlock, SourceRef, StreamCitation, TableAggregate, TableCalculation, TableFilter, TableFilterKind, TablePreview } from '../types'
 
 const API = '/api/v1'
 const CSV_PAGE_SIZE = 100
@@ -680,45 +680,151 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   const [table, setTable] = useState<TablePreview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [queryError, setQueryError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [sortColumn, setSortColumn] = useState<number | null>(null)
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
+  const [appliedFilter, setAppliedFilter] = useState<TableFilter | null>(null)
+  const [filterColumn, setFilterColumn] = useState(0)
+  const [filterKind, setFilterKind] = useState<TableFilterKind>('text')
+  const [filterOperator, setFilterOperator] = useState<TableFilter['operator']>('contains')
+  const [filterValue, setFilterValue] = useState('')
+  const [calculationColumn, setCalculationColumn] = useState(0)
+  const [calculation, setCalculation] = useState<TableCalculation | null>(null)
+  const [calculationLoading, setCalculationLoading] = useState(false)
+  const [calculationError, setCalculationError] = useState<string | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
   const requestRef = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+  const calculationRequestRef = useRef(0)
+  const calculationAbortRef = useRef<AbortController | null>(null)
   const navigatedSourceRef = useRef<string | null>(null)
-  const load = async (offset: number, append: boolean, sheetName?: string) => {
+  const queryRef = useRef<{ sheet: string | null; sortColumn: number | null; sortDirection: 'asc' | 'desc'; filter: TableFilter | null }>({
+    sheet: null,
+    sortColumn: null,
+    sortDirection: 'asc',
+    filter: null,
+  })
+  const autoSelectedCalculationColumnRef = useRef(false)
+
+  const load = async (
+    offset: number,
+    append: boolean,
+    override: Partial<typeof queryRef.current> = {},
+    focusRow: number | null = null,
+  ) => {
+    const query = { ...queryRef.current, ...override }
+    if (!append) queryRef.current = query
     const requestId = ++requestRef.current
+    abortRef.current?.abort()
     const controller = new AbortController()
-    setLoading(true); setError(null)
+    abortRef.current = controller
+    setLoading(true)
+    setError(null)
+    setQueryError(null)
     try {
-      const sheetQuery = sheetName ? `&sheet=${encodeURIComponent(sheetName)}` : ''
-      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table?offset=${offset}&limit=${CSV_PAGE_SIZE}${sheetQuery}`, { signal: controller.signal })
-      if (!response.ok) throw new Error('Таблица недоступна')
-      const next = await response.json() as TablePreview
+      const params = new URLSearchParams({ offset: String(offset), limit: String(CSV_PAGE_SIZE) })
+      if (query.sheet) params.set('sheet', query.sheet)
+      if (query.sortColumn !== null) {
+        params.set('sort_column', String(query.sortColumn))
+        params.set('sort_direction', query.sortDirection)
+      }
+      if (query.filter) {
+        params.set('filter_column', String(query.filter.column_index))
+        params.set('filter_kind', query.filter.kind)
+        params.set('filter_operator', query.filter.operator)
+        if (query.filter.kind !== 'empty') params.set('filter_value', query.filter.value)
+      }
+      if (focusRow !== null) params.set('focus_row', String(focusRow))
+      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table?${params}`, { signal: controller.signal })
+      const payload = await response.json().catch(() => ({})) as { detail?: string }
+      if (!response.ok) throw Object.assign(new Error(payload.detail || 'Таблица недоступна'), { status: response.status })
+      const next = payload as TablePreview
       if (requestId !== requestRef.current) return
-      setTable((current) => append && current ? { ...next, rows: [...current.rows, ...next.rows], offset: current.offset, limit: next.limit } : next)
+      if (focusRow !== null && next.focus_row_visible === false && query.filter) {
+        const resetQuery = { sheet: query.sheet, sortColumn: null, sortDirection: 'asc' as const, filter: null }
+        queryRef.current = resetQuery
+        setSortColumn(null)
+        setSortDirection('asc')
+        setAppliedFilter(null)
+        setFilterValue('')
+        setNotice('Фильтр скрывал этот источник. Фильтр сброшен, чтобы показать исходную строку.')
+        void load(Math.max(0, focusRow - 2), false, resetQuery, focusRow)
+        return
+      }
+      setTable((current) => append && current
+        ? { ...next, rows: [...current.rows, ...next.rows], offset: current.offset, limit: next.limit }
+        : next)
     } catch (reason) {
       if (requestId !== requestRef.current || (reason instanceof DOMException && reason.name === 'AbortError')) return
       const message = reason instanceof Error ? reason.message : 'Не удалось загрузить таблицу'
-      setError(message); onError(message)
+      setError(message)
+      if (!table) onError(message)
+      else setQueryError(message)
     } finally {
       if (requestId === requestRef.current) setLoading(false)
     }
   }
+
   useEffect(() => {
+    queryRef.current = { sheet: null, sortColumn: null, sortDirection: 'asc', filter: null }
+    autoSelectedCalculationColumnRef.current = false
+    navigatedSourceRef.current = null
+    abortRef.current?.abort()
+    calculationRequestRef.current += 1
+    calculationAbortRef.current?.abort()
+    setTable(null)
+    setLoading(true)
+    setError(null)
+    setQueryError(null)
+    setNotice(null)
+    setSortColumn(null)
+    setSortDirection('asc')
+    setAppliedFilter(null)
+    setFilterColumn(0)
+    setFilterKind('text')
+    setFilterOperator('contains')
+    setFilterValue('')
+    setCalculationColumn(0)
+    setCalculation(null)
+    setCalculationLoading(false)
+    setCalculationError(null)
     void load(0, false)
-    return () => { requestRef.current += 1 }
+    return () => {
+      requestRef.current += 1
+      abortRef.current?.abort()
+      calculationRequestRef.current += 1
+      calculationAbortRef.current?.abort()
+    }
   }, [preview.document_id])
+
+  useEffect(() => {
+    if (!table || autoSelectedCalculationColumnRef.current) return
+    autoSelectedCalculationColumnRef.current = true
+    const firstNumeric = table.column_kinds.indexOf('number')
+    if (firstNumeric >= 0) setCalculationColumn(firstNumeric)
+  }, [table])
+
   useEffect(() => {
     if (!table || !selectedSource) return
+    const newSource = navigatedSourceRef.current !== selectedSource.id
     const start = typeof selectedSource.locator.row_start === 'number' ? selectedSource.locator.row_start : null
     const requestedSheet = typeof selectedSource.locator.sheet === 'string' ? selectedSource.locator.sheet : null
     const derived = isCalculation(selectedSource)
     if (requestedSheet && table.sheet !== requestedSheet) {
-      if (navigatedSourceRef.current !== selectedSource.id) {
+      if (newSource) {
         navigatedSourceRef.current = selectedSource.id
-        void load(start !== null && start > 1 ? Math.max(0, start - 2) : 0, false, requestedSheet)
-      } else onMatch('page_only')
+        const resetQuery = { sheet: requestedSheet, sortColumn: null, sortDirection: 'asc' as const, filter: null }
+        queryRef.current = resetQuery
+        setSortColumn(null)
+        setSortDirection('asc')
+        setAppliedFilter(null)
+        setFilterValue('')
+        void load(0, false, resetQuery, start)
+      }
       return
     }
-    navigatedSourceRef.current = selectedSource.id
+    if (newSource) navigatedSourceRef.current = selectedSource.id
     if (start === null) { onMatch(derived ? 'calculation' : 'not_found'); return }
     const selectedColumn = typeof selectedSource.locator.column === 'string' ? selectedSource.locator.column : null
     const selectedColumnIndex = typeof selectedSource.locator.column_index === 'number'
@@ -734,46 +840,233 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
     }
     const end = typeof selectedSource.locator.row_end === 'number' ? selectedSource.locator.row_end : start
     const loaded = table.rows.some((row) => row.number >= start && row.number <= end)
-    if (!loaded && start > 1 && start - 2 < table.total_rows) { void load(Math.max(0, start - 2), false, table.sheet || undefined); return }
+    if (!loaded) {
+      if (newSource) void load(0, false, {}, start)
+      else onMatch(selectedSource.locator.sheet ? 'page_only' : 'not_found')
+      return
+    }
     const target = table.rows.find((row) => row.number >= start && row.number <= end)
     const exact = Boolean(target && !derived)
     onMatch(derived ? 'calculation' : exact ? 'exact' : selectedSource.locator.sheet ? 'page_only' : 'not_found')
     if (target) navigateToSource(tableRef.current?.querySelector(`[data-row-number="${target.number}"]`))
   }, [table, selectedSource, onMatch])
-  if (error) return <div className="preview-inline-error">{error}</div>
+
+  if (error && !table) return <div className="preview-inline-error">{error}</div>
   if (!table) return <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю оригинальную таблицу…</div>
-  const start = typeof selectedSource?.locator.row_start === 'number' ? selectedSource.locator.row_start : null
-  const end = typeof selectedSource?.locator.row_end === 'number' ? selectedSource.locator.row_end : start
-  const selectedColumn = typeof selectedSource?.locator.column === 'string' ? selectedSource.locator.column : null
-  const selectedColumnIndex = typeof selectedSource?.locator.column_index === 'number'
-    ? selectedSource.locator.column_index
-    : selectedColumn ? table.columns.indexOf(selectedColumn) : -1
-  const selectedHeader = start === 1
-  const rawSearchRange = selectedSource?.locator.search_range
-  const searchRange = selectedSource?.locator.search_match === true && typeof rawSearchRange === 'object' && rawSearchRange !== null
-    ? rawSearchRange as { coordinate_space?: unknown; start?: unknown; end?: unknown }
-    : null
-  const searchStart = searchRange?.coordinate_space === 'table-cell-text' && typeof searchRange.start === 'number' ? searchRange.start : null
-  const searchEnd = searchRange?.coordinate_space === 'table-cell-text' && typeof searchRange.end === 'number' ? searchRange.end : null
+
+  const operators: Record<TableFilterKind, Array<{ value: TableFilter['operator']; label: string }>> = {
+    text: [{ value: 'contains', label: 'содержит' }, { value: 'equals', label: 'совпадает с' }],
+    number: [
+      { value: 'equals', label: '=' }, { value: 'gt', label: '>' }, { value: 'gte', label: '≥' },
+      { value: 'lt', label: '<' }, { value: 'lte', label: '≤' },
+    ],
+    empty: [{ value: 'is_empty', label: 'пусто' }, { value: 'is_not_empty', label: 'не пусто' }],
+  }
+  const changeFilterKind = (kind: TableFilterKind) => {
+    setFilterKind(kind)
+    setFilterOperator(operators[kind][0].value)
+    if (kind === 'empty') setFilterValue('')
+  }
+  const applyFilter = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const filter: TableFilter = {
+      column_index: filterColumn,
+      kind: filterKind,
+      operator: filterOperator,
+      value: filterKind === 'empty' ? '' : filterValue.trim(),
+    }
+    setAppliedFilter(filter)
+    setNotice(null)
+    setCalculation(null)
+    void load(0, false, { filter })
+  }
+  const clearFilter = () => {
+    setAppliedFilter(null)
+    setFilterValue('')
+    setNotice(null)
+    setCalculation(null)
+    void load(0, false, { filter: null })
+  }
+  const changeSheet = (sheet: string) => {
+    const nextQuery = { sheet, sortColumn: null, sortDirection: 'asc' as const, filter: null }
+    queryRef.current = nextQuery
+    setSortColumn(null)
+    setSortDirection('asc')
+    setAppliedFilter(null)
+    setFilterValue('')
+    setCalculation(null)
+    setNotice(null)
+    void load(0, false, nextQuery)
+  }
+  const toggleSort = (columnIndex: number) => {
+    const direction = sortColumn === columnIndex && sortDirection === 'asc' ? 'desc' : 'asc'
+    setSortColumn(columnIndex)
+    setSortDirection(direction)
+    setCalculation(null)
+    void load(0, false, { sortColumn: columnIndex, sortDirection: direction })
+  }
+  const clearSort = () => {
+    setSortColumn(null)
+    setSortDirection('asc')
+    setCalculation(null)
+    void load(0, false, { sortColumn: null, sortDirection: 'asc' })
+  }
+  const calculate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const requestId = ++calculationRequestRef.current
+    calculationAbortRef.current?.abort()
+    const controller = new AbortController()
+    calculationAbortRef.current = controller
+    setCalculationLoading(true)
+    setCalculationError(null)
+    try {
+      const response = await fetch(`${API}/documents/${preview.document_id}/preview/table/calculations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet: table.sheet, column_index: calculationColumn, filter: appliedFilter }),
+        signal: controller.signal,
+      })
+      const payload = await response.json().catch(() => ({})) as TableCalculation & { detail?: string }
+      if (!response.ok) throw new Error(payload.detail || 'Не удалось выполнить расчёт')
+      if (requestId !== calculationRequestRef.current) return
+      setCalculation(payload)
+    } catch (reason) {
+      if (requestId !== calculationRequestRef.current || (reason instanceof DOMException && reason.name === 'AbortError')) return
+      setCalculationError(reason instanceof Error ? reason.message : 'Не удалось выполнить расчёт')
+    } finally {
+      if (requestId === calculationRequestRef.current) setCalculationLoading(false)
+    }
+  }
+  const renderAggregate = (title: string, aggregate: TableAggregate, source: TableCalculation['document_source']) => (
+    <section className="csv-calculation-scope">
+      <h4>{title}</h4>
+      <dl>
+        <div><dt>Строк</dt><dd>{aggregate.count.toLocaleString('ru-RU')}</dd></div>
+        <div><dt>Непустых</dt><dd>{aggregate.non_empty_count.toLocaleString('ru-RU')}</dd></div>
+        <div><dt>Числовых</dt><dd>{aggregate.numeric_count.toLocaleString('ru-RU')}</dd></div>
+        <div><dt>Нечисловых</dt><dd>{aggregate.nonnumeric_count.toLocaleString('ru-RU')}</dd></div>
+        <div><dt>Сумма</dt><dd>{formatTableDecimal(aggregate.sum)}</dd></div>
+        <div><dt>Среднее</dt><dd>{formatTableDecimal(aggregate.average)}</dd></div>
+        <div><dt>Минимум</dt><dd>{formatTableDecimal(aggregate.minimum)}</dd></div>
+        <div><dt>Максимум</dt><dd>{formatTableDecimal(aggregate.maximum)}</dd></div>
+      </dl>
+      {aggregate.formula_count > 0 && <p className="csv-formula-summary">Формул: {aggregate.formula_count}; без сохранённого результата: {aggregate.formula_cache_missing_count}. Приложение формулы не вычисляло.</p>}
+      <details className="csv-calculation-source">
+        <summary>Проверяемый источник · {source.id.slice(0, 8)}</summary>
+        <pre>{source.text}</pre>
+      </details>
+    </section>
+  )
+  const filterColumnName = appliedFilter ? table.columns[appliedFilter.column_index] : null
+
   return <div className="csv-original-viewer" ref={tableRef}>
-    {table.available_sheets.length > 1 && <div className="csv-sheet-toolbar"><label htmlFor={`csv-sheet-${preview.document_id}`}>Лист</label><select id={`csv-sheet-${preview.document_id}`} aria-label="Лист исходного файла" value={table.sheet || ''} onChange={(event) => void load(0, false, event.target.value)}>
-      {table.available_sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
-    </select></div>}
+    <div className="csv-sheet-toolbar csv-table-toolbar">
+      {table.available_sheets.length > 1 && <div className="csv-sheet-picker">
+        <label htmlFor={`csv-sheet-${preview.document_id}`}>Лист</label>
+        <select id={`csv-sheet-${preview.document_id}`} aria-label="Лист исходного файла" value={table.sheet || ''} onChange={(event) => changeSheet(event.target.value)}>
+          {table.available_sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
+        </select>
+      </div>}
+      <span className="csv-table-guidance">Сортировка: нажмите на заголовок столбца</span>
+      {sortColumn !== null && <button type="button" className="csv-tool-reset" onClick={clearSort}>Сбросить сортировку</button>}
+    </div>
+    <form className="csv-filter-controls" aria-label="Фильтр таблицы" onSubmit={applyFilter}>
+      <div className="csv-filter-field"><label htmlFor={`csv-filter-column-${preview.document_id}`}>Столбец</label>
+        <select id={`csv-filter-column-${preview.document_id}`} aria-label="Столбец фильтра" value={filterColumn} onChange={(event) => setFilterColumn(Number(event.target.value))}>
+          {table.columns.map((column, index) => <option key={index} value={index}>{column}</option>)}
+        </select>
+      </div>
+      <div className="csv-filter-field"><label htmlFor={`csv-filter-kind-${preview.document_id}`}>Тип условия</label>
+        <select id={`csv-filter-kind-${preview.document_id}`} aria-label="Тип фильтра" value={filterKind} onChange={(event) => changeFilterKind(event.target.value as TableFilterKind)}>
+          <option value="text">Текст</option><option value="number">Число</option><option value="empty">Пустое значение</option>
+        </select>
+      </div>
+      <div className="csv-filter-field"><label htmlFor={`csv-filter-operator-${preview.document_id}`}>Условие</label>
+        <select id={`csv-filter-operator-${preview.document_id}`} aria-label="Условие фильтра" value={filterOperator} onChange={(event) => setFilterOperator(event.target.value as TableFilter['operator'])}>
+          {operators[filterKind].map((operator) => <option key={operator.value} value={operator.value}>{operator.label}</option>)}
+        </select>
+      </div>
+      {filterKind !== 'empty' && <div className="csv-filter-field csv-filter-value"><label htmlFor={`csv-filter-value-${preview.document_id}`}>{filterKind === 'number' ? 'Значение' : 'Текст'}</label>
+        <input id={`csv-filter-value-${preview.document_id}`} aria-label="Значение фильтра" value={filterValue} onChange={(event) => setFilterValue(event.target.value)} inputMode={filterKind === 'number' ? 'decimal' : 'search'} maxLength={256} required placeholder={filterKind === 'number' ? 'Например, 12,50' : 'Введите фрагмент текста'} />
+      </div>}
+      <div className="csv-filter-actions">
+        <button type="submit" className="button button-dark" disabled={loading}>{loading ? 'Применяю…' : 'Применить'}</button>
+        {appliedFilter && <button type="button" className="csv-tool-reset" onClick={clearFilter} disabled={loading}>Сбросить</button>}
+      </div>
+    </form>
+    {appliedFilter && <div className="csv-filter-summary" role="status">
+      <Filter size={13} aria-hidden="true" /> Фильтр: {filterColumnName} · {operators[appliedFilter.kind].find((item) => item.value === appliedFilter.operator)?.label}{appliedFilter.value ? ` «${appliedFilter.value}»` : ''}
+    </div>}
+    {notice && <div className="csv-table-notice" role="status">{notice}</div>}
+    {queryError && <div className="csv-table-error" role="alert">{queryError}</div>}
+    {table.formula_policy !== 'not_applicable' && <p className="csv-formula-policy" role="note">
+      {table.formula_policy === 'detected'
+        ? 'Формулы XLSX не выполняются. Показаны сохранённые в файле значения; пустая ячейка формулы отмечается отдельно.'
+        : 'Формулы XLS не выполняются. Формат позволяет читать сохранённые значения, но не раскрывает формулы и наличие их кэша.'}
+    </p>}
+    <details className="csv-calculation-panel">
+      <summary><Calculator size={14} aria-hidden="true" /> Проверяемые расчёты <span>выполняются приложением</span></summary>
+      <form className="csv-calculation-controls" onSubmit={calculate}>
+        <label htmlFor={`csv-calc-column-${preview.document_id}`}>Столбец</label>
+        <select id={`csv-calc-column-${preview.document_id}`} aria-label="Столбец для расчёта" value={calculationColumn} onChange={(event) => { setCalculationColumn(Number(event.target.value)); setCalculation(null) }}>
+          {table.columns.map((column, index) => <option key={index} value={index}>{column}</option>)}
+        </select>
+        <button type="submit" className="button button-light" disabled={calculationLoading}>{calculationLoading ? <><LoaderCircle className="spin" size={13} /> Считаю…</> : 'Рассчитать'}</button>
+      </form>
+      <p className="csv-calculation-rule">Сумма, минимум и максимум используют точную десятичную арифметику. Среднее округляется до 2 знаков по правилу ROUND_HALF_UP. Нечисловые значения исключаются из числовых итогов.</p>
+      {calculationError && <p className="csv-table-error" role="alert">{calculationError}</p>}
+      {calculation && <>
+        <p className="csv-calculation-context">{calculation.sheet ? `Лист «${calculation.sheet}» · ` : ''}Столбец «{calculation.column}» · {calculation.filter ? `фильтр по столбцу «${table.columns[calculation.filter.column_index]}»` : 'без фильтра'}</p>
+        <div className="csv-calculation-grid">
+          {renderAggregate('Весь документ', calculation.document, calculation.document_source)}
+          {renderAggregate('Текущий фильтр', calculation.filtered, calculation.filtered_source)}
+        </div>
+      </>}
+    </details>
     <div className="csv-table-scroll">
-      <table className="original-csv-table"><thead><tr><th scope="col">№</th>{table.columns.map((column, index) => <th scope="col" data-column-index={index} className={selectedHeader && selectedColumnIndex === index ? 'source-cell-match' : ''} key={index}>{selectedHeader && selectedColumnIndex === index ? renderCellMatch(column, searchStart, searchEnd) : column}</th>)}</tr></thead>
+      <table className="original-csv-table"><thead><tr><th scope="col">№</th>{table.columns.map((column, index) => {
+        const activeSort = sortColumn === index
+        const nextDirection = activeSort && sortDirection === 'asc' ? 'по убыванию' : 'по возрастанию'
+        return <th scope="col" aria-sort={activeSort ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'} data-column-index={index} className={selectedSource && selectedSource.locator.row_start === 1 && selectedSource.locator.column_index === index ? 'source-cell-match' : ''} key={index}>
+          <button type="button" className="csv-sort-button" onClick={() => toggleSort(index)} aria-label={`Сортировать по столбцу ${column} ${nextDirection}`} title={`Сортировать ${nextDirection}`}>
+            {selectedSource && selectedSource.locator.row_start === 1 && selectedSource.locator.column_index === index
+              ? renderCellMatch(column, null, null)
+              : column}
+            {activeSort ? (sortDirection === 'asc' ? <ArrowUp size={12} aria-hidden="true" /> : <ArrowDown size={12} aria-hidden="true" />) : <ArrowUpDown size={12} aria-hidden="true" />}
+          </button>
+        </th>
+      })}</tr></thead>
         <tbody>{table.rows.map((row) => {
+          const start = typeof selectedSource?.locator.row_start === 'number' ? selectedSource.locator.row_start : null
+          const end = typeof selectedSource?.locator.row_end === 'number' ? selectedSource.locator.row_end : start
           const inRange = start !== null && row.number >= start && row.number <= (end ?? start)
           return <tr data-row-number={row.number} className={inRange ? 'source-row-match' : ''} key={row.number}><td className="csv-row-number">{row.number}</td>{row.cells.map((cell, index) => {
-            const selectedCell = inRange && selectedColumnIndex === index
-            return <td className={selectedCell ? 'source-cell-match' : ''} key={`${row.number}-${index}`}>{selectedCell ? renderCellMatch(cell, searchStart, searchEnd) : cell || '—'}</td>
+            const formula = row.formula_cells.find((item) => item.column_index === index)
+            const selectedColumn = typeof selectedSource?.locator.column_index === 'number'
+              ? selectedSource.locator.column_index
+              : typeof selectedSource?.locator.column === 'string' ? table.columns.indexOf(selectedSource.locator.column) : -1
+            const selectedCell = inRange && selectedColumn === index
+            const formulaLabel = formula
+              ? formula.has_cached_value ? `Формула ${formula.formula}; отображено сохранённое значение.` : `Формула ${formula.formula}; сохранённого результата нет.`
+              : undefined
+            return <td className={`${selectedCell ? 'source-cell-match' : ''}${formula && !formula.has_cached_value ? ' csv-formula-without-cache' : ''}`} key={`${row.number}-${index}`} title={formulaLabel} aria-label={formulaLabel}>
+              {selectedCell ? renderCellMatch(cell, null, null) : cell || (formula && !formula.has_cached_value ? 'Нет результата' : '—')}
+              {formula && <span className="csv-formula-indicator" aria-hidden="true">fx</span>}
+            </td>
           })}</tr>
         })}</tbody>
       </table>
     </div>
-    <div className="csv-table-footer"><span>{table.sheet ? `Лист «${table.sheet}» · ` : ''}Показано {table.rows.length} из {table.total_rows} строк</span>{table.rows.length < table.total_rows && <button type="button" className="button button-light" onClick={() => void load(table.offset + table.rows.length, true, table.sheet || undefined)} disabled={loading}>{loading ? 'Загружаю…' : 'Показать ещё'}</button>}</div>
+    <div className="csv-table-footer"><span>{table.sheet ? `Лист «${table.sheet}» · ` : ''}Показано {table.rows.length.toLocaleString('ru-RU')} из {table.filtered_rows.toLocaleString('ru-RU')} строк{appliedFilter ? ` · всего в таблице ${table.total_rows.toLocaleString('ru-RU')}` : ''}</span>{table.rows.length < table.filtered_rows && <button type="button" className="button button-light" onClick={() => void load(table.offset + table.rows.length, true)} disabled={loading}>{loading ? 'Загружаю…' : 'Показать ещё'}</button>}</div>
   </div>
 }
 
+function formatTableDecimal(value: string | null): string {
+  if (value === null) return '—'
+  const [integer, fraction] = value.split('.')
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0')
+  return fraction === undefined ? grouped : `${grouped},${fraction}`
+}
 function mappedStructuredLocatorMatches(blockLocator: Record<string, unknown>, sourceLocator: Record<string, unknown>): boolean {
   const linked = Array.isArray(blockLocator.source_locators)
     ? blockLocator.source_locators.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)

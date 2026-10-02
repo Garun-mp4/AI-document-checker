@@ -9,14 +9,12 @@ explicit prevents model-friendly normalized text (for example ``Name: value``
 CSV lines) from being presented as the uploaded document.
 """
 
-import csv
-import io
 import logging
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from app.services.parsing import DocumentParsingError, _decode_text
+from app.services.parsing import DocumentParsingError
 from app.services.source_locators import versioned_source_locator
 
 MAX_PREVIEW_BLOCKS = 2_000
@@ -112,65 +110,10 @@ def _csv_rows(text: str, columns: list[str]) -> list[list[str]] | None:
     return rows or None
 
 
-def _csv_dialect(text: str) -> tuple[csv.Dialect, str]:
-    try:
-        dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
-        return dialect, dialect.delimiter
-    except csv.Error:
-        delimiter = ";" if text.count(";") > text.count(",") else ","
-        dialect = csv.excel
-        return dialect, delimiter
+def read_csv_table(data: bytes, *, offset: int = 0, limit: int = 100, **query: Any) -> dict[str, Any]:
+    from app.services.table_analysis import query_table
 
-
-def read_csv_table(data: bytes, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
-    """Read original CSV rows without exposing normalized chunk text.
-
-    ``offset`` is measured in data rows (the header is excluded). Row numbers
-    retain their original one-based CSV positions, which makes source locators
-    stable even when the table is paginated.
-    """
-
-    if offset < 0:
-        raise DocumentParsingError("offset не может быть отрицательным.")
-    limit = max(1, min(limit, MAX_TABLE_ROWS))
-    text = _decode_text(data)
-    dialect, delimiter = _csv_dialect(text)
-    try:
-        parsed = list(csv.reader(io.StringIO(text, newline=""), dialect=dialect, delimiter=delimiter))
-    except csv.Error as exc:
-        raise DocumentParsingError("Не удалось разобрать строки CSV.") from exc
-    parsed = [row for row in parsed if any(cell.strip() for cell in row)]
-    if not parsed:
-        raise DocumentParsingError("CSV пустой — строк не найдено.")
-    columns = [cell.strip() or f"Столбец {index + 1}" for index, cell in enumerate(parsed[0])]
-    if len(columns) > 500:
-        raise DocumentParsingError("В CSV слишком много столбцов (максимум 500).")
-    data_rows = parsed[1:]
-    total_rows = len(data_rows)
-    page = data_rows[offset: offset + limit]
-    rows = [
-        {"number": offset + index + 2, "cells": row[:len(columns)] + [""] * max(0, len(columns) - len(row))}
-        for index, row in enumerate(page)
-    ]
-    return {
-        "columns": columns,
-        "rows": rows,
-        "offset": offset,
-        "limit": limit,
-        "total_rows": total_rows,
-        "delimiter": delimiter,
-        "sheet": None,
-        "available_sheets": [],
-    }
-
-
-def read_csv_table_file(path: Path, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
-    try:
-        return read_csv_table(path.read_bytes(), offset=offset, limit=limit)
-    except FileNotFoundError as exc:
-        raise DocumentParsingError("Исходный файл документа недоступен.") from exc
-    except OSError as exc:
-        raise DocumentParsingError("Не удалось прочитать исходный CSV-файл.") from exc
+    return query_table(data, 'csv', offset=offset, limit=limit, **query)
 
 
 def read_spreadsheet_table(
@@ -180,92 +123,31 @@ def read_spreadsheet_table(
     offset: int = 0,
     limit: int = 100,
     sheet: str | None = None,
+    **query: Any,
 ) -> dict[str, Any]:
-    if offset < 0:
-        raise DocumentParsingError("offset не может быть отрицательным.")
-    limit = max(1, min(limit, MAX_TABLE_ROWS))
-    workbook = None
-    try:
-        if file_type == "xlsx":
-            from openpyxl import load_workbook
-            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-            available_sheets = list(workbook.sheetnames)
-            selected_name = sheet or (available_sheets[0] if available_sheets else None)
-            if selected_name not in available_sheets:
-                raise DocumentParsingError("Выбранный лист книги не найден.")
-            worksheet = workbook[selected_name]
-            if (worksheet.max_row or 0) > 100_000 or (worksheet.max_column or 0) > 500:
-                raise DocumentParsingError('Размер таблицы превышает безопасный предел строк или столбцов.')
-            header = next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
-            columns = ["" if value is None else str(value) for value in header]
-            start_row = offset + 2
-            end_row = min((worksheet.max_row or 1), start_row + limit - 1)
-            rows = [
-                ["" if value is None else str(value) for value in row]
-                for row in worksheet.iter_rows(min_row=start_row, max_row=end_row, values_only=True)
-            ] if start_row <= (worksheet.max_row or 1) else []
-            total_rows = max(0, (worksheet.max_row or 1) - 1)
-            sheet_name = selected_name
-        else:
-            import xlrd
-            workbook = xlrd.open_workbook(file_contents=data, on_demand=True)
-            available_sheets = list(workbook.sheet_names())
-            selected_name = sheet or (available_sheets[0] if available_sheets else None)
-            if selected_name not in available_sheets:
-                raise DocumentParsingError("Выбранный лист книги не найден.")
-            worksheet = workbook.sheet_by_name(selected_name)
-            if worksheet.nrows > 100_000 or worksheet.ncols > 500:
-                raise DocumentParsingError('Размер таблицы превышает безопасный предел строк или столбцов.')
-            columns = worksheet.row_values(0) if worksheet.nrows else []
-            start_row = offset + 1
-            end_row = min(worksheet.nrows, start_row + limit)
-            rows = [worksheet.row_values(index) for index in range(start_row, end_row)]
-            sheet_name = selected_name
-            total_rows = max(0, worksheet.nrows - 1)
-    except DocumentParsingError:
-        raise
-    except ImportError as exc:
-        raise DocumentParsingError(f"Для {file_type.upper()} не установлен модуль чтения таблиц.") from exc
-    except Exception as exc:
-        raise DocumentParsingError(f"{file_type.upper()} повреждён или имеет неверную структуру.") from exc
-    finally:
-        if workbook is not None:
-            try:
-                if hasattr(workbook, "close"):
-                    workbook.close()
-                elif hasattr(workbook, "release_resources"):
-                    workbook.release_resources()
-            except (OSError, ValueError):
-                logger.debug("Could not close spreadsheet preview workbook", exc_info=True)
-    if not columns:
-        raise DocumentParsingError("Таблица пустая — строк не найдено.")
-    columns = [str(cell).strip() or f"Столбец {index + 1}" for index, cell in enumerate(columns)]
-    if len(columns) > 500:
-        raise DocumentParsingError("В таблице слишком много столбцов (максимум 500).")
-    return {
-        "columns": columns,
-        "rows": [
-            {"number": offset + index + 2, "cells": ["" if value is None else str(value) for value in row[:len(columns)]] + [""] * max(0, len(columns) - len(row))}
-            for index, row in enumerate(rows)
-        ],
-        "offset": offset,
-        "limit": limit,
-        "total_rows": total_rows,
-        "sheet": sheet_name,
-        "available_sheets": available_sheets,
-    }
+    from app.services.table_analysis import query_table
+
+    return query_table(data, file_type, offset=offset, limit=limit, sheet=sheet, **query)
 
 
-def read_table_file(path: Path, file_type: str, *, offset: int = 0, limit: int = 100, sheet: str | None = None) -> dict[str, Any]:
+def read_table_file(
+    path: Path,
+    file_type: str,
+    *,
+    offset: int = 0,
+    limit: int = 100,
+    sheet: str | None = None,
+    **query: Any,
+) -> dict[str, Any]:
     try:
         data = path.read_bytes()
     except FileNotFoundError as exc:
         raise DocumentParsingError("Исходный файл документа недоступен.") from exc
     except OSError as exc:
         raise DocumentParsingError("Не удалось прочитать исходный файл таблицы.") from exc
-    if file_type == "csv":
-        return read_csv_table(data, offset=offset, limit=limit)
-    return read_spreadsheet_table(data, file_type, offset=offset, limit=limit, sheet=sheet)
+    if file_type == 'csv':
+        return read_csv_table(data, offset=offset, limit=limit, **query)
+    return read_spreadsheet_table(data, file_type, offset=offset, limit=limit, sheet=sheet, **query)
 
 
 def build_preview(

@@ -178,7 +178,7 @@ def test_original_csv_table_preserves_delimiters_and_source_row_numbers(delimite
     table = read_csv_table(payload.encode("utf-8"), offset=1, limit=1)
 
     assert table["columns"] == ["Name", "Value"]
-    assert table["rows"] == [{"number": 3, "cells": ["Beta", "20"]}]
+    assert table["rows"] == [{"number": 3, "cells": ["Beta", "20"], "formula_cells": []}]
     assert table["total_rows"] == 2
     assert table["delimiter"] == delimiter
 
@@ -209,7 +209,7 @@ def test_original_xlsx_table_selects_sheet_and_keeps_physical_row_numbers() -> N
 
     assert table["sheet"] == "Источники"
     assert table["available_sheets"] == ["Обзор", "Источники"]
-    assert table["rows"] == [{"number": 3, "cells": ["Second", "20"]}]
+    assert table["rows"] == [{"number": 3, "cells": ["Second", "20"], "formula_cells": []}]
     assert table["total_rows"] == 3
 
 

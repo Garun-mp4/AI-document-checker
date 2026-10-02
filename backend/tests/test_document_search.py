@@ -14,6 +14,7 @@ from app.services.document_search import (
     search_table_bytes,
 )
 from app.services.parsing import DocumentParsingError
+from app.services.table_analysis import query_table
 
 
 def source(text: str, locator: dict, ordinal: int = 0, *, derived: bool = False):
@@ -189,6 +190,16 @@ def test_csv_search_keeps_header_cells_navigable() -> None:
     assert result["total"] == 1
     assert result["matches"][0]["locator"]["row_start"] == 1
     assert result["matches"][0]["locator"]["column"] == "Комментарий"
+
+
+def test_csv_search_and_viewer_keep_physical_rows_across_blank_records() -> None:
+    data = "\nНазвание,Статус\nАльфа,Готово\n\nБета,В работе\n".encode()
+
+    search = search_table_bytes(data, "csv", "Бета")
+    table = query_table(data, "csv", limit=20)
+    beta_row = next(row for row in table["rows"] if row["cells"][0] == "Бета")
+
+    assert search["matches"][0]["locator"]["row_start"] == beta_row["number"] == 5
 
 
 def test_xlsx_search_covers_later_sheets_and_returns_cell_coordinates() -> None:

@@ -180,6 +180,23 @@ export interface DocumentSearchResponse {
 export interface TablePreviewRow {
   number: number
   cells: string[]
+  formula_cells: TableFormulaCell[]
+}
+
+export interface TableFormulaCell {
+  column_index: number
+  formula: string
+  has_cached_value: boolean
+}
+
+export type TableFilterKind = 'text' | 'number' | 'empty'
+export type TableFilterOperator = 'contains' | 'equals' | 'gt' | 'gte' | 'lt' | 'lte' | 'is_empty' | 'is_not_empty'
+
+export interface TableFilter {
+  column_index: number
+  kind: TableFilterKind
+  operator: TableFilterOperator
+  value: string
 }
 
 export interface TablePreview {
@@ -188,8 +205,48 @@ export interface TablePreview {
   offset: number
   limit: number
   total_rows: number
+  filtered_rows: number
   sheet: string | null
   available_sheets: string[]
+  delimiter: string | null
+  column_kinds: Array<'empty' | 'date' | 'number' | 'text'>
+  formula_policy: 'not_applicable' | 'detected' | 'cached_values_only'
+  sort_column: number | null
+  sort_direction: 'asc' | 'desc' | null
+  filter: TableFilter | null
+  focus_row: number | null
+  focus_row_visible: boolean | null
+}
+
+export interface TableAggregate {
+  count: number
+  non_empty_count: number
+  numeric_count: number
+  nonnumeric_count: number
+  formula_count: number
+  formula_cache_missing_count: number
+  sum: string | null
+  average: string | null
+  minimum: string | null
+  maximum: string | null
+  scope: 'document' | 'current_filter'
+  source_row_count: number
+  source_row_start: number | null
+  source_row_end: number | null
+}
+
+export interface TableCalculation {
+  sheet: string | null
+  available_sheets: string[]
+  column_index: number
+  column: string
+  filter: TableFilter | null
+  formula_policy: 'not_applicable' | 'detected' | 'cached_values_only'
+  rounding_rule: string
+  document: TableAggregate
+  filtered: TableAggregate
+  document_source: SourceRef
+  filtered_source: SourceRef
 }
 
 export interface Insight {

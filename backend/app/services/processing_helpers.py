@@ -7,22 +7,23 @@ def _computed_blocks(parsed: ParsedDocument) -> list[SourceBlock]:
     if parsed.file_type not in {"csv", "xlsx", "xls"}:
         return []
     metadata = parsed.metadata
-    row_end = int(metadata.get("row_count", 0)) + 1
+    row_start = int(metadata.get("data_start_row", 2))
+    row_end = int(metadata.get("row_end", int(metadata.get("row_count", 0)) + 1))
     blocks = [SourceBlock(
         f"Локальная структура таблицы: {metadata.get('row_count', 0)} строк данных, {metadata.get('column_count', 0)} столбцов.",
-        {"kind": f"{parsed.file_type}_derived", "label": "Сводка таблицы", "row_start": 1, "row_end": row_end, "derived": True},
+        {"kind": f"{parsed.file_type}_derived", "label": "Сводка таблицы", "row_start": row_start, "row_end": row_end, "derived": True},
         derived=True,
     )]
     for item in metadata.get("numeric_columns", []):
         blocks.append(SourceBlock(
-            f"Локальный расчёт по столбцу «{item['name']}» и значениям строк 2–{row_end}: "
+            f"Локальный расчёт по столбцу «{item['name']}» и значениям строк {row_start}–{row_end}: "
             f"числовых значений {item['count']}; сумма {item['sum']}; среднее {item['average']}; "
             f"минимум {item['minimum']}; максимум {item['maximum']}.",
             {
                 "kind": f"{parsed.file_type}_derived",
-                "label": f"Показатели столбца «{item['name']}» · строки 2–{row_end}",
+                "label": f"Показатели столбца «{item['name']}» · строки {row_start}–{row_end}",
                 "column": item["name"],
-                "row_start": 2,
+                "row_start": row_start,
                 "row_end": row_end,
                 "derived": True,
             },

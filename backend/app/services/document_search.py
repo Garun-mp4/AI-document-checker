@@ -351,7 +351,13 @@ def search_table_bytes(data: bytes, file_type: str, query: str, *, offset: int =
     matches: list[dict[str, Any]] = []
     total = 0
 
-    def scan_rows(sheet_name: str | None, rows: Iterable[Iterable[Any]], *, omit_blank_rows: bool) -> None:
+    def scan_rows(
+        sheet_name: str | None,
+        rows: Iterable[Iterable[Any]],
+        *,
+        omit_blank_rows: bool,
+        preserve_physical_rows: bool = False,
+    ) -> None:
         nonlocal total
         headers: list[str] | None = None
         visible_row = 0
@@ -361,7 +367,7 @@ def search_table_bytes(data: bytes, file_type: str, query: str, *, offset: int =
             if omit_blank_rows and is_empty:
                 continue
             visible_row += 1
-            row_number = visible_row if omit_blank_rows else physical_row
+            row_number = physical_row if preserve_physical_rows or not omit_blank_rows else visible_row
             if headers is None:
                 if omit_blank_rows and is_empty:
                     continue
@@ -402,11 +408,16 @@ def search_table_bytes(data: bytes, file_type: str, query: str, *, offset: int =
                     total += 1
 
     if file_type == "csv":
-        from app.services.preview import _csv_dialect
+        from app.services.table_analysis import detect_csv_dialect
         text, _ = _decode_text_with_encoding(data)
-        dialect, delimiter = _csv_dialect(text)
+        dialect, delimiter = detect_csv_dialect(text)
         try:
-            scan_rows(None, csv.reader(io.StringIO(text, newline=""), dialect=dialect, delimiter=delimiter), omit_blank_rows=True)
+            scan_rows(
+                None,
+                csv.reader(io.StringIO(text, newline=""), dialect=dialect, delimiter=delimiter),
+                omit_blank_rows=True,
+                preserve_physical_rows=True,
+            )
         except csv.Error as exc:
             raise DocumentParsingError("Не удалось разобрать строки CSV для поиска.") from exc
     elif file_type == "xlsx":

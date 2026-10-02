@@ -1,5 +1,6 @@
-import { test, expect, upload, provider, originalVisible, showChat } from './helpers.mjs'
+import { test, expect, upload, provider, originalVisible, showChat, fixtures } from './helpers.mjs'
 import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 
 test.beforeEach(async ({ request }) => provider(request))
 
@@ -94,6 +95,81 @@ test('CSV aggregates and actual row pagination', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Показать ещё', exact: true })).toHaveCount(0)
 })
 
+test('Table tools query every row and save both reproducible calculation scopes', async ({ page }) => {
+  const doc = await upload(page, 'large.csv')
+  const table = page.locator('.original-csv-table')
+
+  await page.getByRole('button', { name: 'Сортировать по столбцу Часы по возрастанию' }).click()
+  await page.getByRole('button', { name: 'Сортировать по столбцу Часы по убыванию' }).click()
+  await expect(table.locator('tbody tr').first()).toHaveAttribute('data-row-number', '241')
+  await expect(table.locator('tbody tr').first()).toContainText('Проект 240')
+
+  await page.getByLabel('Столбец фильтра').selectOption('0')
+  await page.getByLabel('Тип фильтра').selectOption('text')
+  await page.getByLabel('Условие фильтра').selectOption('contains')
+  await page.getByLabel('Значение фильтра').fill('Проект 237')
+  await page.getByRole('button', { name: 'Применить', exact: true }).click()
+  await expect(table.locator('tbody tr')).toHaveCount(1)
+  await expect(table.locator('tbody tr').first()).toHaveAttribute('data-row-number', '238')
+  await expect(table.locator('tbody tr').first()).toContainText('Проект 237')
+  await expect(page.locator('.csv-table-footer')).toContainText('1 из 1 строк')
+
+  await page.locator('.csv-calculation-panel > summary').click()
+  await expect(page.getByLabel('Столбец для расчёта')).toHaveValue('1')
+  const responsePromise = page.waitForResponse(response => response.url().includes(`/documents/${doc.id}/preview/table/calculations`) && response.request().method() === 'POST')
+  await page.getByRole('button', { name: 'Рассчитать', exact: true }).click()
+  const response = await responsePromise
+  expect(response.ok()).toBeTruthy()
+  const result = await response.json()
+  expect(result.document.sum).toBe('28920')
+  expect(result.document.average).toBe('120.50')
+  expect(result.filtered.sum).toBe('237')
+  expect(result.filtered_source.locator.calculation_scope).toBe('current_filter')
+  expect(result.filtered_source.locator.filter.value).toBe('Проект 237')
+  await expect(page.locator('.csv-calculation-scope').first()).toContainText('28 920')
+  await expect(page.locator('.csv-calculation-scope').last()).toContainText('237')
+
+  const chunks = await (await page.request.get(`/api/v1/documents/${doc.id}/chunks?offset=0&limit=200`)).json()
+  const persisted = chunks.filter(source => source.locator.calculation_schema === 1)
+  expect(persisted).toHaveLength(2)
+  expect(new Set(persisted.map(source => source.locator.calculation_scope))).toEqual(new Set(['document', 'current_filter']))
+  await page.reload()
+  const preview = await (await page.request.get(`/api/v1/documents/${doc.id}/preview`)).json()
+  expect(preview.blocks.some(block => block.locator.calculation_schema === 1 && block.locator.filter?.value === 'Проект 237')).toBeTruthy()
+  await page.setViewportSize({ width: 390, height: 844 })
+  const mobileLayout = await page.evaluate(() => ({
+    viewportWidth: document.documentElement.clientWidth,
+    pageWidth: document.documentElement.scrollWidth,
+  }))
+  expect(mobileLayout.pageWidth).toBeLessThanOrEqual(mobileLayout.viewportWidth)
+  await expect(page.getByLabel('Фильтр таблицы')).toBeVisible()
+  await expect(page.locator('.csv-calculation-panel > summary')).toBeVisible()
+})
+
+test('Table viewer resets filters, sorting and calculations when a new document is opened', async ({ page }) => {
+  await upload(page, 'large.csv')
+  await page.getByRole('button', { name: 'Сортировать по столбцу Часы по возрастанию' }).click()
+  await page.getByLabel('Столбец фильтра').selectOption('0')
+  await page.getByLabel('Значение фильтра').fill('Проект 237')
+  await page.getByRole('button', { name: 'Применить', exact: true }).click()
+  await page.locator('.csv-calculation-panel > summary').click()
+  await page.getByRole('button', { name: 'Рассчитать', exact: true }).click()
+  await expect(page.locator('.csv-calculation-scope')).toHaveCount(2)
+
+  const uploaded = page.waitForResponse(response => response.url().endsWith('/api/v1/documents') && response.request().method() === 'POST')
+  await page.getByLabel('Выберите документ', { exact: true }).setInputFiles(path.join(fixtures, 'sample.csv'))
+  const response = await uploaded
+  expect(response.status(), await response.text()).toBe(202)
+  const document = await response.json()
+  await expect.poll(async () => (await (await page.request.get(`/api/v1/documents/${document.id}`)).json()).status).toBe('ready')
+  await expect(page.getByRole('heading', { name: 'sample.csv', exact: true })).toBeVisible()
+
+  await expect(page.locator('.csv-filter-summary')).toHaveCount(0)
+  await expect(page.locator('.csv-calculation-context')).toHaveCount(0)
+  await expect(page.locator('.csv-table-footer')).toContainText('Показано 3 из 3 строк')
+  await expect(page.locator('.original-csv-table thead th[aria-sort="ascending"]')).toHaveCount(0)
+})
+
 test('export dialog downloads selected answers as Markdown and saved analysis as PDF', async ({ page }) => {
   await upload(page, 'sample.txt')
   await page.setViewportSize({ width: 390, height: 844 })
@@ -148,10 +224,14 @@ test('Citation loads and highlights a matching CSV range beyond the first table 
   expect(seeded.ok()).toBeTruthy()
   await page.reload()
   await showChat(page)
+  await page.getByLabel('Тип фильтра').selectOption('text')
+  await page.getByLabel('Значение фильтра').fill('Проект 1')
+  await page.getByRole('button', { name: 'Применить', exact: true }).click()
   const citation = page.locator('.assistant-message .inline-citation').last()
   await expect(citation).toBeVisible()
   await citation.click()
 
+  await expect(page.locator('.csv-table-notice')).toContainText('Фильтр сброшен')
   await expect(page.locator('.preview-source-callout')).toContainText('Проект 237')
   const matchingRow = page.locator('.original-csv-table tbody tr.source-row-match').filter({ hasText: 'Проект 237' })
   await expect(matchingRow).toBeVisible()
