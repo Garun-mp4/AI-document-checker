@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,12 @@ from pathlib import Path
 from markitdown import MarkItDown
 
 from app.config import settings
+from app.services.artifact_cache import (
+    file_checksum,
+    load_json_cache,
+    processing_cache_key,
+    store_json_cache,
+)
 
 MARKITDOWN_VERSION = "0.1.8"
 
@@ -61,13 +68,36 @@ class MarkItDownService:
             raise MarkdownConversionError("Сформированный Markdown превышает безопасный размер.")
         return MarkdownResult(markdown=markdown, title=getattr(result, "title", None))
 
-    async def convert(self, path: Path) -> MarkdownResult:
+    async def convert(self, path: Path, *, cache_checksum: str | None = None) -> MarkdownResult:
         from app.services.isolated_documents import run_document_operation
         from app.services.parsing import DocumentParsingError
+        checksum = cache_checksum or await asyncio.to_thread(file_checksum, path)
+        key = processing_cache_key(
+            input_checksum=checksum,
+            file_type=path.suffix.lower().lstrip("."),
+            configuration={"plugins": False, "max_chars": settings.markdown_max_chars},
+            parser_version="markitdown-wrapper-m14-v1",
+            converter_version=MARKITDOWN_VERSION,
+        )
+        cached = load_json_cache(settings.upload_dir, "markdown", key)
+        if cached is not None:
+            try:
+                result = MarkdownResult(**cached)
+                if result.markdown:
+                    return result
+            except (TypeError, ValueError):
+                pass
         try:
-            return MarkdownResult(**await run_document_operation('markdown', path, timeout=settings.markdown_timeout_seconds))
+            result = MarkdownResult(**await run_document_operation('markdown', path, timeout=settings.markdown_timeout_seconds))
         except DocumentParsingError as exc:
             raise MarkdownConversionError(str(exc)) from exc
+        if result.markdown:
+            store_json_cache(settings.upload_dir, "markdown", key, {
+                "markdown": result.markdown,
+                "title": result.title,
+                "converter_version": result.converter_version,
+            })
+        return result
 
     @staticmethod
     def _normalize(value: str | None) -> str:

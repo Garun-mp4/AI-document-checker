@@ -222,8 +222,8 @@ def test_process_persists_markdown_mapping_and_indexes_markdown(monkeypatch, tmp
     mapped = MappedMarkdownBlock('Original text', {**native.locator, 'source_locators':[native.locator]},
                                 line_start=3,line_end=3,char_start=10,char_end=23,confidence='exact')
     async def parse(*args, **kwargs): return parsed
-    async def convert(*args): return MarkdownResult('# Report\n\nOriginal text\n', 'Report')
-    async def mapping(*args): return [mapped], {'quality':{'exact':1}}
+    async def convert(*args, **kwargs): return MarkdownResult('# Report\n\nOriginal text\n', 'Report')
+    async def mapping(*args, **kwargs): return [mapped], {'quality':{'exact':1}}
     monkeypatch.setattr(engine, 'parse_uploaded', parse)
     monkeypatch.setattr(engine, 'map_uploaded', mapping)
     attempt.markitdown.convert = convert
@@ -243,6 +243,10 @@ def test_process_persists_markdown_mapping_and_indexes_markdown(monkeypatch, tmp
     assert session.added[0].markdown_line_start == 3
     assert session.added[0].version == 1
     assert version.state == 'ready'
+    assert attempt.job.progress['performance_ms']['parser_ms'] >= 0
+    assert attempt.job.progress['performance_ms']['markdown_conversion_ms'] >= 0
+    assert attempt.job.progress['performance_ms']['source_mapping_ms'] >= 0
+    assert attempt.job.progress['performance_ms']['embedding_ms'] >= 0
 
 
 @pytest.mark.parametrize('file_type', ['txt','md'])
@@ -250,7 +254,7 @@ def test_process_falls_back_to_native_sources_when_markdown_conversion_fails(mon
     attempt, document, original, _version, session = harness(monkeypatch,tmp_path,file_type)
     native = SourceBlock('Native source', {'kind':'txt','label':'Строка 1','line_start':1})
     async def parse(*args, **kwargs): return ParsedDocument('txt',[native],{'line_count':1})
-    async def fail(*args): raise MarkdownConversionError('conversion failed')
+    async def fail(*args, **kwargs): raise MarkdownConversionError('conversion failed')
     monkeypatch.setattr(engine,'parse_uploaded',parse)
     attempt.markitdown.convert = fail
     asyncio.run(attempt.run())

@@ -11,7 +11,9 @@ for (const [name, status] of [['empty.txt', 400], ['unsupported.exe', 415], ['ov
     const response = !['unsupported.exe', 'oversized.txt'].includes(name) ? page.waitForResponse(r => r.url().endsWith('/api/v1/documents') && r.request().method() === 'POST') : null
     await page.getByLabel('Выберите документ', { exact: true }).setInputFiles(path.join(fixtures, name))
     if (response) expect((await response).status()).toBe(status)
-    await expect(page.locator('.toast-message')).toBeVisible()
+    const failedUpload = page.locator('.upload-queue-item').filter({ hasText: name })
+    await expect(failedUpload).toContainText('Не удалось выполнить')
+    await expect(failedUpload.locator('.upload-queue-error')).toBeVisible()
     const server = await page.request.post('/api/v1/documents', { multipart: { file: { name, mimeType: 'application/octet-stream', buffer: await readFile(path.join(fixtures, name)) } } })
     expect(server.status()).toBe(status)
     await expect(page.getByRole('button', { name: 'Новый чат', exact: true })).toBeEnabled()

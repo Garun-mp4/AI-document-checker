@@ -58,7 +58,7 @@ export async function originalVisible(page, renderer) {
     pdf: '.pdf-page-sheet canvas',
     docx: '.docx-render-host section.docx-preview',
     text: '.source-text-line',
-    csv: '.original-csv-table tbody tr',
+    csv: '.original-csv-table tbody tr[data-row-number]',
     mapped: '.source-map-original-viewer .preview-block',
   }
   await expect(viewer.locator(surfaces[renderer]).first()).toBeVisible()

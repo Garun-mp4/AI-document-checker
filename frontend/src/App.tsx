@@ -46,6 +46,8 @@ import { DocumentSearchToolbar } from './components/DocumentSearchToolbar'
 import { ChatMarkdown } from './components/ChatMarkdown'
 import { ProcessingStatusPanel } from './components/ProcessingStatusPanel'
 import { BuildVersionNotice } from './components/BuildVersionNotice'
+import { UploadQueue } from './components/UploadQueue'
+import type { UploadQueueEntry, UploadQueueState } from './components/UploadQueue'
 import { useBuildVersion } from './useBuildVersion'
 
 const API = '/api/v1'
@@ -53,12 +55,39 @@ const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.jso
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
 const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
+const UPLOAD_QUEUE_STORAGE_KEY = 'document-checker-upload-queue'
 const DEFAULT_CODEX_MODEL = 'gpt-6-luna'
 const DEFAULT_CODEX_REASONING = 'medium'
 const ALLOWED_CODEX_MODELS = new Set(['gpt-6-luna', 'gpt-6.1-sol'])
 const CHAT_LIBRARY_PAGE_SIZE = 30
 
 type ChatLibraryActionMenu = { chatId: string; top: number; left: number }
+
+function restoreUploadQueue(): UploadQueueEntry[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(UPLOAD_QUEUE_STORAGE_KEY) || '[]')
+    if (!Array.isArray(value)) return []
+    return value.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      .filter((item) => typeof item.id === 'string' && typeof item.filename === 'string'
+        && (typeof item.documentId === 'string' || item.documentId === null)
+        && (typeof item.documentId === 'string' || item.state === 'failed' || item.state === 'cancelled'))
+      .slice(-20)
+      .map((item) => ({
+        id: item.id as string,
+        filename: item.filename as string,
+        state: item.state === 'ready' || item.state === 'failed' || item.state === 'cancelled' ? item.state : 'processing',
+        documentId: typeof item.documentId === 'string' ? item.documentId : null,
+        uploadPercent: null,
+        stage: typeof item.documentId === 'string' ? 'Восстанавливаю состояние' : null,
+        progress: {},
+        error: typeof item.error === 'string' ? item.error : null,
+        retryMode: item.retryMode === 'replace' ? 'replace' : 'retry',
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+      }))
+  } catch {
+    return []
+  }
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -89,6 +118,20 @@ function statusLabel(status: DocumentRecord['status']): string {
     model_unavailable: 'Модель недоступна',
     error: 'Ошибка обработки',
   }[status]
+}
+
+function uploadQueueStage(document: DocumentRecord, job: ProcessingJob | undefined): string {
+  if (document.status === 'ready') return 'Готово'
+  if (document.status === 'error') return 'Ошибка обработки'
+  if (document.status === 'cancelled') return 'Обработка отменена'
+  if (document.status === 'needs_auth') return 'Требуется подключить Codex'
+  if (document.status === 'model_unavailable') return 'Модель недоступна'
+  const labels: Record<string, string> = {
+    queued: 'В очереди', extracting: 'Извлекаю текст', ocr: 'Распознаю страницы', indexing: 'Создаю индекс',
+    waiting_analysis: 'Ожидаю модель', analysis_request: 'Формирую ответы', complete: 'Завершаю',
+  }
+  const stage = job?.stage ? labels[job.stage] || statusLabel(document.status) : statusLabel(document.status)
+  return job?.queue_position ? `${stage} · позиция ${job.queue_position}` : stage
 }
 
 function locatorText(source: { locator: SourceRef['locator'] }): string {
@@ -218,6 +261,8 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [codex, setCodex] = useState<CodexStatus | null>(null)
   const [isUploading, setIsUploading] = useState(false)
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueEntry[]>(restoreUploadQueue)
+  const [uploadQueueExpanded, setUploadQueueExpanded] = useState(false)
   const [uploadActive, setUploadActive] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(true)
   const [chatOpen, setChatOpen] = useState(true)
@@ -273,6 +318,13 @@ function App() {
   const [previewPage, setPreviewPage] = useState(1)
   const { check: buildVersionCheck, recheck: recheckBuildVersion } = useBuildVersion()
   const fileInput = useRef<HTMLInputElement>(null)
+  const retryFileInput = useRef<HTMLInputElement>(null)
+  const retryUploadId = useRef<string | null>(null)
+  const pendingUploadFiles = useRef(new Map<string, File>())
+  const uploadRequests = useRef(new Map<string, XMLHttpRequest>())
+  const cancelledUploadIds = useRef(new Set<string>())
+  const uploadGate = useRef<{ active: number; waiters: Array<() => void> }>({ active: 0, waiters: [] })
+  const pendingUploadCount = useRef(0)
   const librarySearchRef = useRef<HTMLInputElement>(null)
   const chatMenuRef = useRef<HTMLDivElement>(null)
   const chatMenuTriggerRef = useRef<HTMLButtonElement | null>(null)
@@ -589,6 +641,62 @@ function App() {
   }, [selectedId])
 
   useEffect(() => {
+    try {
+      const persisted = uploadQueue.filter((item) => item.documentId || ['failed', 'cancelled'].includes(item.state)).slice(-20).map(({ id, filename, state, documentId, error, retryMode, updatedAt }) => ({
+        id, filename, state, documentId, error, retryMode, updatedAt,
+      }))
+      localStorage.setItem(UPLOAD_QUEUE_STORAGE_KEY, JSON.stringify(persisted))
+    } catch {
+      // The durable document and processing job remain on the server if browser storage is unavailable.
+    }
+  }, [uploadQueue])
+
+  const activeUploadQueueKey = uploadQueue
+    .filter((item) => item.documentId && ['processing', 'cancelling'].includes(item.state))
+    .map((item) => `${item.id}:${item.documentId}`)
+    .join('|')
+
+  useEffect(() => {
+    if (!activeUploadQueueKey) return
+    let active = true
+    const pendingItems = uploadQueue.filter((item) => item.documentId && ['processing', 'cancelling'].includes(item.state))
+    const refreshQueue = async () => {
+      await Promise.all(pendingItems.map(async (item) => {
+        if (!item.documentId) return
+        const [documentResult, jobsResult] = await Promise.allSettled([
+          api<DocumentRecord>(`${API}/documents/${item.documentId}`),
+          api<ProcessingJob[]>(`${API}/documents/${item.documentId}/jobs`),
+        ])
+        if (!active) return
+        if (documentResult.status === 'rejected') {
+          setUploadQueue((current) => current.map((candidate) => candidate.id === item.id
+            ? { ...candidate, state: 'failed', stage: null, error: documentResult.reason instanceof Error ? documentResult.reason.message : 'Не удалось восстановить состояние документа.', updatedAt: Date.now() }
+            : candidate))
+          return
+        }
+        const record = documentResult.value
+        const jobs = jobsResult.status === 'fulfilled' ? jobsResult.value : []
+        const job = jobs.find((candidate) => ['queued', 'running', 'cancelling'].includes(candidate.state)) ?? jobs[0]
+        const state: UploadQueueState = record.status === 'ready' ? 'ready'
+          : record.status === 'cancelled' ? 'cancelled'
+            : ['error', 'needs_auth', 'model_unavailable'].includes(record.status) || job?.state === 'failed' ? 'failed'
+              : job?.state === 'cancelling' ? 'cancelling' : 'processing'
+        setUploadQueue((current) => current.map((candidate) => candidate.id === item.id ? {
+          ...candidate,
+          state,
+          stage: ['ready', 'failed', 'cancelled'].includes(state) ? null : uploadQueueStage(record, job),
+          progress: job?.progress ?? {},
+          error: state === 'failed' ? record.error_message || job?.error || 'Обработка завершилась с ошибкой.' : null,
+          updatedAt: Date.now(),
+        } : candidate))
+      }))
+    }
+    void refreshQueue()
+    const timer = window.setInterval(() => void refreshQueue(), 2_500)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [activeUploadQueueKey])
+
+  useEffect(() => {
     localStorage.setItem(NEW_CHAT_STORAGE_KEY, String(newChatOpen))
   }, [newChatOpen])
 
@@ -821,34 +929,204 @@ function App() {
     return () => window.document.removeEventListener('keydown', onKeyDown)
   }, [authOpen, deleteTarget, exportOpen])
 
-  const uploadFile = useCallback(async (file?: File) => {
-    if (!file) return
-    const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
-    if (!['.pdf', '.docx', '.txt', '.md', '.csv', '.xml', '.xlsx', '.xls', '.pptx', '.html', '.htm', '.json', '.epub'].includes(extension)) {
-      showToast('Поддерживаются PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON и EPUB.')
-      return
-    }
-    if (file.size > 25 * 1024 * 1024) {
-      showToast('Файл превышает максимальный размер 25 МБ.')
-      return
-    }
-    setIsUploading(true)
+  const uploadFiles = useCallback(async (input: FileList | File[] | null | undefined, retryIds?: string[]) => {
+    const files = Array.from(input ?? [])
+    if (!files.length) return
+    const accepted = new Set(['.pdf', '.docx', '.txt', '.md', '.csv', '.xml', '.xlsx', '.xls', '.pptx', '.html', '.htm', '.json', '.epub'])
+    const batch = files.map((file, index) => {
+      const id = retryIds?.[index] || crypto.randomUUID()
+      const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
+      const error = !accepted.has(extension)
+        ? 'Формат не поддерживается. Выберите PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB.'
+        : file.size > 25 * 1024 * 1024 ? 'Файл превышает максимальный размер 25 МБ.' : null
+      pendingUploadFiles.current.set(id, file)
+      cancelledUploadIds.current.delete(id)
+      return {
+        id,
+        file,
+        error,
+      }
+    })
+    setUploadQueue((current) => {
+      const retained = current.filter((item) => !batch.some((candidate) => candidate.id === item.id))
+      return [...retained, ...batch.map(({ id, file, error }) => ({
+        id,
+        filename: file.name,
+        state: error ? 'failed' as const : 'queued' as const,
+        documentId: null,
+        uploadPercent: error ? null : 0,
+        stage: null,
+        progress: {},
+        error,
+        retryMode: error ? 'replace' as const : 'retry' as const,
+        updatedAt: Date.now(),
+      }))].slice(-40)
+    })
+    setUploadQueueExpanded(true)
     setMobileLibraryOpen(false)
-    const body = new FormData()
-    body.append('file', file)
+    const valid = batch.filter((item) => !item.error)
+    if (valid.length > 0) {
+      pendingUploadCount.current += valid.length
+      setIsUploading(true)
+    }
+
+    const acquireUploadSlot = () => new Promise<() => void>((resolve) => {
+      const gate = uploadGate.current
+      const enter = () => {
+        let released = false
+        resolve(() => {
+          if (released) return
+          released = true
+          const next = gate.waiters.shift()
+          if (next) next()
+          else gate.active -= 1
+        })
+      }
+      if (gate.active < 2) {
+        gate.active += 1
+        enter()
+      } else {
+        gate.waiters.push(enter)
+      }
+    })
+
+    const settleUpload = () => {
+      pendingUploadCount.current = Math.max(0, pendingUploadCount.current - 1)
+      setIsUploading(pendingUploadCount.current > 0)
+    }
+
+    const patchItem = (id: string, patch: Partial<UploadQueueEntry>) => {
+      setUploadQueue((current) => current.map((item) => item.id === id ? { ...item, ...patch, updatedAt: Date.now() } : item))
+    }
+    const send = (file: File, id: string) => new Promise<DocumentRecord>((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      const body = new FormData()
+      body.append('file', file)
+      uploadRequests.current.set(id, xhr)
+      xhr.open('POST', `${API}/documents`)
+      xhr.responseType = 'text'
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) patchItem(id, { uploadPercent: Math.min(100, Math.round(event.loaded / event.total * 100)) })
+      })
+      xhr.addEventListener('load', () => {
+        uploadRequests.current.delete(id)
+        let response: { detail?: string } | DocumentRecord | null = null
+        try { response = JSON.parse(xhr.responseText) as { detail?: string } | DocumentRecord } catch { response = null }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          const detail = response && 'detail' in response ? response.detail : undefined
+          reject(new Error(detail || `Не удалось загрузить файл (${xhr.status}).`))
+        } else if (!response || !('id' in response)) {
+          reject(new Error('Сервер сохранил файл, но не вернул его идентификатор. Обновите библиотеку чатов.'))
+        } else {
+          resolve(response)
+        }
+      })
+      xhr.addEventListener('error', () => { uploadRequests.current.delete(id); reject(new Error('Соединение прервано во время загрузки.')) })
+      xhr.addEventListener('abort', () => { uploadRequests.current.delete(id); reject(new DOMException('Загрузка отменена.', 'AbortError')) })
+      xhr.send(body)
+    })
+
+    let next = 0
+    const outcomes: (DocumentRecord | null)[] = Array.from({ length: valid.length }, () => null)
+    const worker = async () => {
+      while (next < valid.length) {
+        const batchIndex = next++
+        const item = valid[batchIndex]
+        if (!item) continue
+        if (cancelledUploadIds.current.has(item.id)) {
+          settleUpload()
+          continue
+        }
+        const releaseUploadSlot = await acquireUploadSlot()
+        try {
+          if (cancelledUploadIds.current.has(item.id)) continue
+          patchItem(item.id, { state: 'uploading', uploadPercent: 0, error: null, stage: 'Отправляю файл' })
+          const created = await send(item.file, item.id)
+          outcomes[batchIndex] = created
+          pendingUploadFiles.current.delete(item.id)
+          patchItem(item.id, { state: 'processing', documentId: created.id, uploadPercent: null, stage: 'В очереди обработки', progress: {}, error: null })
+        } catch (error) {
+          const cancelled = cancelledUploadIds.current.has(item.id) || error instanceof DOMException && error.name === 'AbortError'
+          patchItem(item.id, {
+            state: cancelled ? 'cancelled' : 'failed',
+            uploadPercent: null,
+            stage: null,
+            error: cancelled ? null : error instanceof Error ? error.message : 'Не удалось загрузить файл.',
+          })
+        } finally {
+          releaseUploadSlot()
+          settleUpload()
+        }
+      }
+    }
     try {
-      const created = await api<DocumentRecord>(`${API}/documents`, { method: 'POST', body })
-      setNewChatOpen(false)
-      setSelectedId(created.id)
-      void refreshLibrary(created.id)
-      setPreviewOpen(true)
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Не удалось загрузить документ.')
+      await Promise.all(Array.from({ length: Math.min(2, valid.length) }, () => worker()))
     } finally {
-      setIsUploading(false)
       if (fileInput.current) fileInput.current.value = ''
     }
-  }, [refreshLibrary, showToast])
+
+    const latest = [...outcomes].reverse().find((item): item is DocumentRecord => item !== null)
+    if (latest) {
+      setNewChatOpen(false)
+      setSelectedId(latest.id)
+      setChatOpen(true)
+      setPreviewOpen(true)
+      void refreshLibrary(latest.id)
+    } else {
+      void refreshLibrary()
+    }
+  }, [refreshLibrary])
+
+  const cancelUploadQueueItem = useCallback(async (item: UploadQueueEntry) => {
+    if (!item.documentId) {
+      cancelledUploadIds.current.add(item.id)
+      uploadRequests.current.get(item.id)?.abort()
+      setUploadQueue((current) => current.map((candidate) => candidate.id === item.id
+        ? { ...candidate, state: 'cancelled', uploadPercent: null, stage: null, error: null, updatedAt: Date.now() }
+        : candidate))
+      return
+    }
+    setUploadQueue((current) => current.map((candidate) => candidate.id === item.id
+      ? { ...candidate, state: 'cancelling', stage: 'Останавливаю обработку', updatedAt: Date.now() }
+      : candidate))
+    try {
+      await api(`${API}/documents/${item.documentId}/cancel`, { method: 'POST' })
+    } catch (error) {
+      setUploadQueue((current) => current.map((candidate) => candidate.id === item.id
+        ? { ...candidate, error: error instanceof Error ? error.message : 'Не удалось отменить обработку.', updatedAt: Date.now() }
+        : candidate))
+    }
+  }, [])
+
+  const retryUploadQueueItem = useCallback(async (item: UploadQueueEntry) => {
+    if (isUploading) return
+    if (!item.documentId) {
+      const file = pendingUploadFiles.current.get(item.id)
+      if (file && item.retryMode !== 'replace') void uploadFiles([file], [item.id])
+      else {
+        retryUploadId.current = item.id
+        retryFileInput.current?.click()
+      }
+      return
+    }
+    setUploadQueue((current) => current.map((candidate) => candidate.id === item.id
+      ? { ...candidate, state: 'processing', stage: 'Повторяю обработку', progress: {}, error: null, updatedAt: Date.now() }
+      : candidate))
+    try {
+      await api<DocumentRecord>(`${API}/documents/${item.documentId}/retry`, { method: 'POST' })
+    } catch (error) {
+      setUploadQueue((current) => current.map((candidate) => candidate.id === item.id
+        ? { ...candidate, state: 'failed', stage: null, error: error instanceof Error ? error.message : 'Не удалось повторить обработку.', updatedAt: Date.now() }
+        : candidate))
+    }
+  }, [isUploading, uploadFiles])
+
+  const openUploadQueueChat = useCallback((documentId: string) => {
+    setNewChatOpen(false)
+    setSelectedId(documentId)
+    setMobileLibraryOpen(false)
+    setChatOpen(true)
+  }, [])
 
   const startNewChat = useCallback(() => {
     setNewChatOpen(true)
@@ -1369,7 +1647,7 @@ function App() {
   const handleDrop = (event: React.DragEvent) => {
     event.preventDefault()
     setUploadActive(false)
-    void uploadFile(event.dataTransfer.files[0])
+    void uploadFiles(event.dataTransfer.files)
   }
 
   const authReady = Boolean(codex?.authenticated && codex.model_available && codex.reasoning_available)
@@ -1548,6 +1826,16 @@ function App() {
             {authReady && <span className="connection-model">{codexModelLabel(codex)} · {codexReasoningLabel(codex?.reasoning_effort)}</span>}
           </button>
           <button className="icon-button chat-visibility-toggle" type="button" aria-label={chatVisible ? 'Свернуть чат' : 'Открыть чат'} title={chatVisible ? 'Свернуть чат' : 'Открыть чат'} aria-expanded={chatVisible} aria-controls="document-chat" onClick={toggleChat}>{chatVisible ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
+          <UploadQueue
+            items={uploadQueue}
+            expanded={uploadQueueExpanded}
+            onToggle={() => setUploadQueueExpanded((value) => !value)}
+            onOpen={openUploadQueueChat}
+            onCancel={(item) => void cancelUploadQueueItem(item)}
+            onRetry={(item) => void retryUploadQueueItem(item)}
+            onDismiss={(itemId) => setUploadQueue((current) => current.filter((item) => item.id !== itemId))}
+            disabled={isUploading}
+          />
           <button className="button button-dark header-upload" onClick={() => fileInput.current?.click()} disabled={isUploading}>
             {isUploading ? <LoaderCircle className="spin" size={16} /> : <FileUp size={16} />}
             <span>Загрузить файл</span>
@@ -1628,8 +1916,14 @@ function App() {
 
       <main id="main-content" tabIndex={-1} className={`workspace ${!selectedId || !visibleStatus ? 'workspace-empty' : ''} ${uploadActive ? 'drop-active' : ''}`} ref={workArea} onDragOver={(event) => { event.preventDefault(); setUploadActive(true) }} onDragLeave={(event) => { if (event.currentTarget === event.target) setUploadActive(false) }} onDrop={handleDrop}>
         <BuildVersionNotice check={buildVersionCheck} busy={isUploading || anyChatSending} onReload={() => window.location.reload()} onRetry={recheckBuildVersion} />
-        <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} aria-label="Выберите документ" onChange={(event) => void uploadFile(event.target.files?.[0])} />
-        {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файл, чтобы загрузить</strong><span>PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
+        <input ref={fileInput} className="visually-hidden" type="file" name="document" accept={ACCEPTED} multiple aria-label="Выберите документ" onChange={(event) => void uploadFiles(event.target.files)} />
+        <input ref={retryFileInput} className="visually-hidden" type="file" name="retry-document" accept={ACCEPTED} aria-label="Выберите файл для повтора загрузки" onChange={(event) => {
+          const itemId = retryUploadId.current
+          retryUploadId.current = null
+          if (itemId && event.target.files?.[0]) void uploadFiles([event.target.files[0]], [itemId])
+          event.target.value = ''
+        }} />
+        {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файлы, чтобы загрузить</strong><span>Можно добавить несколько документов за раз · PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
 
         {!selectedId || !visibleStatus ? (
           <EmptyWorkspace

@@ -2,20 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from pathlib import Path
 
 from app.config import settings
+from app.services.artifact_cache import (
+    file_checksum,
+    load_json_cache,
+    processing_cache_key,
+    store_json_cache,
+)
 from app.services.document_security import storage_path
 from app.services.job_queue import LeaseLost
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
 
 _slots = asyncio.Semaphore(2)
 _PROGRESS_PREFIX = b'\x1eDOC_PROGRESS '
+PARSER_CACHE_VERSION = "document-parser-m14-v1"
+OCR_CACHE_VERSION = "tesseract-ocr-m14-v1"
+MAPPING_CACHE_VERSION = "markdown-source-map-m14-v1"
+logger = logging.getLogger(__name__)
 
 
 async def _consume_progress(
@@ -207,25 +219,120 @@ def parsed_result(result: dict) -> ParsedDocument:
     return ParsedDocument(result['file_type'], [SourceBlock(**block) for block in result['blocks']], result['metadata'])
 
 
-async def parse_uploaded(path: Path, filename: str, **parameters) -> ParsedDocument:
-    return parsed_result(await run_document_operation('parse', path, filename=filename, **parameters))
+def _cache_key(
+    *, input_checksum: str, filename: str, parameters: dict, parser_version: str,
+) -> str:
+    return processing_cache_key(
+        input_checksum=input_checksum,
+        file_type=Path(filename).suffix.lower().lstrip("."),
+        configuration={
+            "parameters": parameters,
+            "limits": {
+                "max_pages": settings.document_max_pages,
+                "max_chars": settings.document_max_chars,
+                "archive_max_bytes": settings.archive_max_bytes,
+                "archive_member_max_bytes": settings.archive_member_max_bytes,
+                "archive_max_entries": settings.archive_max_entries,
+                "markdown_max_chars": settings.markdown_max_chars,
+            },
+        },
+        parser_version=parser_version,
+        converter_version="not-applicable",
+    )
 
 
-async def ocr_uploaded(path: Path, *, progress_callback=None, **parameters):
-    from app.services.ocr import OCRProcessingError, OCRResult
+async def parse_uploaded(
+    path: Path,
+    filename: str,
+    *,
+    cache_checksum: str | None = None,
+    **parameters,
+) -> ParsedDocument:
+    checksum = cache_checksum or await asyncio.to_thread(file_checksum, path)
+    # OCR language/DPI do not change the native parser output; keep that cache
+    # reusable when only OCR settings change. Parser limits remain in _cache_key.
+    parser_parameters = {key: value for key, value in parameters.items() if key != "configuration"}
+    key = _cache_key(
+        input_checksum=checksum,
+        filename=filename,
+        parameters=parser_parameters,
+        parser_version=PARSER_CACHE_VERSION,
+    )
+    cached = load_json_cache(settings.upload_dir, "parsed", key)
+    if cached is not None:
+        try:
+            parsed = parsed_result(cached)
+            logger.info("Document artifact cache hit: stage=parse")
+            return parsed
+        except (KeyError, TypeError, ValueError):
+            pass
+    parsed = parsed_result(await run_document_operation('parse', path, filename=filename, **parameters))
+    store_json_cache(settings.upload_dir, "parsed", key, asdict(parsed))
+    return parsed
+
+
+async def ocr_uploaded(path: Path, *, progress_callback=None, cache_checksum: str | None = None, **parameters):
+    from app.services.ocr import OCRProcessingError, OCRResult, OCRService
+    checksum = cache_checksum or await asyncio.to_thread(file_checksum, path)
+    engine_version = await asyncio.to_thread(OCRService._engine_version)
+    key = _cache_key(
+        input_checksum=checksum,
+        filename="document.pdf",
+        parameters={
+            **parameters,
+            "ocr_cache_version": OCR_CACHE_VERSION,
+            "ocr_engine_version": engine_version,
+        },
+        parser_version=PARSER_CACHE_VERSION,
+    )
+    cached = load_json_cache(settings.upload_dir, "ocr", key)
+    if cached is not None:
+        try:
+            cached["parsed"] = parsed_result(cached["parsed"])
+            result = OCRResult(**cached)
+            if progress_callback:
+                total = len(result.parsed.metadata.get("ocr_page_map", []))
+                if total:
+                    await progress_callback(total, total)
+            logger.info("Document artifact cache hit: stage=ocr")
+            return result
+        except (KeyError, TypeError, ValueError):
+            pass
     try:
         result = await run_document_operation('ocr', path, progress_callback=progress_callback, **parameters)
     except DocumentParsingError as exc:
         raise OCRProcessingError(str(exc)) from exc
     result['parsed'] = parsed_result(result['parsed'])
-    return OCRResult(**result)
+    converted = OCRResult(**result)
+    store_json_cache(settings.upload_dir, "ocr", key, asdict(converted))
+    return converted
 
 
-async def map_uploaded(path: Path, filename: str, markdown_path: Path):
+async def map_uploaded(path: Path, filename: str, markdown_path: Path, *, cache_checksum: str | None = None):
     from app.services.markdown_mapping import MappedMarkdownBlock
     from app.services.markitdown_service import MarkdownConversionError
+    original_checksum = cache_checksum or await asyncio.to_thread(file_checksum, path)
+    markdown_checksum = await asyncio.to_thread(file_checksum, markdown_path)
+    key = _cache_key(
+        input_checksum=original_checksum,
+        filename=filename,
+        parameters={"markdown_checksum": markdown_checksum},
+        parser_version=f"{MAPPING_CACHE_VERSION}:{PARSER_CACHE_VERSION}",
+    )
+    cached = load_json_cache(settings.upload_dir, "mapping", key)
+    if cached is not None:
+        try:
+            blocks = [MappedMarkdownBlock(**block) for block in cached["blocks"]]
+            mapping = cached["mapping"]
+            if isinstance(mapping, dict):
+                logger.info("Document artifact cache hit: stage=source-map")
+                return blocks, mapping
+        except (KeyError, TypeError, ValueError):
+            pass
     try:
         result = await run_document_operation('map', path, filename=filename, markdown_path=str(markdown_path))
     except DocumentParsingError as exc:
         raise MarkdownConversionError(str(exc)) from exc
-    return [MappedMarkdownBlock(**block) for block in result['blocks']], result['mapping']
+    blocks = [MappedMarkdownBlock(**block) for block in result['blocks']]
+    store_json_cache(settings.upload_dir, "mapping", key, result)
+    return blocks, result['mapping']

@@ -6,6 +6,10 @@ import type { DocumentPreview, DocumentRecord, PreviewBlock, SourceRef, StreamCi
 
 const API = '/api/v1'
 const CSV_PAGE_SIZE = 100
+const TABLE_ROW_HEIGHT = 36
+const TABLE_HEADER_HEIGHT = 40
+const TABLE_OVERSCAN_ROWS = 10
+const TABLE_VIRTUALIZE_AFTER = 80
 
 export interface OcrReprocessOptions {
   language: 'rus' | 'eng' | 'rus+eng'
@@ -694,6 +698,9 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   const [calculationLoading, setCalculationLoading] = useState(false)
   const [calculationError, setCalculationError] = useState<string | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
+  const tableScrollRef = useRef<HTMLDivElement>(null)
+  const [tableScrollTop, setTableScrollTop] = useState(0)
+  const [tableViewportHeight, setTableViewportHeight] = useState(360)
   const requestRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const calculationRequestRef = useRef(0)
@@ -706,6 +713,25 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
     filter: null,
   })
   const autoSelectedCalculationColumnRef = useRef(false)
+  const virtualizedRows = Boolean(table && table.rows.length > TABLE_VIRTUALIZE_AFTER)
+  const virtualRowStart = virtualizedRows
+    ? Math.max(0, Math.floor(Math.max(0, tableScrollTop - TABLE_HEADER_HEIGHT) / TABLE_ROW_HEIGHT) - TABLE_OVERSCAN_ROWS)
+    : 0
+  const virtualRowEnd = virtualizedRows
+    ? Math.min(table?.rows.length ?? 0, Math.ceil((tableScrollTop + tableViewportHeight - TABLE_HEADER_HEIGHT) / TABLE_ROW_HEIGHT) + TABLE_OVERSCAN_ROWS)
+    : table?.rows.length ?? 0
+  const visibleTableRows = table?.rows.slice(virtualRowStart, virtualRowEnd) ?? []
+
+  useEffect(() => {
+    const element = tableScrollRef.current
+    if (!element || !table) return
+    const updateHeight = () => setTableViewportHeight(element.clientHeight || 360)
+    updateHeight()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateHeight)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [Boolean(table)])
 
   const load = async (
     offset: number,
@@ -715,6 +741,10 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   ) => {
     const query = { ...queryRef.current, ...override }
     if (!append) queryRef.current = query
+    if (!append && tableScrollRef.current) {
+      tableScrollRef.current.scrollTop = 0
+      setTableScrollTop(0)
+    }
     const requestId = ++requestRef.current
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -846,10 +876,15 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
       return
     }
     const target = table.rows.find((row) => row.number >= start && row.number <= end)
+    const targetIndex = target ? table.rows.indexOf(target) : -1
+    if (targetIndex >= 0 && virtualizedRows && (targetIndex < virtualRowStart || targetIndex >= virtualRowEnd)) {
+      if (tableScrollRef.current) tableScrollRef.current.scrollTo({ top: targetIndex * TABLE_ROW_HEIGHT, behavior: 'auto' })
+      return
+    }
     const exact = Boolean(target && !derived)
     onMatch(derived ? 'calculation' : exact ? 'exact' : selectedSource.locator.sheet ? 'page_only' : 'not_found')
     if (target) navigateToSource(tableRef.current?.querySelector(`[data-row-number="${target.number}"]`))
-  }, [table, selectedSource, onMatch])
+  }, [table, selectedSource, onMatch, virtualRowStart, virtualRowEnd, virtualizedRows])
 
   if (error && !table) return <div className="preview-inline-error">{error}</div>
   if (!table) return <div className="viewer-loading"><LoaderCircle className="spin" size={18} /> Загружаю оригинальную таблицу…</div>
@@ -1023,7 +1058,11 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
         </div>
       </>}
     </details>
-    <div className="csv-table-scroll">
+    <div
+      className={`csv-table-scroll${virtualizedRows ? ' is-virtualized' : ''}`}
+      ref={tableScrollRef}
+      onScroll={(event) => setTableScrollTop(event.currentTarget.scrollTop)}
+    >
       <table className="original-csv-table"><thead><tr><th scope="col">№</th>{table.columns.map((column, index) => {
         const activeSort = sortColumn === index
         const nextDirection = activeSort && sortDirection === 'asc' ? 'по убыванию' : 'по возрастанию'
@@ -1036,7 +1075,9 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
           </button>
         </th>
       })}</tr></thead>
-        <tbody>{table.rows.map((row) => {
+        <tbody>
+          {virtualizedRows && virtualRowStart > 0 && <tr className="csv-virtual-spacer" aria-hidden="true"><td colSpan={table.columns.length + 1} style={{ height: virtualRowStart * TABLE_ROW_HEIGHT }} /></tr>}
+          {visibleTableRows.map((row) => {
           const start = typeof selectedSource?.locator.row_start === 'number' ? selectedSource.locator.row_start : null
           const end = typeof selectedSource?.locator.row_end === 'number' ? selectedSource.locator.row_end : start
           const inRange = start !== null && row.number >= start && row.number <= (end ?? start)
@@ -1049,12 +1090,14 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
             const formulaLabel = formula
               ? formula.has_cached_value ? `Формула ${formula.formula}; отображено сохранённое значение.` : `Формула ${formula.formula}; сохранённого результата нет.`
               : undefined
-            return <td className={`${selectedCell ? 'source-cell-match' : ''}${formula && !formula.has_cached_value ? ' csv-formula-without-cache' : ''}`} key={`${row.number}-${index}`} title={formulaLabel} aria-label={formulaLabel}>
+            return <td className={`${selectedCell ? 'source-cell-match' : ''}${formula && !formula.has_cached_value ? ' csv-formula-without-cache' : ''}`} key={`${row.number}-${index}`} title={formulaLabel ? `${cell} · ${formulaLabel}` : cell} aria-label={formulaLabel || cell}>
               {selectedCell ? renderCellMatch(cell, null, null) : cell || (formula && !formula.has_cached_value ? 'Нет результата' : '—')}
               {formula && <span className="csv-formula-indicator" aria-hidden="true">fx</span>}
             </td>
           })}</tr>
-        })}</tbody>
+          })}
+          {virtualizedRows && virtualRowEnd < table.rows.length && <tr className="csv-virtual-spacer" aria-hidden="true"><td colSpan={table.columns.length + 1} style={{ height: (table.rows.length - virtualRowEnd) * TABLE_ROW_HEIGHT }} /></tr>}
+        </tbody>
       </table>
     </div>
     <div className="csv-table-footer"><span>{table.sheet ? `Лист «${table.sheet}» · ` : ''}Показано {table.rows.length.toLocaleString('ru-RU')} из {table.filtered_rows.toLocaleString('ru-RU')} строк{appliedFilter ? ` · всего в таблице ${table.total_rows.toLocaleString('ru-RU')}` : ''}</span>{table.rows.length < table.filtered_rows && <button type="button" className="button button-light" onClick={() => void load(table.offset + table.rows.length, true)} disabled={loading}>{loading ? 'Загружаю…' : 'Показать ещё'}</button>}</div>

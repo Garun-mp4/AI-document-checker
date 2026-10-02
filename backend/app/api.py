@@ -108,6 +108,14 @@ from app.services.parsing import (
     safe_filename,
 )
 from app.services.preview import MAX_PREVIEW_BLOCKS, build_preview
+from app.services.preview_cache import (
+    preview_cache_key,
+    preview_response_cache,
+    table_preview_cache_key,
+    table_response_cache,
+    table_search_cache_key,
+    table_search_response_cache,
+)
 from app.services.retrieval import search_chunks
 from app.services.source_locators import versioned_source_locator
 
@@ -484,6 +492,9 @@ async def delete_document(document_id: uuid.UUID, request: Request) -> None:
         await session.delete(document)
         await session.commit()
     original_search_source_cache.remove_document(str(document_id))
+    preview_response_cache.remove_document(str(document_id))
+    table_response_cache.remove_document(str(document_id))
+    table_search_response_cache.remove_document(str(document_id))
     for snapshot in snapshots:
         try:
             cleanup_files(snapshot, document_id)
@@ -526,21 +537,35 @@ async def document_preview(document_id: uuid.UUID) -> DocumentPreviewOut:
         document = await session.get(Document, document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Документ не найден.")
-        chunks = (await session.execute(
-            select(Chunk)
-            .where(Chunk.document_id == document_id, Chunk.version == await active_chunk_version(session, document))
-            .order_by(Chunk.ordinal)
-            .limit(MAX_PREVIEW_BLOCKS + 1)
-        )).scalars().all()
-        payload = build_preview(
+        metadata = document.metadata_json or {}
+        processing_version = await active_chunk_version(session, document)
+        cache_key = preview_cache_key(
             document_id=str(document.id),
+            input_checksum=document.input_checksum,
+            storage_path=document.storage_path,
             file_type=document.file_type,
-            metadata=document.metadata_json or {},
-            chunks=chunks,
-            original_url=f"/api/v1/documents/{document.id}/file",
-            total_blocks=document.chunk_count,
-            processing_version=document.active_version or 1,
+            processing_version=processing_version,
+            chunk_count=document.chunk_count,
+            metadata=metadata,
         )
+        payload = preview_response_cache.get(cache_key)
+        if payload is None:
+            chunks = (await session.execute(
+                select(Chunk)
+                .where(Chunk.document_id == document_id, Chunk.version == processing_version)
+                .order_by(Chunk.ordinal)
+                .limit(MAX_PREVIEW_BLOCKS + 1)
+            )).scalars().all()
+            payload = build_preview(
+                document_id=str(document.id),
+                file_type=document.file_type,
+                metadata=metadata,
+                chunks=chunks,
+                original_url=f"/api/v1/documents/{document.id}/file",
+                total_blocks=document.chunk_count,
+                processing_version=processing_version,
+            )
+            preview_response_cache.put(cache_key, DocumentPreviewOut.model_validate(payload).model_dump(mode="json"))
         return DocumentPreviewOut.model_validate(payload)
 
 
@@ -593,10 +618,29 @@ async def document_preview_table(
             raise HTTPException(status_code=404, detail="Документ не найден.")
         if document.file_type not in {"csv", "xlsx", "xls"}:
             raise HTTPException(status_code=400, detail="Табличный просмотр доступен только для CSV, XLSX и XLS.")
+        cache_key = table_preview_cache_key(
+            document_id=str(document.id),
+            input_checksum=document.input_checksum,
+            storage_path=document.storage_path,
+            file_type=document.file_type,
+            offset=offset,
+            limit=limit,
+            sheet=sheet,
+            sort_column=sort_column,
+            sort_direction=sort_direction,
+            filter_column=filter_column,
+            filter_kind=filter_kind,
+            filter_operator=filter_operator,
+            filter_value=filter_value,
+            focus_row=focus_row,
+        )
         try:
             path = owned_storage(document.storage_path, document_id)
         except DocumentParsingError as exc:
             raise HTTPException(status_code=404, detail='Исходный файл недоступен.') from exc
+    payload = table_response_cache.get(cache_key)
+    if payload is not None:
+        return TablePreviewOut.model_validate(payload)
     try:
         payload = await run_document_operation(
             'table', path, file_type=document.file_type, offset=offset, limit=limit, sheet=sheet,
@@ -606,7 +650,9 @@ async def document_preview_table(
         )
     except DocumentParsingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return TablePreviewOut.model_validate(payload)
+    serialized = TablePreviewOut.model_validate(payload).model_dump(mode="json")
+    table_response_cache.put(cache_key, serialized)
+    return TablePreviewOut.model_validate(serialized)
 
 
 def _table_calculation_text(result: dict[str, Any], scope: str) -> str:
@@ -868,20 +914,32 @@ async def search_document(
             original_path = owned_storage(storage_path, document_id)
         except DocumentParsingError as exc:
             raise HTTPException(status_code=404, detail="Исходный файл недоступен.") from exc
-        try:
-            result = await run_document_operation(
-                "search_table", original_path, file_type=file_type, query=q,
-                offset=offset, limit=limit,
-            )
-        except DocumentParsingError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        for match in result["matches"]:
-            match["locator"] = versioned_source_locator(
-                match["locator"],
-                document_id=document_id_text,
-                processing_version=version,
-                file_type=file_type,
-            )
+        table_search_key = table_search_cache_key(
+            document_id=document_id_text,
+            input_checksum=input_checksum,
+            file_type=file_type,
+            processing_version=version,
+            query=q,
+            offset=offset,
+            limit=limit,
+        )
+        result = table_search_response_cache.get(table_search_key)
+        if result is None:
+            try:
+                result = await run_document_operation(
+                    "search_table", original_path, file_type=file_type, query=q,
+                    offset=offset, limit=limit,
+                )
+            except DocumentParsingError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            for match in result["matches"]:
+                match["locator"] = versioned_source_locator(
+                    match["locator"],
+                    document_id=document_id_text,
+                    processing_version=version,
+                    file_type=file_type,
+                )
+            table_search_response_cache.put(table_search_key, result)
     elif file_type == "pdf" and any(isinstance(row.locator, dict) and row.locator.get("ocr") is True for row in chunk_rows):
         # Keep mixed/scanned PDF search on the active OCR source map so the
         # returned range and word boxes always refer to the same OCR version.

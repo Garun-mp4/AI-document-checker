@@ -1,0 +1,225 @@
+{
+  "label": "after",
+  "base_url": "http://localhost:5174",
+  "measured_at": "2026-10-02T03:38:12.756Z",
+  "app_version": {
+    "service": "api",
+    "version": "1.0.0",
+    "build_id": "e2e",
+    "commit": "synthetic",
+    "built_at": "2026-10-01T00:00:00Z"
+  },
+  "node_version": "v22.22.2",
+  "browser_version": "153.0.8010.12",
+  "runtime_versions": {
+    "docker_server": "29.6.1",
+    "docker_compose": "5.1.4",
+    "backend": {
+      "python": "3.12.14",
+      "fastapi": "0.141.1",
+      "sqlalchemy": "2.0.53",
+      "fastembed": "0.8.1",
+      "markitdown": "0.1.8",
+      "pypdf": "6.19.0",
+      "pdfplumber": "0.11.9",
+      "pytesseract": "0.3.13"
+    },
+    "toolchain": {
+      "tesseract": "tesseract 5.5.0",
+      "poppler": "pdftoppm version 25.03.0"
+    }
+  },
+  "host": {
+    "platform": "win32 10.0.26200",
+    "architecture": "x64",
+    "cpu_model": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
+    "logical_cpu_count": 12,
+    "memory_bytes": 8277110784
+  },
+  "browser_viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "viewer_first_render_ms": 326,
+  "browser_snapshot": {
+    "dom_nodes": 1003,
+    "canvas_count": 1,
+    "pdf_canvas_bytes": 180000,
+    "heap_used_bytes": 10000000,
+    "heap_limit_bytes": 3760000000
+  },
+  "container_memory": {
+    "sample_interval_ms": 1000,
+    "samples": 160,
+    "peak_by_container": [
+      {
+        "sampled_at": "2026-10-02T03:38:02.873Z",
+        "container": "document-checker-e2e-worker-1",
+        "memory_bytes": 2079837913,
+        "memory_limit_bytes": 4294967296,
+        "cpu_percent": "204.60%"
+      },
+      {
+        "sampled_at": "2026-10-02T03:38:05.874Z",
+        "container": "document-checker-e2e-web-1",
+        "memory_bytes": 8908702,
+        "memory_limit_bytes": 5159329464,
+        "cpu_percent": "2.49%"
+      },
+      {
+        "sampled_at": "2026-10-02T03:37:53.873Z",
+        "container": "document-checker-e2e-api-1",
+        "memory_bytes": 201012019,
+        "memory_limit_bytes": 4294967296,
+        "cpu_percent": "88.63%"
+      },
+      {
+        "sampled_at": "2026-10-02T03:37:57.873Z",
+        "container": "document-checker-e2e-db-1",
+        "memory_bytes": 107688755,
+        "memory_limit_bytes": 5159329464,
+        "cpu_percent": "5.64%"
+      }
+    ]
+  },
+  "scenario": {
+    "uploads": [
+      "mixed.pdf",
+      "large.csv"
+    ],
+    "upload_concurrency": 2,
+    "endpoint_samples": 4,
+    "memory_sampling": "continuous docker stats stream at approximately 1 second resolution"
+  },
+  "documents": [
+    {
+      "file": "mixed.pdf",
+      "input_bytes": 100697,
+      "upload_ms": 850,
+      "processing_ms": 12068,
+      "processing_performance_ms": {
+        "ocr_ms": 2835.03,
+        "parser_ms": 856.06,
+        "embedding_ms": 6730.56
+      },
+      "observed_stage_ms": {
+        "queued": 523,
+        "extracting": 857,
+        "ocr": 2920,
+        "indexing": 6721,
+        "indexing_checkpoint": 174,
+        "waiting_analysis": 516,
+        "analysis_request": 340,
+        "complete": 0
+      },
+      "status": "ready",
+      "chunk_count": 3,
+      "analysis_source": "ocr",
+      "ocr_status": "ready",
+      "endpoints": {
+        "preview": {
+          "first_ms": 8,
+          "median_ms": 6,
+          "samples_ms": [
+            8,
+            6,
+            6,
+            6
+          ],
+          "bytes": 5933
+        },
+        "markdown_page": {
+          "first_ms": 6,
+          "median_ms": 8,
+          "samples_ms": [
+            6,
+            13,
+            5,
+            9
+          ],
+          "bytes": 834
+        },
+        "search": {
+          "first_ms": 21,
+          "median_ms": 10,
+          "samples_ms": [
+            21,
+            13,
+            7,
+            7
+          ],
+          "bytes": 145
+        }
+      }
+    },
+    {
+      "file": "large.csv",
+      "input_bytes": 4846,
+      "upload_ms": 847,
+      "processing_ms": 11210,
+      "processing_performance_ms": {
+        "parser_ms": 855.41,
+        "embedding_ms": 5929.48,
+        "source_mapping_ms": 957.55,
+        "markdown_conversion_ms": 1714.29
+      },
+      "observed_stage_ms": {
+        "queued": 522,
+        "extracting": 3609,
+        "indexing": 5996,
+        "analysis_request": 1066,
+        "complete": 0
+      },
+      "status": "ready",
+      "chunk_count": 12,
+      "analysis_source": "native_fallback",
+      "ocr_status": "not_needed",
+      "endpoints": {
+        "preview": {
+          "first_ms": 9,
+          "median_ms": 8,
+          "samples_ms": [
+            9,
+            18,
+            6,
+            6
+          ],
+          "bytes": 35829
+        },
+        "markdown_page": {
+          "first_ms": 11,
+          "median_ms": 5,
+          "samples_ms": [
+            11,
+            5,
+            4,
+            4
+          ],
+          "bytes": 367
+        },
+        "search": {
+          "first_ms": 718,
+          "median_ms": 718,
+          "samples_ms": [
+            718,
+            717,
+            677,
+            743
+          ],
+          "bytes": 145
+        },
+        "table_page": {
+          "first_ms": 710,
+          "median_ms": 710,
+          "samples_ms": [
+            710,
+            710,
+            739,
+            708
+          ],
+          "bytes": 6901
+        }
+      }
+    }
+  ]
+}

@@ -48,6 +48,36 @@ def test_passage_embedding_uses_plain_text_and_expected_dimension(monkeypatch: p
     assert len(vectors[0]) == VECTOR_SIZE
 
 
+def test_passage_embeddings_are_reused_by_content_and_model_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake = FakeEmbedding()
+    monkeypatch.setattr(embeddings, "_model", lambda _cache_dir: fake)
+
+    first = embeddings.embed_passages(["same passage", "second passage"], str(tmp_path))
+    second = embeddings.embed_passages(["same passage", "second passage"], str(tmp_path))
+    monkeypatch.setattr(embeddings, "EMBEDDING_CACHE_VERSION", "fastembed-next")
+    third = embeddings.embed_passages(["same passage"], str(tmp_path))
+
+    assert first == second == third + [first[1]]
+    assert fake.calls == [(["same passage", "second passage"], 32), (["same passage"], 32)]
+
+
+def test_repeated_passages_are_embedded_once_and_returned_in_input_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake = FakeEmbedding()
+    monkeypatch.setattr(embeddings, "_model", lambda _cache_dir: fake)
+
+    vectors = embeddings.embed_passages(["second", "first", "second"], str(tmp_path))
+
+    assert fake.calls == [(["second", "first"], 32)]
+    assert vectors[0] == vectors[2]
+    assert len(vectors) == 3
+
+
 def test_query_embedding_uses_plain_text_and_expected_dimension(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     fake = FakeEmbedding()
     monkeypatch.setattr(embeddings, "_model", lambda _cache_dir: fake)

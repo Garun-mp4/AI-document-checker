@@ -35,11 +35,11 @@ class RemoteCodex:
 
 
 real_convert = MarkItDownService.convert
-async def convert(self, path):
+async def convert(self, path, *, cache_checksum=None):
     state = await asyncio.to_thread(request, 'worker-control')
     if state['markdown_failure']:
         raise MarkdownConversionError('Synthetic conversion failure')
-    return await real_convert(self, path)
+    return await real_convert(self, path, cache_checksum=cache_checksum)
 MarkItDownService.convert = convert
 
 

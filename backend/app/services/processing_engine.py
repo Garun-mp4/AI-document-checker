@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -60,6 +61,7 @@ class ProcessingAttempt:
         self.job = job
         self.codex = codex
         self.stage_hook = stage_hook
+        self.performance_ms: dict[str, float] = {}
         self.prefix = f'{job.document_id}.v{job.version}.{job.owner.hex}'
         self.markitdown = MarkItDownService(settings.upload_dir)
         ocr = getattr(job, 'parameters', {}).get('ocr', {})
@@ -79,7 +81,7 @@ class ProcessingAttempt:
             if job.stage != name:
                 job.stage_started_at = await session.scalar(select(func.clock_timestamp()))
             job.stage = name
-            job.progress = progress
+            job.progress = {**progress, 'performance_ms': dict(self.performance_ms)}
             if document.status != 'ready':
                 document.status = ('analyzing' if name in ('analysis_request', 'waiting_analysis')
                                    else 'indexing' if name == 'indexing_checkpoint' else name)
@@ -87,6 +89,11 @@ class ProcessingAttempt:
                     document.ocr_status = 'processing'
         if self.stage_hook:
             await self.stage_hook(self.job, name)
+
+    async def record_timing(self, name: str, elapsed_ms: float) -> None:
+        self.performance_ms[name] = round(max(0.0, elapsed_ms), 2)
+        async with fenced(self.job.id, self.job.owner) as (_session, _document, job):
+            job.progress = {**(job.progress or {}), 'performance_ms': dict(self.performance_ms)}
 
     async def write(self, path, contents):
         async with fenced(self.job.id, self.job.owner):
@@ -122,7 +129,9 @@ class ProcessingAttempt:
                         if isinstance(locator, dict) and locator.get('ocr') is True
                     ]
         await self.stage('extracting')
-        parsed = await parse_uploaded(path, filename, configuration=self.configuration)
+        parser_started = time.perf_counter()
+        parsed = await parse_uploaded(path, filename, cache_checksum=checksum, configuration=self.configuration)
+        await self.record_timing('parser_ms', (time.perf_counter() - parser_started) * 1_000)
         # The original Markdown upload is already named <id>.md. Use a
         # separate artifact name so conversion/fallback cannot overwrite
         # or unlink the immutable original (including its encoding).
@@ -160,9 +169,12 @@ class ProcessingAttempt:
             async def report_ocr_progress(processed_pages: int, total: int) -> None:
                 await self.stage('ocr', processed_pages=processed_pages, total_pages=total)
 
+            ocr_started = time.perf_counter()
             ocr_result = await ocr_uploaded(path, configuration=self.configuration, pages=candidate_pages,
+                                            cache_checksum=checksum,
                                             allow_empty=bool(parsed.blocks) or bool(previous_ocr_blocks),
                                             progress_callback=report_ocr_progress)
+            await self.record_timing('ocr_ms', (time.perf_counter() - ocr_started) * 1_000)
             selected_pages = set(candidate_pages)
             deferred_results = [
                 {
@@ -229,10 +241,14 @@ class ProcessingAttempt:
                     raise DocumentParsingError("В PDF не найден читаемый текст: документ может состоять из пустых страниц.")
                 raise DocumentParsingError("Не удалось извлечь текст из файла.")
             try:
-                markdown_result = await self.markitdown.convert(path)
+                markdown_started = time.perf_counter()
+                markdown_result = await self.markitdown.convert(path, cache_checksum=checksum)
+                await self.record_timing('markdown_conversion_ms', (time.perf_counter() - markdown_started) * 1_000)
                 markdown_text = markdown_result.markdown
                 await self.write(markdown_path, markdown_result.markdown)
-                mapped_blocks, markdown_mapping = await map_uploaded(path, filename, markdown_path)
+                mapping_started = time.perf_counter()
+                mapped_blocks, markdown_mapping = await map_uploaded(path, filename, markdown_path, cache_checksum=checksum)
+                await self.record_timing('source_mapping_ms', (time.perf_counter() - mapping_started) * 1_000)
                 if not mapped_blocks or not any(block.locator.get("source_locators") for block in mapped_blocks):
                     raise MarkdownConversionError("MarkItDown не смог связать Markdown с исходными местами документа.")
                 await self.write(markdown_map_path, serialize_map(markdown_mapping))
@@ -301,11 +317,15 @@ class ProcessingAttempt:
             snapshot['ocr_error'] = 'Не удалось распознать текст на страницах: ' + ', '.join(map(str, unreadable_pages)) + '.'
         derived = _computed_blocks(parsed)
         await self.stage('indexing', completed=0, total=len(analysis_blocks))
+        embedding_elapsed_ms = 0.0
         for start in range(0, len(analysis_blocks), 48):
             batch = analysis_blocks[start:start+48]
             batch_path = self.artifact('embedding.json')
             await self.write(batch_path, json.dumps([b[0] for b in batch], ensure_ascii=False))
+            embedding_started = time.perf_counter()
             vectors = await run_document_operation('embed', batch_path)
+            embedding_elapsed_ms += (time.perf_counter() - embedding_started) * 1_000
+            await self.record_timing('embedding_ms', embedding_elapsed_ms)
             async with fenced(self.job.id, self.job.owner) as (session, _, job):
                 remove_storage(batch_path)
                 session.add_all([Chunk(

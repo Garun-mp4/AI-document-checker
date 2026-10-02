@@ -66,8 +66,10 @@ for (const [name, renderer] of [
     if (name.startsWith('cp1251')) await expect(page.locator('#document-original-viewer')).toContainText('Алексей|Альфа'.split('|')[renderer === 'csv' ? 1 : 0])
     if (name === 'multipage.pdf') {
       await expect(page.locator('.preview-page-label')).toHaveText('1 / 3')
+      await expect(page.locator('.pdf-page-sheet canvas')).toHaveCount(1)
       await page.getByRole('button', { name: 'Следующая страница' }).click()
       await expect(page.locator('.preview-page-label')).toHaveText('2 / 3')
+      await expect(page.locator('.pdf-page-sheet canvas')).toHaveCount(1)
       await originalVisible(page, 'pdf')
     }
     if (name === 'multipage.docx') await expect(page.locator('.docx-render-host')).toContainText('Вторая страница')
@@ -87,12 +89,21 @@ test('CSV aggregates and actual row pagination', async ({ page }) => {
   await expect(metrics).toContainText('60')
   await expect(metrics).toContainText('300')
   await upload(page, 'large.csv')
-  await expect(page.locator('.original-csv-table tbody tr')).toHaveCount(100)
+  await expect(page.locator('.csv-table-footer')).toContainText('Показано 100 из 240 строк')
+  expect(await page.locator('.original-csv-table tbody tr[data-row-number]').count()).toBeLessThan(40)
   await page.getByRole('button', { name: 'Показать ещё', exact: true }).click()
-  await expect(page.locator('.original-csv-table tbody tr')).toHaveCount(200)
+  await expect(page.locator('.csv-table-footer')).toContainText('Показано 200 из 240 строк')
   await page.getByRole('button', { name: 'Показать ещё', exact: true }).click()
-  await expect(page.locator('.original-csv-table tbody tr')).toHaveCount(240)
+  await expect(page.locator('.csv-table-footer')).toContainText('Показано 240 из 240 строк')
+  expect(await page.locator('.original-csv-table tbody tr[data-row-number]').count()).toBeLessThan(40)
   await expect(page.getByRole('button', { name: 'Показать ещё', exact: true })).toHaveCount(0)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  const tableScroll = page.locator('.csv-table-scroll')
+  expect((await tableScroll.boundingBox())?.height).toBeLessThan(380)
+  await tableScroll.evaluate((element) => element.scrollTo({ top: element.scrollHeight, behavior: 'auto' }))
+  await expect(page.locator('.original-csv-table tbody tr[data-row-number="241"]')).toBeAttached()
+  expect(await page.locator('.original-csv-table tbody tr[data-row-number]').count()).toBeLessThan(40)
 })
 
 test('Table tools query every row and save both reproducible calculation scopes', async ({ page }) => {
@@ -101,17 +112,17 @@ test('Table tools query every row and save both reproducible calculation scopes'
 
   await page.getByRole('button', { name: 'Сортировать по столбцу Часы по возрастанию' }).click()
   await page.getByRole('button', { name: 'Сортировать по столбцу Часы по убыванию' }).click()
-  await expect(table.locator('tbody tr').first()).toHaveAttribute('data-row-number', '241')
-  await expect(table.locator('tbody tr').first()).toContainText('Проект 240')
+  await expect(table.locator('tbody tr[data-row-number]').first()).toHaveAttribute('data-row-number', '241')
+  await expect(table.locator('tbody tr[data-row-number]').first()).toContainText('Проект 240')
 
   await page.getByLabel('Столбец фильтра').selectOption('0')
   await page.getByLabel('Тип фильтра').selectOption('text')
   await page.getByLabel('Условие фильтра').selectOption('contains')
   await page.getByLabel('Значение фильтра').fill('Проект 237')
   await page.getByRole('button', { name: 'Применить', exact: true }).click()
-  await expect(table.locator('tbody tr')).toHaveCount(1)
-  await expect(table.locator('tbody tr').first()).toHaveAttribute('data-row-number', '238')
-  await expect(table.locator('tbody tr').first()).toContainText('Проект 237')
+  await expect(table.locator('tbody tr[data-row-number]')).toHaveCount(1)
+  await expect(table.locator('tbody tr[data-row-number]').first()).toHaveAttribute('data-row-number', '238')
+  await expect(table.locator('tbody tr[data-row-number]').first()).toContainText('Проект 237')
   await expect(page.locator('.csv-table-footer')).toContainText('1 из 1 строк')
 
   await page.locator('.csv-calculation-panel > summary').click()
@@ -172,6 +183,8 @@ test('Table viewer resets filters, sorting and calculations when a new document 
 
 test('export dialog downloads selected answers as Markdown and saved analysis as PDF', async ({ page }) => {
   await upload(page, 'sample.txt')
+  const uploadQueue = page.getByRole('region', { name: 'Очередь загрузки документов' })
+  if (await uploadQueue.isVisible()) await uploadQueue.getByRole('button', { name: 'Свернуть очередь загрузки' }).click()
   await page.setViewportSize({ width: 390, height: 844 })
   const openExport = page.getByRole('button', { name: 'Экспорт', exact: true })
   await expect(openExport).toBeVisible()

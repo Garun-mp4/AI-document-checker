@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
 from app.config import settings
+from app.services import isolated_documents, markitdown_service
 from app.services.markdown_mapping import map_markdown
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
 from app.services.parsing import SourceBlock, parse_document
@@ -27,6 +29,32 @@ def test_markitdown_creates_markdown_for_every_supported_fixture(filename: str, 
 
     assert result.markdown.strip()
     assert len(result.markdown) < 5_000_000
+
+
+def test_markitdown_conversion_is_reused_after_upload_checksum_matches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import isolated_documents
+
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+    target = tmp_path / "source.txt"
+    target.write_text("synthetic content", encoding="utf-8")
+    calls = 0
+
+    async def convert(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"markdown": "synthetic content\n", "title": None, "converter_version": "0.1.8"}
+
+    monkeypatch.setattr(isolated_documents, "run_document_operation", convert)
+    service = MarkItDownService(tmp_path)
+
+    first = asyncio.run(service.convert(target))
+    second = asyncio.run(service.convert(target))
+
+    assert first == second
+    assert calls == 1
 
 
 def test_markitdown_rejects_paths_outside_upload_root(tmp_path: Path) -> None:
@@ -97,6 +125,39 @@ def test_markitdown_rejects_missing_file_and_oversized_result(monkeypatch: pytes
     monkeypatch.setattr(settings, "markdown_max_chars", 4)
     with pytest.raises(MarkdownConversionError, match="безопасный размер"):
         service.convert_local(target)
+
+
+def test_markdown_conversion_cache_invalidates_by_converter_and_size_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+    source = tmp_path / "source.txt"
+    source.write_text("source checksum anchor", encoding="utf-8")
+    calls = 0
+
+    async def convert(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "markdown": "# Cached",
+            "title": "Cached",
+            "converter_version": markitdown_service.MARKITDOWN_VERSION,
+        }
+
+    monkeypatch.setattr(isolated_documents, "run_document_operation", convert)
+    service = MarkItDownService(tmp_path)
+    first = asyncio.run(service.convert(source, cache_checksum="d" * 64))
+    second = asyncio.run(service.convert(source, cache_checksum="d" * 64))
+    monkeypatch.setattr(markitdown_service, "MARKITDOWN_VERSION", "0.1.9")
+    changed_converter = asyncio.run(service.convert(source, cache_checksum="d" * 64))
+    monkeypatch.setattr(settings, "markdown_max_chars", settings.markdown_max_chars - 1)
+    changed_limit = asyncio.run(service.convert(source, cache_checksum="d" * 64))
+
+    assert first == second
+    assert changed_converter.converter_version == "0.1.9"
+    assert changed_limit == changed_converter
+    assert calls == 3
 
 
 def test_mapping_keeps_original_locator_and_markdown_range() -> None:
