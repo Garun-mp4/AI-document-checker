@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 
 import pytest
+from openai_codex import AsyncCodex
+from openai_codex.api import AsyncThread
 
 from app.config import settings
 from app.services.codex import (
@@ -187,3 +190,152 @@ def test_validate_choice_rejects_an_unavailable_model_without_fallback(
 
     with pytest.raises(CodexModelUnavailable, match="недоступны"):
         asyncio.run(service.validate_choice("gpt-6.1-sol", "high"))
+
+
+class _FakeStreamTurn:
+    def stream(self):
+        async def notifications():
+            yield SimpleNamespace(method="item/agentMessage/delta", payload=SimpleNamespace(delta='{"answer":'))
+            yield SimpleNamespace(
+                method="turn/completed",
+                payload=SimpleNamespace(turn=SimpleNamespace(error=None)),
+            )
+
+        return notifications()
+
+
+class _FakeStreamThread:
+    id = "thread-structured-test"
+
+    def __init__(self):
+        self.turn_input = None
+        self.turn_options = None
+
+    async def turn(self, message, **options):
+        self.turn_input = message
+        self.turn_options = options
+        return _FakeStreamTurn()
+
+
+class _FakeStreamClient:
+    def __init__(self):
+        self.started_with = None
+        self.thread = _FakeStreamThread()
+
+    async def thread_start(self, **options):
+        self.started_with = options
+        return self.thread
+
+
+def test_pinned_codex_sdk_supports_structured_stream_and_ephemeral_thread() -> None:
+    assert "ephemeral" in inspect.signature(AsyncCodex.thread_start).parameters
+    assert "output_schema" in inspect.signature(AsyncThread.turn).parameters
+    assert "output_schema" in inspect.signature(AsyncThread.run).parameters
+
+
+class _FakeCompletionThread:
+    async def run(self, message, **options):
+        self.input = message
+        self.options = options
+        return SimpleNamespace(error=None, final_response='{"answer":"ok"}')
+
+
+class _FakeCompletionClient:
+    def __init__(self):
+        self.started_with = None
+        self.thread = _FakeCompletionThread()
+
+    async def thread_start(self, **options):
+        self.started_with = options
+        return self.thread
+
+
+def test_complete_uses_explicit_ephemeral_structured_read_only_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = CodexService()
+    client = _FakeCompletionClient()
+    service.client = client
+    schema = {"type": "object", "required": ["answer"], "additionalProperties": False}
+
+    async def fake_status(*, refresh: bool):
+        assert refresh is True
+        return {
+            "authenticated": True,
+            "models": [{"id": "gpt-6-luna", "reasoning_efforts": [{"value": "medium"}]}],
+        }
+
+    monkeypatch.setattr(service, "status", fake_status)
+
+    result = asyncio.run(service.complete(
+        {"user_question": "Synthetic question only"}, schema, model="gpt-6-luna", reasoning_effort="medium",
+    ))
+
+    assert result == '{"answer":"ok"}'
+    assert client.started_with["ephemeral"] is True
+    assert client.started_with["approval_mode"].value == "deny_all"
+    assert client.started_with["sandbox"].value == "read-only"
+    assert client.thread.options["output_schema"] == schema
+    assert client.thread.options["approval_mode"].value == "deny_all"
+    assert client.thread.options["sandbox"].value == "read-only"
+
+
+def test_stream_chat_forwards_structured_schema_in_a_new_ephemeral_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = CodexService()
+    client = _FakeStreamClient()
+    service.client = client
+
+    async def ready():
+        return None
+
+    monkeypatch.setattr(service, "require_ready", ready)
+    schema = {"type": "object", "required": ["answer"], "additionalProperties": False}
+    instructions = "Trusted application help instructions."
+
+    async def collect():
+        return [item async for item in service.stream_chat(
+            {"user_question": "Как найти модель?"},
+            output_schema=schema,
+            base_instructions=instructions,
+            ephemeral=True,
+        )]
+
+    events = asyncio.run(collect())
+
+    assert events[0] == {"kind": "thread", "thread_id": "thread-structured-test"}
+    assert events[1] == {"kind": "delta", "text": '{"answer":'}
+    assert client.started_with["ephemeral"] is True
+    assert client.started_with["base_instructions"] == instructions
+    assert client.thread.turn_options["output_schema"] == schema
+    assert client.thread.turn_options["approval_mode"].value == "deny_all"
+
+
+def test_stream_chat_defaults_preserve_existing_persistent_chat_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = CodexService()
+    client = _FakeStreamClient()
+    service.client = client
+
+    async def ready():
+        return None
+
+    monkeypatch.setattr(service, "require_ready", ready)
+
+    async def collect():
+        return [item async for item in service.stream_chat({"question": "Existing chat question"})]
+
+    events = asyncio.run(collect())
+
+    assert events[0] == {"kind": "thread", "thread_id": "thread-structured-test"}
+    assert "ephemeral" not in client.started_with
+    assert client.started_with["base_instructions"]
+    assert "output_schema" not in client.thread.turn_options
+
+
+def test_stream_chat_does_not_claim_ephemeral_for_a_resumed_thread() -> None:
+    service = CodexService()
+
+    async def collect():
+        return [item async for item in service.stream_chat(
+            {"user_question": "Вопрос"}, "persisted-thread", ephemeral=True,
+        )]
+
+    with pytest.raises(ValueError, match="только для нового"):
+        asyncio.run(collect())

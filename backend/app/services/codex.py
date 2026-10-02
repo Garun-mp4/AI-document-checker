@@ -262,11 +262,17 @@ class CodexService:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        base_instructions: str | None = None,
+        ephemeral: bool | None = None,
     ) -> AsyncIterator[dict[str, str]]:
+        if existing_thread_id is not None and ephemeral is not None:
+            raise ValueError("Режим ephemeral можно задавать только для нового Codex thread.")
         await self.require_ready()
         assert self.client is not None
         selected_model = model or settings.codex_model
         selected_effort = reasoning_effort or settings.codex_reasoning_effort
+        instructions = base_instructions if base_instructions is not None else BASE_INSTRUCTIONS
         thread = None
         if existing_thread_id:
             try:
@@ -275,30 +281,38 @@ class CodexService:
                     approval_mode=ApprovalMode.deny_all,
                     model=selected_model,
                     cwd=self._work_dir,
-                    base_instructions=BASE_INSTRUCTIONS,
+                    base_instructions=instructions,
                     sandbox=Sandbox.read_only,
                 )
             except (CodexError, OSError) as exc:
                 logger.info("Could not resume Codex chat thread (%s)", type(exc).__name__)
         if thread is None:
-            thread = await self.client.thread_start(
-                approval_mode=ApprovalMode.deny_all,
-                model=selected_model,
-                cwd=self._work_dir,
-                base_instructions=BASE_INSTRUCTIONS,
-                sandbox=Sandbox.read_only,
-            )
+            thread_options: dict[str, Any] = {
+                "approval_mode": ApprovalMode.deny_all,
+                "model": selected_model,
+                "cwd": self._work_dir,
+                "base_instructions": instructions,
+                "sandbox": Sandbox.read_only,
+            }
+            if ephemeral is not None:
+                thread_options["ephemeral"] = ephemeral
+            thread = await self.client.thread_start(**thread_options)
         yield {"kind": "thread", "thread_id": thread.id}
+        turn_options: dict[str, Any] = {
+            "approval_mode": ApprovalMode.deny_all,
+            "model": selected_model,
+            "effort": selected_effort,
+            "sandbox": Sandbox.read_only,
+        }
+        if output_schema is not None:
+            turn_options["output_schema"] = output_schema
         turn = await thread.turn(
             ExternalMessage(
                 tool_name="document_checker",
                 namespace="untrusted_document_context",
                 content=json.dumps(payload, ensure_ascii=False),
             ),
-            approval_mode=ApprovalMode.deny_all,
-            model=selected_model,
-            effort=selected_effort,
-            sandbox=Sandbox.read_only,
+            **turn_options,
         )
         async for notification in turn.stream():
             method = getattr(notification, "method", "")
