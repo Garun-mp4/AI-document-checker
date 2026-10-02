@@ -131,6 +131,11 @@ class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (
         CheckConstraint("generation_status IN ('complete','streaming','interrupted')", name='ck_messages_generation_status'),
+        CheckConstraint(
+            "(ui_target_id IS NULL AND ui_target_catalog_version IS NULL AND ui_target_build_id IS NULL) OR "
+            "(ui_target_id IS NOT NULL AND ui_target_catalog_version IS NOT NULL AND ui_target_build_id IS NOT NULL)",
+            name='ck_messages_ui_target_metadata',
+        ),
         Index('ix_messages_chat_epoch', 'chat_id', 'context_epoch', 'created_at'),
     )
 
@@ -146,6 +151,9 @@ class Message(Base):
     generation_status: Mapped[str] = mapped_column(String(16), nullable=False, default='complete', server_default='complete')
     generation_error: Mapped[str | None] = mapped_column(Text)
     source_version: Mapped[int | None] = mapped_column(Integer)
+    ui_target_id: Mapped[str | None] = mapped_column(String(80))
+    ui_target_catalog_version: Mapped[str | None] = mapped_column(String(32))
+    ui_target_build_id: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
 
     chat: Mapped[Chat] = relationship(back_populates="messages")

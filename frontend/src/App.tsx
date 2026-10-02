@@ -19,6 +19,7 @@ import {
   FileText,
   FileUp,
   LoaderCircle,
+  LocateFixed,
   Maximize2,
   MoreHorizontal,
   Menu,
@@ -53,6 +54,14 @@ import { UploadQueue } from './components/UploadQueue'
 import { LocalDataDialog } from './components/LocalDataDialog'
 import type { UploadQueueEntry, UploadQueueState } from './components/UploadQueue'
 import { useBuildVersion } from './useBuildVersion'
+import {
+  APP_HELP_CATALOG_VERSION,
+  APP_HELP_UI_TARGET_LABELS,
+  highlightAppHelpTarget,
+  isAppHelpUiTargetId,
+  resolveAppHelpTarget,
+  useAppHelpTargetRef,
+} from './appHelpUiTargets'
 
 const API = '/api/v1'
 const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
@@ -73,6 +82,16 @@ type AnalysisLayoutMode = 'auto' | 'stacked' | 'split'
 function restoreAnalysisLayoutMode(): AnalysisLayoutMode {
   const stored = localStorage.getItem(ANALYSIS_LAYOUT_STORAGE_KEY)
   return stored === 'stacked' || stored === 'split' ? stored : 'auto'
+}
+
+function canShowAppHelpTarget(message: ChatMessage, buildCheck: ReturnType<typeof useBuildVersion>['check']): boolean {
+  return message.role === 'assistant'
+    && message.generation_status !== 'streaming'
+    && message.generation_status !== 'interrupted'
+    && isAppHelpUiTargetId(message.ui_target_id)
+    && message.ui_target_catalog_version === APP_HELP_CATALOG_VERSION
+    && buildCheck.kind === 'matched'
+    && message.ui_target_build_id === buildCheck.api.build_id
 }
 
 function restoreUploadQueue(): UploadQueueEntry[] {
@@ -375,6 +394,22 @@ function App() {
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
   const reasoningTriggerRef = useRef<HTMLButtonElement>(null)
   const exportTriggerRef = useRef<HTMLButtonElement>(null)
+  const uploadHelpTargetRef = useAppHelpTargetRef('document.upload.open')
+  const mobileLibraryToggleHelpTargetRef = useAppHelpTargetRef('chat-library.toggle')
+  const libraryToggleHelpTargetRef = useAppHelpTargetRef('chat-library.toggle')
+  const newChatHelpTargetRef = useAppHelpTargetRef('chat.new')
+  const codexSettingsHelpTargetRef = useAppHelpTargetRef('codex.settings.open')
+  const workspaceLayoutHelpTargetRef = useAppHelpTargetRef('workspace.layout.select')
+  const originalTabHelpTargetRef = useAppHelpTargetRef('document.original.open')
+  const markdownTabHelpTargetRef = useAppHelpTargetRef('document.markdown.open')
+  const bookmarksHelpTargetRef = useAppHelpTargetRef('document.bookmarks.open')
+  const exportHelpTargetRef = useAppHelpTargetRef('document.export.open')
+  const localDataHelpTargetRef = useAppHelpTargetRef('local-data.open')
+  const citationsHelpTargetRef = useAppHelpTargetRef('document.citations.open')
+  const attachExportTargetRef = useCallback((element: HTMLButtonElement | null) => {
+    exportTriggerRef.current = element
+    exportHelpTargetRef(element)
+  }, [exportHelpTargetRef])
   const resizeState = useRef<{ startX: number; startWidth: number } | null>(null)
   const searchNavigationRef = useRef(0)
   const skipNextChatAutoScrollRef = useRef(false)
@@ -392,6 +427,36 @@ function App() {
     setToast(message)
     window.setTimeout(() => setToast(''), 4_500)
   }, [])
+
+  const showAppHelpTarget = useCallback((message: ChatMessage): string => {
+    if (!canShowAppHelpTarget(message, buildVersionCheck) || !isAppHelpUiTargetId(message.ui_target_id)) {
+      return 'Подсказка недоступна для этой версии. Следуйте текстовым шагам в ответе.'
+    }
+
+    const resolution = resolveAppHelpTarget(message.ui_target_id)
+    if (!resolution.available) {
+      const fallback: Record<typeof resolution.reason, string> = {
+        unknown: 'Цель подсказки не распознана. Следуйте текстовым шагам в ответе.',
+        missing: 'Элемент сейчас недоступен. Следуйте текстовым шагам в ответе.',
+        hidden: 'Элемент сейчас скрыт. Откройте нужную область и повторите поиск.',
+        disabled: 'Элемент временно отключён. Повторите поиск, когда он станет доступен.',
+        loading: 'Элемент занят загрузкой. Повторите поиск после её завершения.',
+        covered: 'Элемент перекрыт открытым окном. Закройте его и повторите поиск.',
+        ambiguous: 'На экране найдено несколько одинаковых элементов. Подсветка не запущена.',
+      }
+      return fallback[resolution.reason]
+    }
+
+    const element = resolution.element
+    const rect = element.getBoundingClientRect()
+    const outsideViewport = rect.top < 0 || rect.bottom > window.innerHeight || rect.left < 0 || rect.right > window.innerWidth
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (outsideViewport) {
+      element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: reducedMotion ? 'instant' : 'smooth' })
+    }
+    highlightAppHelpTarget(element)
+    return `Подсветка «${APP_HELP_UI_TARGET_LABELS[message.ui_target_id]}» включена на 1,8 секунды. Фокус не перемещён.`
+  }, [buildVersionCheck])
 
   const closeExportDialog = useCallback(() => {
     if (exportPending) return
@@ -1633,6 +1698,7 @@ function App() {
               text?: string; answer?: string; citations?: StreamCitation[]; sources?: StreamCitation[]; message?: string
               user_message_id?: string; assistant_message_id?: string; context_epoch?: number
               model?: string; reasoning_effort?: string; source_version?: number
+              ui_target_id?: string | null; ui_target_catalog_version?: string | null; ui_target_build_id?: string | null
             }
             if (event === 'started') {
               userId = data.user_message_id ?? userId
@@ -1683,9 +1749,13 @@ function App() {
               receivedFinal = true
               assistantId = data.assistant_message_id ?? assistantId
               const citations = (data.citations ?? []).map(({ label: _label, ...item }) => item)
+              const uiTargetId = isAppHelpUiTargetId(data.ui_target_id) ? data.ui_target_id : null
               if (assistantId && chatRef.current?.id === targetChat.id) {
                 setMessages((current) => current.map((item) => item.id === assistantId ? {
                   ...item, content: data.answer ?? streamed, citations, generation_status: 'complete', generation_error: null,
+                  ui_target_id: uiTargetId,
+                  ui_target_catalog_version: uiTargetId && typeof data.ui_target_catalog_version === 'string' ? data.ui_target_catalog_version : null,
+                  ui_target_build_id: uiTargetId && typeof data.ui_target_build_id === 'string' ? data.ui_target_build_id : null,
                 } : item))
               }
               void refreshLibrary()
@@ -2079,7 +2149,7 @@ function App() {
       <a className="skip-link" href="#main-content">К содержанию</a>
       <header className="topbar">
         <div className="topbar-brand">
-          <button className="icon-button mobile-menu" aria-label="Открыть документы" onClick={() => setMobileLibraryOpen(true)}><Menu size={19} /></button>
+          <button ref={mobileLibraryToggleHelpTargetRef} data-help-target="chat-library.toggle" className="icon-button mobile-menu" aria-label="Открыть документы" onClick={() => setMobileLibraryOpen(true)}><Menu size={19} /></button>
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
           <span className="brand-name">document<span>checker</span></span>
           <span className="brand-divider" />
@@ -2087,6 +2157,8 @@ function App() {
         </div>
         <div className="topbar-actions">
           <button
+            ref={codexSettingsHelpTargetRef}
+            data-help-target="codex.settings.open"
             className={`connection-button ${authReady ? 'is-connected' : ''}`}
             aria-label={authReady ? `Codex подключён: ${codexModelLabel(codex)}, ${codexReasoningLabel(codex?.reasoning_effort)}` : 'Подключить Codex'}
             onClick={() => setAuthOpen(true)}
@@ -2096,7 +2168,7 @@ function App() {
             {authReady && <span className="connection-model">{codexModelLabel(codex)} · {codexReasoningLabel(codex?.reasoning_effort)}</span>}
           </button>
           <button className="icon-button chat-visibility-toggle" type="button" aria-label={chatVisible ? 'Свернуть чат' : 'Открыть чат'} title={chatVisible ? 'Свернуть чат' : 'Открыть чат'} aria-expanded={chatVisible} aria-controls="document-chat" onClick={toggleChat}>{chatVisible ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
-          <button className="button button-light local-data-trigger" type="button" aria-label="Управление локальными данными" title="Управление локальными данными" onClick={() => setLocalDataOpen(true)}>
+          <button ref={localDataHelpTargetRef} data-help-target="local-data.open" className="button button-light local-data-trigger" type="button" aria-label="Управление локальными данными" title="Управление локальными данными" onClick={() => setLocalDataOpen(true)}>
             <Database size={15} /><span>Локальные данные</span>
           </button>
           <UploadQueue
@@ -2109,7 +2181,7 @@ function App() {
             onDismiss={(itemId) => setUploadQueue((current) => current.filter((item) => item.id !== itemId))}
             disabled={isUploading}
           />
-          <button className="button button-dark header-upload" onClick={() => fileInput.current?.click()} disabled={isUploading}>
+          <button ref={uploadHelpTargetRef} data-help-target="document.upload.open" className="button button-dark header-upload" onClick={() => fileInput.current?.click()} disabled={isUploading}>
             {isUploading ? <LoaderCircle className="spin" size={16} /> : <FileUp size={16} />}
             <span>Загрузить файл</span>
           </button>
@@ -2119,12 +2191,12 @@ function App() {
       <aside id="chat-library" className={`library ${sidebarCollapsed ? 'library-manual-collapsed' : ''}`} aria-label="История чатов" aria-expanded={!sidebarCollapsed}>
         <div className="library-heading">
           <div className="library-title">Чаты</div>
-          <button className="icon-button collapse-library" aria-label={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} aria-controls="chat-library" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} onClick={() => setSidebarCollapsed((value) => !value)}>
+          <button ref={libraryToggleHelpTargetRef} data-help-target="chat-library.toggle" className="icon-button collapse-library" aria-label={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} aria-controls="chat-library" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Развернуть библиотеку' : 'Свернуть библиотеку'} onClick={() => setSidebarCollapsed((value) => !value)}>
             {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
           </button>
           <button className="icon-button close-mobile-panel" aria-label="Закрыть библиотеку" onClick={() => setMobileLibraryOpen(false)}><X size={18} /></button>
         </div>
-        <button className="library-add" title="Новый чат" aria-label="Новый чат" onClick={startNewChat} disabled={isUploading}>
+        <button ref={newChatHelpTargetRef} data-help-target="chat.new" className="library-add" title="Новый чат" aria-label="Новый чат" onClick={startNewChat} disabled={isUploading}>
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
           <span>Новый чат</span>
         </button>
@@ -2222,7 +2294,7 @@ function App() {
                 </div>
               </div>
               <div className="document-toolbar-actions">
-                {visibleStatus.status === 'ready' && document && <button ref={exportTriggerRef} className="button button-light export-trigger" type="button" onClick={startExport} disabled={isSending || exportPending} title={isSending ? 'Дождитесь завершения ответа' : 'Скачать сохранённые ответы и источники'}><Download size={15} /> Экспорт</button>}
+                {visibleStatus.status === 'ready' && document && <button ref={attachExportTargetRef} data-help-target="document.export.open" className="button button-light export-trigger" type="button" onClick={startExport} disabled={isSending || exportPending} title={isSending ? 'Дождитесь завершения ответа' : 'Скачать сохранённые ответы и источники'}><Download size={15} /> Экспорт</button>}
                 {visibleStatus.status === 'error' && <button className="icon-button" title="Повторить обработку" aria-label="Повторить обработку" onClick={() => void retryDocument()}><RotateCw size={16} /></button>}
               </div>
             </div>
@@ -2259,7 +2331,7 @@ function App() {
                 </div>
 
                 <div className={`workspace-layout-picker mode-${analysisLayoutMode} ${isTablePreview ? 'is-table-layout' : ''}`} data-testid="workspace-layout-picker">
-                  <fieldset className="workspace-layout-fieldset">
+                  <fieldset ref={workspaceLayoutHelpTargetRef} data-help-target="workspace.layout.select" className="workspace-layout-fieldset">
                     <legend>Расположение</legend>
                     <div className="workspace-layout-options">
                       <label className={`workspace-layout-option ${analysisLayoutMode === 'auto' ? 'is-selected' : ''}`}>
@@ -2300,7 +2372,7 @@ function App() {
                       ) : (
                         <>
                           <div className="bookmark-tools">
-                            <button className="bookmark-list-toggle" type="button" aria-expanded={bookmarksExpanded} onClick={() => setBookmarksExpanded((value) => !value)}>
+                            <button ref={bookmarksHelpTargetRef} data-help-target="document.bookmarks.open" className="bookmark-list-toggle" type="button" aria-expanded={bookmarksExpanded} onClick={() => setBookmarksExpanded((value) => !value)}>
                               <Bookmark size={15} /><span>Закладки</span><span className="bookmark-count">{documentBookmarks.length}</span><ChevronDown size={14} className={bookmarksExpanded ? 'is-expanded' : ''} />
                             </button>
                             {selectedSource && <button className="button button-light bookmark-add-button" type="button" onClick={() => void addSelectedBookmark()} disabled={bookmarkPending || documentBookmarks.some((item) => item.source.id === selectedSource.id)}>
@@ -2326,8 +2398,8 @@ function App() {
                             ))}
                           </div>}
                           <div className="preview-tabs" role="tablist" aria-label="Представление документа">
-                            <button type="button" role="tab" aria-selected={previewTab === 'original'} className={`preview-tab ${previewTab === 'original' ? 'is-active' : ''}`} onClick={() => { setSearchScope('original'); setPreviewTab('original') }}>Оригинал</button>
-                            <button type="button" role="tab" aria-selected={previewTab === 'markdown'} className={`preview-tab ${previewTab === 'markdown' ? 'is-active' : ''}`} onClick={() => { setSearchScope('markdown'); setPreviewTab('markdown') }}>Markdown</button>
+                            <button ref={originalTabHelpTargetRef} data-help-target="document.original.open" type="button" role="tab" aria-selected={previewTab === 'original'} className={`preview-tab ${previewTab === 'original' ? 'is-active' : ''}`} onClick={() => { setSearchScope('original'); setPreviewTab('original') }}>Оригинал</button>
+                            <button ref={markdownTabHelpTargetRef} data-help-target="document.markdown.open" type="button" role="tab" aria-selected={previewTab === 'markdown'} className={`preview-tab ${previewTab === 'markdown' ? 'is-active' : ''}`} onClick={() => { setSearchScope('markdown'); setPreviewTab('markdown') }}>Markdown</button>
                             {markdownDocument?.status === 'ready' && <a className="preview-download" href={`${API}/documents/${document.id}/markdown/download`} download>Скачать .md</a>}
                           </div>
                           <DocumentSearchToolbar
@@ -2383,7 +2455,13 @@ function App() {
                       <article className={`insight-card ${index === 0 ? 'insight-overview' : ''}`} key={insight.id}>
                         <div className="insight-card-top"><span className="insight-number">{String(index + 1).padStart(2, '0')}</span><h3>{insight.question}</h3></div>
                         <p className={`insight-answer ${insight.citations.length === 0 ? 'no-evidence' : ''}`}><CitationText text={insight.answer} citations={insight.citations} onOpenSource={openSource} /></p>
-                        <div className="insight-citations">
+                        <div
+                          ref={index === 0 && insight.citations.length > 0 ? citationsHelpTargetRef : undefined}
+                          data-help-target={index === 0 && insight.citations.length > 0 ? 'document.citations.open' : undefined}
+                          className="insight-citations"
+                          role={index === 0 && insight.citations.length > 0 ? 'group' : undefined}
+                          aria-label={index === 0 && insight.citations.length > 0 ? 'Источники ответа' : undefined}
+                        >
                           {insight.citations.length ? insight.citations.map((source) => (
                             <button key={source.id} className="citation-chip" data-source-id={source.id} onClick={() => void openSource(source)} title={source.text}>
                               {source.is_derived ? <Calculator size={12} /> : <BookOpen size={12} />}
@@ -2459,6 +2537,8 @@ function App() {
               {messages.map((message) => <ChatBubble
                 key={message.id}
                 message={message}
+                canShowUiTarget={canShowAppHelpTarget(message, buildVersionCheck)}
+                onShowUiTarget={showAppHelpTarget}
                 onOpenSource={openSource}
                 highlighted={message.id === highlightedMessageId}
                 onDelete={() => setMessageDeleteTarget(message)}
@@ -2488,6 +2568,8 @@ function App() {
                   {index > 0 && epoch !== previousEpoch && <div className="chat-context-divider" role="separator"><span>Новый контекст</span><small>Предыдущая переписка сохранена и не передаётся модели</small></div>}
                   <ChatBubble
                     message={message}
+                    canShowUiTarget={canShowAppHelpTarget(message, buildVersionCheck)}
+                    onShowUiTarget={showAppHelpTarget}
                     onOpenSource={openSource}
                     highlighted={message.id === highlightedMessageId}
                     onDelete={() => setMessageDeleteTarget(message)}
@@ -2832,17 +2914,21 @@ function ApplicationHelpWorkspace() {
   )
 }
 
-function ChatBubble({ message, onOpenSource, highlighted = false, onDelete, onRetry, onStop, canRetry = true }: {
+function ChatBubble({ message, onOpenSource, onShowUiTarget, canShowUiTarget = false, highlighted = false, onDelete, onRetry, onStop, canRetry = true }: {
   message: ChatMessage
   onOpenSource: (source: SourceRef) => Promise<void>
+  onShowUiTarget: (message: ChatMessage) => string
+  canShowUiTarget?: boolean
   highlighted?: boolean
   onDelete: () => void
   onRetry: (userMessageId: string) => void
   onStop: (messageId: string) => void
   canRetry?: boolean
 }) {
+  const [uiTargetStatus, setUiTargetStatus] = useState('')
   const partial = message.role === 'assistant' && message.generation_status === 'interrupted'
   const streaming = message.role === 'assistant' && message.generation_status === 'streaming'
+  const uiTargetLabel = isAppHelpUiTargetId(message.ui_target_id) ? APP_HELP_UI_TARGET_LABELS[message.ui_target_id] : 'элемент интерфейса'
   return (
     <article className={`chat-message ${message.role === 'user' ? 'user-message' : 'assistant-message'} ${partial ? 'message-interrupted' : ''} ${highlighted ? 'search-result-highlight' : ''}`} data-message-id={message.id}>
       {message.role === 'assistant' && <span className="assistant-avatar"><span /><span /><span /><span /></span>}
@@ -2856,8 +2942,10 @@ function ChatBubble({ message, onOpenSource, highlighted = false, onDelete, onRe
         <div className="message-actions">
           {streaming && <button type="button" onClick={() => onStop(message.id)}><X size={13} /> Остановить</button>}
           {partial && canRetry && message.reply_to_message_id && <button type="button" onClick={() => onRetry(message.reply_to_message_id!)}><RotateCw size={13} /> Повторить вопрос</button>}
+          {canShowUiTarget && <button type="button" aria-label={`Показать в интерфейсе: ${uiTargetLabel}`} title={`Найти: ${uiTargetLabel}`} onClick={() => setUiTargetStatus(onShowUiTarget(message))}><LocateFixed size={13} /> Показать в интерфейсе</button>}
           <button type="button" aria-label="Удалить сообщение и связанные ответы" title="Физически удалить вопрос и все связанные ответы" onClick={onDelete}><Trash2 size={13} /> Удалить</button>
         </div>
+        {uiTargetStatus && <p className="ui-target-status" role="status" aria-live="polite" aria-atomic="true">{uiTargetStatus}</p>}
       </div>
     </article>
   )

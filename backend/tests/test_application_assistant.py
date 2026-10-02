@@ -9,9 +9,11 @@ import pytest
 
 from app import api
 from app.services.app_help import (
+    AppHelpAvailableSource,
     AppHelpCitation,
     AppHelpResponse,
     search_app_capabilities,
+    validate_app_help_response,
 )
 from app.services.application_assistant import (
     build_application_assistant_payload,
@@ -67,6 +69,59 @@ def test_server_adds_citation_markers_and_strips_model_supplied_markers() -> Non
     )
 
     assert format_validated_app_answer(response) == "Откройте настройки модели.\n\n〔1〕"
+
+
+def test_application_response_rejects_unknown_ui_targets() -> None:
+    capability = search_app_capabilities("Где изменить модель?")[0].capability
+    sources = {capability.source_id: AppHelpAvailableSource(
+        source_type="application", ui_target_ids=capability.ui_target_ids,
+    )}
+    payload = {
+        "answer": "Откройте настройки.",
+        "status": "answered",
+        "scope": "application",
+        "citations": [{"source_type": "application", "source_id": capability.source_id}],
+        "ui_target_id": "document.upload.open;document.cookie",
+    }
+
+    with pytest.raises(ValueError, match="неизвестный UI target"):
+        validate_app_help_response(payload, available_sources=sources)
+
+
+def test_application_response_target_must_belong_to_a_cited_capability() -> None:
+    capability = search_app_capabilities("Где изменить модель?")[0].capability
+    sources = {capability.source_id: AppHelpAvailableSource(
+        source_type="application", ui_target_ids=capability.ui_target_ids,
+    )}
+    payload = {
+        "answer": "Откройте настройки.",
+        "status": "answered",
+        "scope": "application",
+        "citations": [{"source_type": "application", "source_id": capability.source_id}],
+        "ui_target_id": "document.upload.open",
+    }
+
+    with pytest.raises(ValueError, match="не подтверждён"):
+        validate_app_help_response(payload, available_sources=sources)
+
+
+def test_message_api_roundtrips_saved_ui_target_version_metadata() -> None:
+    now = datetime.now(timezone.utc)
+    chat = SimpleNamespace(scope="application", document_id=None)
+    message = SimpleNamespace(
+        id=uuid4(), role="assistant", content="Откройте настройки.", citations=[], model="gpt-6-luna",
+        reasoning_effort="low", created_at=now, context_epoch=0, reply_to_message_id=None,
+        generation_status="complete", generation_error=None, source_version=None,
+        ui_target_id="codex.settings.open", ui_target_catalog_version="1", ui_target_build_id="build-123",
+    )
+
+    result = asyncio.run(api._message_out(_NoDocumentAccessSession(), chat, message))
+
+    assert result.model_dump(include={"ui_target_id", "ui_target_catalog_version", "ui_target_build_id"}) == {
+        "ui_target_id": "codex.settings.open",
+        "ui_target_catalog_version": "1",
+        "ui_target_build_id": "build-123",
+    }
 
 
 class _NoDocumentAccessSession:

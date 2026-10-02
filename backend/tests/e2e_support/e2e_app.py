@@ -33,6 +33,7 @@ class DeterministicCodex(CodexService):
         self.complete_calls = 0
         self.chat_calls = 0
         self.structured_calls = 0
+        self.ui_target_override: str | None = None
         self.last_request_metadata = {"document_evidence_count": 0, "application_evidence_count": 0, "ephemeral": None}
 
     async def start(self):
@@ -96,7 +97,12 @@ class DeterministicCodex(CodexService):
             }
             citation_items = []
             if application_evidence:
-                citation_items.append({"source_type": "application", "source_id": application_evidence[0]["source_id"]})
+                application_source = next(
+                    (source for source in application_evidence
+                     if self.ui_target_override in source.get("ui_target_ids", [])),
+                    application_evidence[0],
+                )
+                citation_items.append({"source_type": "application", "source_id": application_source["source_id"]})
             if document_evidence and payload.get("request_scope") == "mixed":
                 citation_items.append({"source_type": "document", "source_id": document_evidence[0]["source_id"]})
             if citation_items:
@@ -106,7 +112,11 @@ class DeterministicCodex(CodexService):
                     "status": "answered",
                     "scope": scope,
                     "citations": citation_items,
-                    "ui_target_id": (application_evidence[0].get("ui_target_ids") or [None])[0] if application_evidence else None,
+                    "ui_target_id": (
+                        self.ui_target_override
+                        if self.ui_target_override is not None
+                        else (application_source.get("ui_target_ids") or [None])[0]
+                    ) if application_evidence else None,
                 }
             else:
                 response = {"answer": "Подтверждений нет.", "status": "not_found", "scope": "unknown", "citations": [], "ui_target_id": None}
@@ -144,6 +154,10 @@ async def control(request: Request):
     data = await request.json()
     provider = request.app.state.codex
     provider.mode = data.get("mode", "ready")
+    target_id = data.get("ui_target_id")
+    if target_id is not None and (not isinstance(target_id, str) or not target_id or len(target_id) > 120):
+        raise HTTPException(status_code=422, detail="ui_target_id must be a short string or null")
+    provider.ui_target_override = target_id
     if data.get("hold_stream"):
         provider.stream_release.clear()
     else:

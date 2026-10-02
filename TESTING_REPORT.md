@@ -634,4 +634,26 @@ Targeted browser reruns допускаются через `-PlaywrightGrep`. Mig
 | Migration acceptance на изолированном Compose | **PASS**: upgrade сохраняет прежние document chats/messages/citations/original bytes; создание app-help без документа; downgrade с app-help сессией безопасно отклонён |
 | `node --check` и `git diff --check` | **PASS** |
 
-AI E2E выполнялись с синтетическим provider; проверка качества ответа на живом Codex не заявляется. APP-M03 не начинался.
+AI E2E выполнялись с синтетическим provider; проверка качества ответа на живом Codex не заявляется.
+
+## APP-M03 — безопасные подсказки к элементам интерфейса — 3 октября 2026 года
+
+Сохранённая сервером подсказка теперь включает стабильный UI target, версию каталога и build ID. `Message` ограничивает это поле согласованностью всех трёх nullable значений; миграция `0013_ui_target_metadata` безопасно отказывается терять сохранённые targets при downgrade. Frontend показывает действие только для известного ID при точном совпадении каталога и build. Цели регистрируются через React refs и semantic IDs; перед подсветкой проверяются уникальность, видимость, disabled/busy, перекрытие и текущая сборка. Действие пользователя только прокручивает к доступной цели и показывает нейтральную обводку на 1,8 секунды: оно не нажимает целевой элемент, не открывает закрытые интерфейсы и не перемещает фокус. Для недоступных и неоднозначных целей остаётся текстовый ответ и доступное status-сообщение.
+
+Проверки полного изолированного прогона подтвердили регрессию по чатам, документам, OCR, цитатам, таблицам, поиску, безопасности загрузок и всем шести responsive-размерам. В отдельном тестовом Compose исправлена гонка готовности PostgreSQL: `pg_isready` заменён на healthcheck с успешным SQL `SELECT 1`, после чего изолированный backup/restore повторно прошёл. Рабочие данные и volumes при этом не затрагивались.
+
+| Проверка | Результат |
+|---|---|
+| Frontend contract tests (`npm test`) | **28 passed** |
+| Frontend production build (`npm run build`) | **PASS**; остаётся предупреждение Vite о бандле >500 kB |
+| Backend unit suite (`coverage run ... -m pytest -q -m not integration`) | **385 passed, 10 deselected**; одно существующее предупреждение Alembic `path_separator` |
+| Backend Compose integration (`pytest -q -m integration`) | **10 passed, 385 deselected** |
+| Chromium E2E | **95 passed**; включая 3 APP-M03 сценария и размеры 1440×900, 1280×720, 1024×768, 768×1024, 430×932, 390×844 |
+| Migration acceptance | **PASS**; upgrade/downgrade/re-upgrade прошли, существующие чаты и документный поток остались доступны |
+| PostgreSQL queue checks / queue acceptance | **13 passed / 9 passed** |
+| Linux/resource/upload/converter acceptance | **4 + 2 + 3 + 1 passed** |
+| Local-data maintenance acceptance | **1 passed** |
+| Isolated PostgreSQL + document-volume backup/restore | **PASS после исправления healthcheck**; повторно запускалась только эта часть полного скрипта |
+| Impeccable detector (`frontend/src/App.tsx`) | **0 findings** |
+
+Первый запуск `scripts/test-e2e.ps1` завершил все 95 Chromium E2E, migration, queue, integration и maintenance проверки, но его последняя backup/restore-проверка поймала неверно раннее состояние healthcheck. После замены healthcheck указанная проверка прошла изолированно. Последующая попытка повторить весь 40-минутный E2E была прервана пользователем; поэтому не заявляется, что единый повторный запуск скрипта завершился с кодом 0. Рабочий Docker Compose был проверен отдельно и пересобирается после фиксации изменений.

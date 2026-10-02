@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { ArrowDown, ArrowUp, LoaderCircle, Search, X } from 'lucide-react'
+import { useAppHelpTargetRef } from '../appHelpUiTargets'
 import type { DocumentSearchMatch, DocumentSearchResponse, DocumentSearchScope } from '../types'
 
 const API = '/api/v1'
@@ -29,6 +30,7 @@ async function requestSearch(documentId: string, scope: DocumentSearchScope, que
 }
 
 export function DocumentSearchToolbar({ documentId, resetKey, scope, onScopeChange, onNavigate, onClear }: DocumentSearchToolbarProps) {
+  const helpTargetRef = useAppHelpTargetRef('document.search.open')
   const [query, setQuery] = useState('')
   const [matches, setMatches] = useState<DocumentSearchMatch[]>([])
   const [total, setTotal] = useState(0)
@@ -193,7 +195,7 @@ export function DocumentSearchToolbar({ documentId, resetKey, scope, onScopeChan
           : 'Введите слово или фразу'
 
   return (
-    <div className="document-search" role="search" aria-label="Поиск в документе">
+    <div ref={helpTargetRef} data-help-target="document.search.open" className="document-search" role="search" aria-label="Поиск в документе">
       <div className="document-search-scopes" aria-label="Область поиска">
         <button type="button" aria-pressed={scope === 'original'} className={scope === 'original' ? 'is-active' : ''} onClick={() => changeScope('original')}>Оригинал</button>
         <button type="button" aria-pressed={scope === 'markdown'} className={scope === 'markdown' ? 'is-active' : ''} onClick={() => changeScope('markdown')}>Markdown</button>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { ArrowDown, ArrowUp, ArrowUpDown, BookOpen, Calculator, ChevronDown, Filter, LoaderCircle, Settings2, TriangleAlert, X } from 'lucide-react'
 import { renderAsync } from 'docx-preview'
 import * as pdfjsLib from 'pdfjs-dist'
+import { useAppHelpTargetRef } from '../appHelpUiTargets'
 import type { DocumentPreview, DocumentRecord, PreviewBlock, SourceRef, StreamCitation, TableAggregate, TableCalculation, TableFilter, TableFilterKind, TablePreview } from '../types'
 
 const API = '/api/v1'
@@ -681,6 +682,7 @@ function DocxOriginalViewer({ originalUrl, selectedSource, onMatch, onError }: {
 }
 
 function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { preview: DocumentPreview; selectedSource: ViewerSource | null; onMatch: (value: MatchQuality) => void; onError: (message: string) => void }) {
+  const tableHelpTargetRef = useAppHelpTargetRef('document.table.controls')
   const [table, setTable] = useState<TablePreview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -995,7 +997,7 @@ function CsvOriginalViewer({ preview, selectedSource, onMatch, onError }: { prev
   const filterColumnName = appliedFilter ? table.columns[appliedFilter.column_index] : null
 
   return <div className="csv-original-viewer" ref={tableRef}>
-    <div className="csv-sheet-toolbar csv-table-toolbar">
+    <div ref={tableHelpTargetRef} data-help-target="document.table.controls" className="csv-sheet-toolbar csv-table-toolbar">
       {table.available_sheets.length > 1 && <div className="csv-sheet-picker">
         <label htmlFor={`csv-sheet-${preview.document_id}`}>Лист</label>
         <select id={`csv-sheet-${preview.document_id}`} aria-label="Лист исходного файла" value={table.sheet || ''} onChange={(event) => changeSheet(event.target.value)}>
@@ -1172,6 +1174,7 @@ function SourceMapOriginalViewer({ preview, selectedSource, onMatch }: { preview
 }
 
 export function OriginalDocumentViewer({ document: record, preview, selectedSource, selectedSourceId, originalUrl, pageNumber, onReprocess, reprocessing = false }: OriginalDocumentViewerProps) {
+  const ocrHelpTargetRef = useAppHelpTargetRef('document.ocr.settings')
   const [renderError, setRenderError] = useState<string | null>(null)
   const [matchReport, setMatchReport] = useState<{ sourceId: string | null; quality: MatchQuality }>({ sourceId: null, quality: 'not_found' })
   const [retryKey, setRetryKey] = useState(0)
@@ -1282,7 +1285,7 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
       <div className="ocr-panel-summary">
         <BookOpen size={15} aria-hidden="true" />
         <span>{statusCounts.recognized} OCR · {statusCounts.native} текстовых · {statusCounts.blank} пустых{statusCounts.unreadable ? ` · ${statusCounts.unreadable} требуют внимания` : ''}</span>
-        {onReprocess && <button className="ocr-panel-toggle" type="button" aria-expanded={ocrSettingsOpen} onClick={() => setOcrSettingsOpen((open) => !open)}>
+        {onReprocess && <button ref={ocrHelpTargetRef} data-help-target="document.ocr.settings" className="ocr-panel-toggle" type="button" aria-expanded={ocrSettingsOpen} onClick={() => setOcrSettingsOpen((open) => !open)}>
           <Settings2 size={14} /> {ocrSettingsOpen ? 'Скрыть настройки' : 'Настроить OCR'} <ChevronDown size={14} className={ocrSettingsOpen ? 'is-open' : ''} />
         </button>}
       </div>

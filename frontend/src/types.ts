@@ -301,6 +301,9 @@ export interface ChatMessage {
   model?: string | null
   reasoning_effort?: string | null
   source_version?: number | null
+  ui_target_id?: string | null
+  ui_target_catalog_version?: string | null
+  ui_target_build_id?: string | null
 }
 
 export interface ChatRecord {

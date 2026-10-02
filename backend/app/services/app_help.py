@@ -19,9 +19,9 @@ APP_HELP_MAX_EVIDENCE_CHARS = 12_000
 APP_HELP_MAX_CITATIONS = 12
 APP_HELP_MAX_ANSWER_CHARS = 12_000
 
-# These semantic names describe actual, user-visible entry points. APP-M03 will
-# register them against React refs and may remove targets that cannot be resolved
-# unambiguously in a particular responsive state.
+# These semantic names describe actual, user-visible entry points. APP-M03
+# registers them against React refs and suppresses targets that cannot be
+# resolved unambiguously in the current responsive state.
 APP_HELP_UI_TARGETS = frozenset({
     "document.upload.open",
     "chat-library.toggle",

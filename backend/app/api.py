@@ -75,6 +75,7 @@ from app.schemas import (
 from app.services.additional_analysis import analyze_additional
 from app.services.app_help import (
     APP_HELP_CATALOG,
+    APP_HELP_CATALOG_VERSION,
     AppHelpAvailableSource,
     AppHelpResponse,
     app_help_output_schema,
@@ -280,6 +281,9 @@ async def _message_out(session, chat: Chat, message: Message) -> MessageOut:
         generation_status=message.generation_status,
         generation_error=message.generation_error,
         source_version=message.source_version,
+        ui_target_id=message.ui_target_id,
+        ui_target_catalog_version=message.ui_target_catalog_version,
+        ui_target_build_id=message.ui_target_build_id,
     )
 
 
@@ -1905,11 +1909,16 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
                     message.citations = citation_ids
                     message.generation_status = "complete"
                     message.generation_error = None
+                    message.ui_target_id = validated.ui_target_id
+                    message.ui_target_catalog_version = APP_HELP_CATALOG_VERSION if validated.ui_target_id else None
+                    message.ui_target_build_id = settings.app_build_id if validated.ui_target_id else None
                 if answer:
                     answer_parts.append(answer)
                     yield _sse("delta", {"text": answer})
                 yield _sse("done", {"assistant_message_id": str(assistant_id), "answer": answer,
                                      "citations": citation_data, "ui_target_id": validated.ui_target_id,
+                                     "ui_target_catalog_version": APP_HELP_CATALOG_VERSION if validated.ui_target_id else None,
+                                     "ui_target_build_id": settings.app_build_id if validated.ui_target_id else None,
                                      "response_status": validated.status, "response_scope": validated.scope})
             else:
                 yield _sse("sources", {"sources": [{

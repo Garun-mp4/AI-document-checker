@@ -297,6 +297,9 @@ class MessageOut(BaseModel):
     generation_status: Literal["complete", "streaming", "interrupted"] = "complete"
     generation_error: str | None = None
     source_version: int | None = None
+    ui_target_id: str | None = None
+    ui_target_catalog_version: str | None = None
+    ui_target_build_id: str | None = None
 
 
 class DocumentExportIn(BaseModel):

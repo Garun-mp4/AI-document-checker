@@ -824,6 +824,9 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .message-actions button { display: inline-flex; align-items: center; gap: 4px; min-height: 27px; padding: 0 7px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--ink-tertiary); font: inherit; font-size: 10px; cursor: pointer; }
 .message-actions button:hover, .message-actions button:focus-visible { border-color: var(--line); background: var(--paper); color: var(--ink); }
 .message-actions button:focus-visible, .analysis-rebuild-panel select:focus-visible, .analysis-version-select-wrap select:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+[data-help-target] { outline: 2px solid transparent; outline-offset: 3px; transition: outline-color var(--duration-state) var(--ease-out); }
+[data-help-target][data-help-highlighted="true"], [data-help-target]:focus-visible { outline-color: var(--ink); }
+.ui-target-status { margin: 5px 0 0; color: var(--ink-secondary); font-size: 10px; line-height: 1.45; }
 .message-interrupted .message-body { border-radius: 8px; }
 .message-author { margin-bottom: 5px; color: var(--ink-tertiary); font-size: 11px; font-weight: 500; }
 .message-text { color: var(--ink-soft); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1326,6 +1329,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto !important; }
+  [data-help-target] { transition: none; }
   .spin { animation: reduced-pulse 1.4s ease-in-out infinite; }
   .thinking-mark span { animation: reduced-think 1.4s ease-in-out infinite; }
   .processing-progress-track span { transition: none; }

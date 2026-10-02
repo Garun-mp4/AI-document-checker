@@ -10,6 +10,9 @@ const chatMarkdown = await readFile(resolve(root, 'src/components/ChatMarkdown.t
 const markdownViewer = await readFile(resolve(root, 'src/components/MarkdownViewer.tsx'), 'utf8')
 const originalViewer = await readFile(resolve(root, 'src/components/OriginalDocumentViewer.tsx'), 'utf8')
 const styles = await readFile(resolve(root, 'src/styles.css'), 'utf8')
+const appHelpTargets = await readFile(resolve(root, 'src/appHelpUiTargets.ts'), 'utf8')
+const searchToolbar = await readFile(resolve(root, 'src/components/DocumentSearchToolbar.tsx'), 'utf8')
+const backendAppHelp = await readFile(resolve(root, '../backend/app/services/app_help.py'), 'utf8')
 
 test('sidebar collapse has persistent state and an accessible control contract', () => {
   assert.match(app, /SIDEBAR_COLLAPSED_STORAGE_KEY\s*=\s*'document-checker-sidebar-collapsed'/)
@@ -35,11 +38,57 @@ test('chat visibility has one persistent control outside the chat panel', () => 
   assert.doesNotMatch(app, /mobile-chat-toggle/)
 })
 
+test('application help UI targets are an exact versioned mirror of the backend catalog', () => {
+  const frontendIds = [...appHelpTargets.matchAll(/^\s*'([a-z.]+)',?$/gm)].map(match => match[1])
+  const backendBlock = backendAppHelp.match(/APP_HELP_UI_TARGETS\s*=\s*frozenset\(\{([\s\S]*?)\}\)/)?.[1]
+  assert.ok(backendBlock, 'Backend target allowlist should exist')
+  const backendIds = [...backendBlock.matchAll(/"([a-z.]+)"/g)].map(match => match[1])
+  const frontendVersion = appHelpTargets.match(/APP_HELP_CATALOG_VERSION\s*=\s*'([^']+)'/)?.[1]
+  const backendVersion = backendAppHelp.match(/APP_HELP_CATALOG_VERSION\s*=\s*"([^"]+)"/)?.[1]
+  assert.deepEqual(frontendIds.sort(), backendIds.sort())
+  assert.equal(frontendVersion, backendVersion)
+})
+
+test('UI help only highlights a registered current-build target after an explicit accessible action', () => {
+  assert.match(appHelpTargets, /useAppHelpTargetRef/)
+  assert.match(appHelpTargets, /new Map<AppHelpUiTargetId, Set<HTMLElement>>/)
+  assert.match(appHelpTargets, /available\.length > 1/)
+  assert.match(appHelpTargets, /aria-hidden/)
+  assert.match(appHelpTargets, /matches\(':disabled'\)/)
+  assert.match(appHelpTargets, /aria-busy/)
+  assert.match(appHelpTargets, /elementFromPoint/)
+  assert.match(appHelpTargets, /setAttribute\('data-help-highlighted', 'true'\)/)
+  assert.match(appHelpTargets, /1_800/)
+  assert.match(app, /buildCheck\.kind === 'matched'/)
+  assert.match(app, /message\.ui_target_catalog_version === APP_HELP_CATALOG_VERSION/)
+  assert.match(app, /message\.ui_target_build_id === buildCheck\.api\.build_id/)
+  assert.match(app, /Показать в интерфейсе/)
+  assert.match(app, /role="status" aria-live="polite" aria-atomic="true"/)
+  assert.match(app, /element\.scrollIntoView\([\s\S]*behavior: reducedMotion \? 'instant' : 'smooth'/)
+  assert.doesNotMatch(appHelpTargets, /\.click\(\)|focus\(\)|querySelector\(/)
+  assert.match(styles, /\[data-help-target\]\[data-help-highlighted="true"\]/)
+  assert.match(styles, /\[data-help-target\]\s*\{[^}]*var\(--duration-state\)/)
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/)
+  assert.match(styles, /\[data-help-target\]\s*\{\s*transition: none;/)
+})
+
+test('confirmed user-facing targets are registered at their actual controls', () => {
+  for (const targetId of [
+    'document.upload.open', 'chat-library.toggle', 'chat.new', 'codex.settings.open',
+    'workspace.layout.select', 'document.original.open', 'document.markdown.open',
+    'document.bookmarks.open', 'document.export.open', 'local-data.open',
+  ]) assert.match(app, new RegExp(`data-help-target="${targetId.replaceAll('.', '\\.') }"`))
+  assert.match(app, /data-help-target=\{index === 0 && insight\.citations\.length > 0 \? 'document\.citations\.open'/)
+  assert.match(searchToolbar, /data-help-target="document\.search\.open"/)
+  assert.match(originalViewer, /data-help-target="document\.ocr\.settings"/)
+  assert.match(originalViewer, /data-help-target="document\.table\.controls"/)
+})
+
 test('new chat opens the empty workspace instead of the file picker', () => {
   assert.match(app, /NEW_CHAT_STORAGE_KEY\s*=\s*'document-checker-new-chat'/)
   assert.match(app, /useState\(\(\) => localStorage\.getItem\(NEW_CHAT_STORAGE_KEY\) === 'true'/)
   assert.match(app, /const startNewChat = useCallback\(\(\) => \{[\s\S]*setNewChatOpen\(true\)[\s\S]*setSelectedId\(null\)[\s\S]*setChatOpen\(true\)/)
-  const newChatButton = app.match(/<button className="library-add"[\s\S]*?<\/button>/)?.[0]
+  const newChatButton = app.match(/<button(?=[^>]*className="library-add")[^>]*>[\s\S]*?<\/button>/)?.[0]
   assert.ok(newChatButton, 'New chat button should be present')
   assert.match(newChatButton, /onClick=\{startNewChat\}/)
   assert.doesNotMatch(newChatButton, /fileInput\.current\?\.click\(\)/)
