@@ -14,6 +14,7 @@ const styles = await readFile(resolve(root, 'src/styles.css'), 'utf8')
 const appHelpTargets = await readFile(resolve(root, 'src/appHelpUiTargets.ts'), 'utf8')
 const searchToolbar = await readFile(resolve(root, 'src/components/DocumentSearchToolbar.tsx'), 'utf8')
 const aiComposer = await readFile(resolve(root, 'src/components/AIComposer.tsx'), 'utf8')
+const localSpeechInput = await readFile(resolve(root, 'src/useLocalSpeechInput.ts'), 'utf8')
 const backendAppHelp = await readFile(resolve(root, '../backend/app/services/app_help.py'), 'utf8')
 
 test('sidebar collapse has persistent state and an accessible control contract', () => {
@@ -100,12 +101,15 @@ test('new chat opens the empty workspace instead of the file picker', () => {
 })
 
 test('AI composers share accessible attachment, model, voice, send, and keyboard behavior', () => {
-  assert.match(app, /<AIComposer[\s\S]*?onAttach=\{\(\) => fileInput\.current\?\.click\(\)\}[\s\S]*?onOpenModelSettings=\{\(\) => setAuthOpen\(true\)\}[\s\S]*?onVoiceInput=\{\(\) => showToast\('Функция голосового ввода находится в разработке'\)\}/)
+  assert.match(app, /<AIComposer[\s\S]*?onAttach=\{\(\) => fileInput\.current\?\.click\(\)\}[\s\S]*?onOpenModelSettings=\{\(\) => setAuthOpen\(true\)\}[\s\S]*?voiceInputEnabled=\{chatVisible\}/)
+  assert.doesNotMatch(app, /onVoiceInput|Функция голосового ввода находится в разработке/)
   assert.match(app, /<AIComposer[\s\S]*?inputLabel="Вопрос по документу"[\s\S]*?inputDisabled[\s\S]*?sendDisabled/)
   assert.match(aiComposer, /className="ai-composer"/)
   assert.match(aiComposer, /aria-label="Прикрепить документ"/)
   assert.match(aiComposer, /aria-label=\{`Модель \$\{modelName\}, уровень анализа \$\{reasoningName\}\. Настроить`\}/)
-  assert.match(aiComposer, /aria-label="Голосовой ввод"/)
+  assert.match(aiComposer, /aria-pressed=\{voiceActive\}/)
+  assert.match(aiComposer, /aria-live="polite"/)
+  assert.match(aiComposer, /aria-keyshortcuts=\{voiceActive \? 'Escape' : undefined\}/)
   assert.match(aiComposer, /aria-label="Отправить вопрос"/)
   assert.match(aiComposer, /event\.key !== 'Enter' \|\| event\.shiftKey \|\| event\.nativeEvent\.isComposing/)
   assert.match(aiComposer, /maxHeight = 120/)
@@ -113,7 +117,11 @@ test('AI composers share accessible attachment, model, voice, send, and keyboard
   assert.match(styles, /@container \(max-width: 420px\)/)
   assert.match(styles, /\.ai-composer-send:hover:not\(:disabled\)/)
   assert.match(styles, /\.ai-composer, \.ai-composer button \{ transition: none; \}/)
-  assert.doesNotMatch(aiComposer, /getUserMedia|MediaRecorder/)
+  assert.match(localSpeechInput, /Recognition\.available\(\{[\s\S]*processLocally: true[\s\S]*quality: 'dictation'/)
+  assert.match(localSpeechInput, /recognition\.processLocally = true/)
+  assert.match(localSpeechInput, /recognition\.abort\(\)/)
+  assert.match(localSpeechInput, /document\.visibilityState === 'hidden'/)
+  assert.doesNotMatch(localSpeechInput, /Recognition\.install|processLocally\s*=\s*false|processLocally:\s*false|getUserMedia|MediaRecorder|fetch\(/)
 })
 
 test('empty workspace fits the desktop viewport without page scrolling', () => {

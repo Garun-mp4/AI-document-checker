@@ -904,6 +904,8 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .ai-composer-toolbar { display: grid; min-width: 0; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; }
 .ai-composer-attach.icon-button, .ai-composer-voice.icon-button { width: 40px; height: 40px; flex: 0 0 auto; color: var(--ink-secondary); transition: background-color var(--duration-state) var(--ease-out), color var(--duration-state) var(--ease-out), transform var(--duration-press) var(--ease-out); }
 .ai-composer-status { min-width: 0; overflow: hidden; color: var(--ink-tertiary); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.ai-composer-status[data-voice-state="recording"], .ai-composer-status[data-voice-state="processing"], .ai-composer-status[data-voice-state="complete"] { color: var(--ink-secondary); }
+.ai-composer-status[data-voice-state="error"] { color: var(--ink); font-weight: 600; }
 .ai-composer-controls { display: flex; min-width: 0; align-items: center; gap: 5px; }
 .ai-composer-model-control { display: inline-flex; min-width: 0; min-height: 38px; align-items: center; justify-content: center; gap: 5px; padding: 0 5px; border: 0; border-radius: 9px; background: transparent; color: var(--ink); cursor: pointer; transition: background-color var(--duration-state) var(--ease-out), color var(--duration-state) var(--ease-out); }
 .ai-composer-model-name, .ai-composer-model-reasoning { overflow: hidden; font-size: 12px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
@@ -911,6 +913,7 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .ai-composer-model-reasoning { max-width: 58px; color: var(--ink-tertiary); }
 .ai-composer-model-control > svg { flex: 0 0 auto; color: var(--ink-tertiary); }
 .ai-composer-voice.icon-button { width: 38px; height: 40px; }
+.ai-composer-voice.is-active:not(:disabled) { background: var(--surface-soft); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .ai-composer-send.send-button { width: 44px; height: 44px; flex: 0 0 auto; }
 .ai-composer-send:hover:not(:disabled) { background: #303030; }
 .ai-composer-send:active:not(:disabled) { transform: scale(.96); }

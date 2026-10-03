@@ -2279,7 +2279,6 @@ function App() {
               isUploading={isUploading}
               onChoose={() => fileInput.current?.click()}
               onOpenModelSettings={() => setAuthOpen(true)}
-              onVoiceInput={() => showToast('Функция голосового ввода находится в разработке')}
               modelName={codexModelLabel(codex)}
               reasoningName={codexReasoningLabel(codex?.reasoning_effort)}
               onStartApplicationHelp={() => void startApplicationHelpChat()}
@@ -2580,7 +2579,7 @@ function App() {
             onSend={() => void sendMessage()}
             onAttach={() => fileInput.current?.click()}
             onOpenModelSettings={() => setAuthOpen(true)}
-            onVoiceInput={() => showToast('Функция голосового ввода находится в разработке')}
+            voiceInputEnabled={chatVisible}
             placeholder={isApplicationChat ? 'Спросите о работе приложения…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
             inputLabel="Сообщение для чата"
             helperText={isApplicationChat ? 'Ответы проверяются по функциям приложения' : 'Ответы проверяются по источникам'}
@@ -2835,7 +2834,6 @@ function EmptyWorkspace({
   isUploading,
   onChoose,
   onOpenModelSettings,
-  onVoiceInput,
   modelName,
   reasoningName,
   onStartApplicationHelp,
@@ -2846,7 +2844,6 @@ function EmptyWorkspace({
   isUploading: boolean
   onChoose: () => void
   onOpenModelSettings: () => void
-  onVoiceInput: () => void
   modelName: string
   reasoningName: string
   onStartApplicationHelp: () => void
@@ -2890,7 +2887,6 @@ function EmptyWorkspace({
           onSend={() => undefined}
           onAttach={onChoose}
           onOpenModelSettings={onOpenModelSettings}
-          onVoiceInput={onVoiceInput}
           placeholder="Задайте вопрос по документу…"
           inputLabel="Вопрос по документу"
           helperText="Чат станет доступен после загрузки документа"

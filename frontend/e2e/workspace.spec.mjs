@@ -13,8 +13,7 @@ test('Unified AI composer keeps attachment, model, voice, keyboard, and narrow-l
   const emptyComposer = page.locator('.empty-chat-compose-area .ai-composer')
   await expect(emptyComposer.getByLabel('Вопрос по документу', { exact: true })).toBeDisabled()
   await expect(emptyComposer.getByRole('button', { name: 'Отправить вопрос', exact: true })).toBeDisabled()
-  await emptyComposer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
-  await expect(page.locator('.toast-message')).toContainText('Функция голосового ввода находится в разработке')
+  await expect(emptyComposer.getByRole('button', { name: 'Голосовой ввод', exact: true })).toBeDisabled()
 
   await emptyComposer.locator('.ai-composer-model-control').click()
   await expect(page.getByRole('heading', { name: 'Вход в Codex' })).toBeVisible()

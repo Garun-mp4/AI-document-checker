@@ -1,5 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, type FormEvent, type KeyboardEvent, type Ref } from 'react'
-import { ArrowUp, ChevronDown, Mic, Plus } from 'lucide-react'
+import { ArrowUp, ChevronDown, Mic, Plus, Square } from 'lucide-react'
+import { useLocalSpeechInput } from '../useLocalSpeechInput'
 
 type AIComposerProps = {
   value: string
@@ -7,7 +8,6 @@ type AIComposerProps = {
   onSend: () => void
   onAttach: () => void
   onOpenModelSettings: () => void
-  onVoiceInput: () => void
   placeholder: string
   inputLabel: string
   helperText: string
@@ -16,6 +16,7 @@ type AIComposerProps = {
   inputDisabled?: boolean
   sendDisabled?: boolean
   attachmentDisabled?: boolean
+  voiceInputEnabled?: boolean
   inputRef?: Ref<HTMLTextAreaElement>
 }
 
@@ -25,7 +26,6 @@ export function AIComposer({
   onSend,
   onAttach,
   onOpenModelSettings,
-  onVoiceInput,
   placeholder,
   inputLabel,
   helperText,
@@ -34,6 +34,7 @@ export function AIComposer({
   inputDisabled = false,
   sendDisabled = false,
   attachmentDisabled = false,
+  voiceInputEnabled = true,
   inputRef,
 }: AIComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -42,6 +43,28 @@ export function AIComposer({
     if (typeof inputRef === 'function') inputRef(element)
     else if (inputRef) inputRef.current = element
   }, [inputRef])
+  const voiceInput = useLocalSpeechInput({
+    value,
+    onChange,
+    textareaRef,
+    disabled: inputDisabled,
+    enabled: voiceInputEnabled,
+  })
+
+  const voiceActive = voiceInput.active
+  const voiceLabel = voiceInput.state === 'recording'
+    ? 'Остановить диктовку'
+    : voiceInput.state === 'processing'
+      ? 'Отменить распознавание'
+      : voiceInput.state === 'requesting'
+        ? 'Отменить запрос микрофона'
+        : voiceInput.state === 'checking'
+          ? 'Отменить проверку диктовки'
+          : 'Голосовой ввод'
+  const voiceTitle = voiceActive
+    ? `${voiceLabel}. Нажмите Escape, чтобы отменить.`
+    : 'Локальная диктовка на русском языке. Аудио не отправляется приложению.'
+  const voiceStatusText = voiceInput.message || helperText
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
@@ -72,12 +95,15 @@ export function AIComposer({
         name="chat-message"
         autoComplete="off"
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => {
+          onChange(event.target.value)
+          voiceInput.clearFeedback()
+        }}
         onKeyDown={handleInputKeyDown}
         placeholder={placeholder}
         aria-label={inputLabel}
         maxLength={4_000}
-        disabled={inputDisabled}
+        disabled={inputDisabled || voiceActive}
       />
       <div className="ai-composer-toolbar">
         <button
@@ -86,11 +112,21 @@ export function AIComposer({
           aria-label="Прикрепить документ"
           title="Добавить документ"
           onClick={onAttach}
-          disabled={attachmentDisabled}
+          disabled={attachmentDisabled || voiceActive}
         >
           <Plus aria-hidden="true" size={21} strokeWidth={1.8} />
         </button>
-        <span className="ai-composer-status">{helperText}</span>
+        <span
+          className="ai-composer-status"
+          data-voice-state={voiceInput.state}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          aria-busy={['checking', 'requesting', 'recording', 'processing'].includes(voiceInput.state)}
+          title={voiceStatusText}
+        >
+          {voiceStatusText}
+        </span>
         <div className="ai-composer-controls">
           <button
             className="ai-composer-model-control"
@@ -99,26 +135,31 @@ export function AIComposer({
             aria-label={`Модель ${modelName}, уровень анализа ${reasoningName}. Настроить`}
             title="Настроить модель и уровень анализа"
             onClick={onOpenModelSettings}
+            disabled={voiceActive}
           >
             <span className="ai-composer-model-name">{modelName}</span>
             <span className="ai-composer-model-reasoning">{reasoningName}</span>
             <ChevronDown aria-hidden="true" size={15} />
           </button>
           <button
-            className="ai-composer-voice icon-button"
+            className={`ai-composer-voice icon-button ${voiceActive ? 'is-active' : ''}`}
             type="button"
-            aria-label="Голосовой ввод"
-            title="Функция голосового ввода находится в разработке"
-            onClick={onVoiceInput}
+            aria-label={voiceLabel}
+            title={voiceTitle}
+            aria-pressed={voiceActive}
+            aria-keyshortcuts={voiceActive ? 'Escape' : undefined}
+            aria-busy={['checking', 'requesting', 'processing'].includes(voiceInput.state)}
+            onClick={voiceInput.toggle}
+            disabled={inputDisabled || !voiceInputEnabled}
           >
-            <Mic aria-hidden="true" size={21} strokeWidth={1.8} />
+            {voiceActive ? <Square aria-hidden="true" size={17} strokeWidth={2} fill="currentColor" /> : <Mic aria-hidden="true" size={21} strokeWidth={1.8} />}
           </button>
           <button
             className="ai-composer-send send-button"
             type="submit"
             aria-label="Отправить вопрос"
             title="Отправить вопрос"
-            disabled={inputDisabled || sendDisabled}
+            disabled={inputDisabled || sendDisabled || voiceActive}
           >
             <ArrowUp aria-hidden="true" size={20} strokeWidth={2} />
           </button>
