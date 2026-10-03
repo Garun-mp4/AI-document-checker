@@ -168,10 +168,10 @@ test('table viewer ignores stale pagination and citation requests', () => {
   assert.match(originalViewer, /requestId !== requestRef\.current/)
 })
 
-test('frontend advertises the formats supported by the backend contract', () => {
-  for (const extension of ['.pdf', '.docx', '.txt', '.md', '.csv', '.xml', '.xlsx', '.xls', '.pptx', '.html', '.json', '.epub']) {
-    assert.match(app, new RegExp(`\\${extension}`))
-  }
+test('frontend uploads and labels derive supported formats from the capability registry', () => {
+  assert.match(app, /ACCEPTED_DOCUMENT_EXTENSIONS\.join/)
+  assert.match(app, /SUPPORTED_DOCUMENT_EXTENSION_SET\.has/)
+  assert.match(app, /SUPPORTED_FORMAT_LABELS/)
 })
 
 test('OCR has an explicit processing state and user-facing fallback message', () => {

@@ -21,6 +21,7 @@ EXPECTED_TEXT = {
     "sample.xls": "Альфа",
     "sample.pptx": "Тестовый проект",
     "sample.html": "Тестовый проект",
+    "sample.htm": "Тестовый проект",
     "sample.json": "Тестовый проект",
     "sample.epub": "Тестовый проект",
 }
@@ -35,6 +36,7 @@ EXPECTED_LOCATOR_KIND = {
     "sample.xls": "xls",
     "sample.pptx": "pptx",
     "sample.html": "html",
+    "sample.htm": "html",
     "sample.json": "json",
     "sample.epub": "epub",
 }

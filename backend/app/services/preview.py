@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from app.services.document_formats import PREVIEW_RENDERERS
 from app.services.parsing import DocumentParsingError
 from app.services.source_locators import versioned_source_locator
 
@@ -23,21 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def _renderer_for(file_type: str) -> str:
-    return {
-        "pdf": "pdf",
-        "docx": "docx",
-        "txt": "text",
-        "md": "text",
-        "csv": "csv",
-        "xml": "xml",
-        "xlsx": "xlsx",
-        "xls": "xls",
-        "pptx": "pptx",
-        "html": "html",
-        "htm": "html",
-        "json": "json",
-        "epub": "epub",
-    }.get(file_type, "text")
+    return PREVIEW_RENDERERS.get(file_type.casefold().lstrip("."), "text")
 
 
 def _layout_for(file_type: str, metadata: dict[str, Any]) -> tuple[str, float]:

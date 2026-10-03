@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-import asyncio
 
 import pytest
 
@@ -15,7 +15,7 @@ from app.services.parsing import SourceBlock, parse_document
 FIXTURES = Path(__file__).parent / "fixtures"
 SUPPORTED_FIXTURES = [
     "sample.pdf", "sample.docx", "sample.txt", "sample.md", "sample.csv", "sample.xml",
-    "sample.xlsx", "sample.xls", "sample.pptx", "sample.html", "sample.json", "sample.epub",
+    "sample.xlsx", "sample.xls", "sample.pptx", "sample.html", "sample.htm", "sample.json", "sample.epub",
 ]
 
 

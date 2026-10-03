@@ -112,6 +112,7 @@ from app.services.document_export import (
 from app.services.document_export import (
     safe_filename as export_filename,
 )
+from app.services.document_formats import PREFERRED_MIME_TYPES
 from app.services.document_search import (
     original_search_source_cache,
     search_markdown,
@@ -156,28 +157,11 @@ def _reject_during_cache_cleanup(request: Request) -> None:
         raise HTTPException(status_code=409, detail="Выполняется очистка библиотеки. Повторите запрос после её завершения.")
 
 
-_DOCUMENT_MEDIA_TYPES = {
-    "pdf": "application/pdf",
-    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "txt": "text/plain",
-    "md": "text/markdown",
-    "csv": "text/csv",
-    "xml": "application/xml",
-    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "xls": "application/vnd.ms-excel",
-    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "html": "text/html",
-    "htm": "text/html",
-    "json": "application/json",
-    "epub": "application/epub+zip",
-}
-
-
 def document_media_type(file_type: str, filename: str) -> str:
-    """Return a stable browser MIME type for every supported upload format."""
+    """Return the preferred browser MIME type from the upload capability contract."""
 
     normalized = file_type.casefold().lstrip(".")
-    return _DOCUMENT_MEDIA_TYPES.get(normalized) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return PREFERRED_MIME_TYPES.get(f".{normalized}") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
 def _document_out(document: Document) -> DocumentOut:

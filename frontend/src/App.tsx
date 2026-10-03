@@ -41,6 +41,7 @@ import {
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import type { AdditionalAnalysis, AdditionalAnalysisMode, ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentBookmark, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_UPLOAD_BYTES, SUPPORTED_DOCUMENT_EXTENSION_SET, SUPPORTED_FORMAT_LABELS, SUPPORTED_FORMAT_LABELS_DOTTED } from './documentFormats'
 import { DocumentLayoutSelector } from './components/DocumentLayoutSelector'
 import type { AnalysisLayoutMode } from './components/DocumentLayoutSelector'
 import { AIComposer } from './components/AIComposer'
@@ -65,7 +66,7 @@ import {
 } from './appHelpUiTargets'
 
 const API = '/api/v1'
-const ACCEPTED = '.pdf,.docx,.txt,.md,.csv,.xml,.xlsx,.xls,.pptx,.html,.htm,.json,.epub'
+const ACCEPTED = ACCEPTED_DOCUMENT_EXTENSIONS.join(',')
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
 const SELECTED_APPLICATION_CHAT_STORAGE_KEY = 'document-checker-selected-application-chat'
 const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
@@ -1110,13 +1111,12 @@ function App() {
   const uploadFiles = useCallback(async (input: FileList | File[] | null | undefined, retryIds?: string[]) => {
     const files = Array.from(input ?? [])
     if (!files.length) return
-    const accepted = new Set(['.pdf', '.docx', '.txt', '.md', '.csv', '.xml', '.xlsx', '.xls', '.pptx', '.html', '.htm', '.json', '.epub'])
     const batch = files.map((file, index) => {
       const id = retryIds?.[index] || crypto.randomUUID()
       const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
-      const error = !accepted.has(extension)
-        ? 'Формат не поддерживается. Выберите PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB.'
-        : file.size > 25 * 1024 * 1024 ? 'Файл превышает максимальный размер 25 МБ.' : null
+      const error = !SUPPORTED_DOCUMENT_EXTENSION_SET.has(extension)
+        ? `Формат не поддерживается. Выберите ${SUPPORTED_FORMAT_LABELS.join(', ')}.`
+        : file.size > MAX_UPLOAD_BYTES ? `Файл превышает максимальный размер ${MAX_UPLOAD_BYTES / (1024 * 1024)} МБ.` : null
       pendingUploadFiles.current.set(id, file)
       cancelledUploadIds.current.delete(id)
       return {
@@ -2272,7 +2272,7 @@ function App() {
           if (itemId && event.target.files?.[0]) void uploadFiles([event.target.files[0]], [itemId])
           event.target.value = ''
         }} />
-        {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файлы, чтобы загрузить</strong><span>Можно добавить несколько документов за раз · PDF, DOCX, TXT, MD, CSV, XML, XLSX, XLS, PPTX, HTML, JSON или EPUB</span></div>}
+        {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файлы, чтобы загрузить</strong><span>Можно добавить несколько документов за раз · {SUPPORTED_FORMAT_LABELS.join(', ')}</span></div>}
 
         {!selectedId || !visibleStatus ? (
           isApplicationChat ? <ApplicationHelpWorkspace /> : <EmptyWorkspace
@@ -2871,7 +2871,7 @@ function EmptyWorkspace({
           <span className="dropzone-icon">{isUploading ? <LoaderCircle className="spin" size={22} /> : <FileUp size={22} />}</span>
           <strong>{isUploading ? 'Сохраняю файл…' : 'Перетащите файл сюда'}</strong>
           <span>или нажмите, чтобы выбрать на компьютере</span>
-          <small>PDF · DOCX · TXT · MD · CSV · XML · XLSX · XLS · PPTX · HTML · JSON · EPUB <i /> до 25 МБ</small>
+          <small>{SUPPORTED_FORMAT_LABELS_DOTTED} <i /> до {MAX_UPLOAD_BYTES / (1024 * 1024)} МБ</small>
         </button>
         <div className="application-help-entry">
           <span>Нужна подсказка по самому приложению?</span>

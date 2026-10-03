@@ -26,12 +26,9 @@ from docx.text.paragraph import Paragraph as DocxParagraph
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from app.services.document_formats import SUPPORTED_EXTENSIONS
 from app.services.numeric_values import parse_decimal
 
-SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".txt", ".md", ".csv", ".xml",
-    ".xlsx", ".xls", ".pptx", ".html", ".htm", ".json", ".epub",
-}
 MAX_DOCX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_DOCX_ENTRIES = 5_000
 CHUNK_TARGET_CHARS = 1_100

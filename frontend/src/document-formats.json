@@ -1,0 +1,148 @@
+{
+  "maxUploadBytes": 26214400,
+  "formats": [
+    {
+      "extension": ".pdf",
+      "fileType": "pdf",
+      "label": "PDF",
+      "mimeTypes": [
+        "application/pdf"
+      ],
+      "previewRenderer": "pdf",
+      "viewer": "pdf"
+    },
+    {
+      "extension": ".docx",
+      "fileType": "docx",
+      "label": "DOCX",
+      "mimeTypes": [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ],
+      "previewRenderer": "docx",
+      "viewer": "docx"
+    },
+    {
+      "extension": ".txt",
+      "fileType": "txt",
+      "label": "TXT",
+      "mimeTypes": [
+        "text/plain"
+      ],
+      "previewRenderer": "text",
+      "viewer": "text"
+    },
+    {
+      "extension": ".md",
+      "fileType": "md",
+      "label": "MD",
+      "mimeTypes": [
+        "text/markdown",
+        "text/x-markdown",
+        "text/plain"
+      ],
+      "previewRenderer": "text",
+      "viewer": "text"
+    },
+    {
+      "extension": ".csv",
+      "fileType": "csv",
+      "label": "CSV",
+      "mimeTypes": [
+        "text/csv",
+        "application/csv",
+        "application/vnd.ms-excel",
+        "text/plain"
+      ],
+      "previewRenderer": "csv",
+      "viewer": "csv"
+    },
+    {
+      "extension": ".xml",
+      "fileType": "xml",
+      "label": "XML",
+      "mimeTypes": [
+        "application/xml",
+        "text/xml",
+        "text/plain"
+      ],
+      "previewRenderer": "xml",
+      "viewer": "text"
+    },
+    {
+      "extension": ".xlsx",
+      "fileType": "xlsx",
+      "label": "XLSX",
+      "mimeTypes": [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ],
+      "previewRenderer": "xlsx",
+      "viewer": "csv"
+    },
+    {
+      "extension": ".xls",
+      "fileType": "xls",
+      "label": "XLS",
+      "mimeTypes": [
+        "application/vnd.ms-excel"
+      ],
+      "previewRenderer": "xls",
+      "viewer": "csv"
+    },
+    {
+      "extension": ".pptx",
+      "fileType": "pptx",
+      "label": "PPTX",
+      "mimeTypes": [
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      ],
+      "previewRenderer": "pptx",
+      "viewer": "mapped"
+    },
+    {
+      "extension": ".html",
+      "fileType": "html",
+      "label": "HTML",
+      "mimeTypes": [
+        "text/html",
+        "text/plain"
+      ],
+      "previewRenderer": "html",
+      "viewer": "text"
+    },
+    {
+      "extension": ".htm",
+      "fileType": "htm",
+      "label": "HTML",
+      "mimeTypes": [
+        "text/html",
+        "text/plain"
+      ],
+      "previewRenderer": "html",
+      "viewer": "text"
+    },
+    {
+      "extension": ".json",
+      "fileType": "json",
+      "label": "JSON",
+      "mimeTypes": [
+        "application/json",
+        "text/plain"
+      ],
+      "previewRenderer": "json",
+      "viewer": "text"
+    },
+    {
+      "extension": ".epub",
+      "fileType": "epub",
+      "label": "EPUB",
+      "mimeTypes": [
+        "application/epub+zip",
+        "application/epub",
+        "application/zip",
+        "application/x-zip-compressed"
+      ],
+      "previewRenderer": "epub",
+      "viewer": "mapped"
+    }
+  ]
+}

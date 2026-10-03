@@ -202,6 +202,7 @@ FIXTURE_CONTENTS = {
     "sample.xls": _make_xls(),
     "sample.pptx": _make_pptx(),
     "sample.html": "<html><body><h1>Тестовый проект</h1><p>Цель: проверить HTML.</p></body></html>".encode(),
+    "sample.htm": "<html><body><h1>Тестовый проект</h1><p>Цель: проверить HTML.</p></body></html>".encode(),
     "sample.json": json.dumps({"project": "Тестовый проект", "owner": "Алексей Пример", "due": "2026-11-30"}, ensure_ascii=False).encode(),
     "sample.epub": _make_epub(),
     "sample.xml": (

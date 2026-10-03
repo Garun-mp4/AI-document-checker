@@ -30,6 +30,15 @@ def generate():
     contents["tab.csv"] = 'Проект\tЧасы\nАльфа\t10\nБета\t20\n'.encode()
     contents["long.txt"] = ("Цель: проверить длинные строки.\n" + "Длинная строка " * 180 + "\nАвтор: Алексей Пример.\n").encode()
     contents["large.csv"] = ("Проект,Часы\n" + "".join(f"Проект {i},{i}\n" for i in range(1, 241))).encode()
+    large_workbook = Workbook()
+    large_sheet = large_workbook.active
+    large_sheet.append(["Проект", "Часы"])
+    for index in range(1, 241):
+        large_sheet.append([f"Проект {index}", index])
+    large_stream = BytesIO()
+    large_workbook.save(large_stream)
+    contents["large.xlsx"] = large_stream.getvalue()
+    assert 0 < len(contents["large.xlsx"]) < 25 * 1024 * 1024
     pdf = PdfReader(BytesIO(contents["sample.pdf"]))
     writer = PdfWriter()
     for _ in range(3):

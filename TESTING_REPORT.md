@@ -1,5 +1,27 @@
 # Отчёт о тестировании AI Document Checker
 
+## M19 — единый контракт поддерживаемых форматов
+
+Дата: 3 октября 2026 года. M19 реализован и проверен; M20 не начинался.
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit/parser/security | **438 passed, 11 integration deselected**; одно существующее предупреждение Alembic `path_separator` |
+| Frontend contract/unit tests | **37 passed** |
+| Frontend production build | **PASS** (`tsc --noEmit` и Vite); штатное предупреждение о крупном JS bundle и PDF worker остаётся |
+| Ruff изменённых backend-файлов | **PASS** |
+| Ограниченный stress profile | **PASS**: DOCX 24.15 MB — 196 ms / 24.2 MB peak traced allocations; CSV 25,000 строк — 1.47 s / 12.1 MB; XLSX 5,000 строк — 2.16 s / 9.4 MB |
+| Изолированный Compose security audit | **10 assertions passed**; сервисы healthy |
+| Chromium E2E по форматам | **15 passed**: все 13 расширений, плюс большие CSV и XLSX; проверены original viewer, citations, скачивание Markdown, пагинация, ограниченный DOM и горизонтальный overflow |
+| PostgreSQL queue acceptance | **13 базовых проверок и 9 сценариев прошли**; отмена/повтор, восстановление, сохранность документов и OCR child-process cleanup |
+| API integration / maintenance | **11 API integration passed**, **1 maintenance acceptance passed** |
+| M15 backup/restore regression | **PASS** на отдельных временных PostgreSQL/document volumes |
+| Полная migration/browser matrix | **Не запускалась**: браузерный Compose прогон фильтровался до format и large-table сценариев; migration acceptance штатно пропущен |
+
+Стресс-метрики получены для длительности и peak Python traced allocations (`tracemalloc`), а не RSS всего процесса. Большая таблица дополнительно проверена в Chromium на отсутствие горизонтального overflow и ограниченное число смонтированных строк. Тестовый Compose использовал уникальные имена проекта и собственные volumes; после завершения все его контейнеры, сети и временные volumes удалены, рабочие данные не затрагивались.
+
+Список форматов теперь сверяется между backend-политикой и frontend-каталогом contract-тестом; стартовый экран, `accept`, upload-проверка и маршрутизация исходного viewer используют эти контракты. Capability-матрица и продуктовые лимиты описаны в [`docs/SUPPORTED_FORMATS.md`](docs/SUPPORTED_FORMATS.md). Добавлен отдельный `.htm` fixture. Полная команда и результаты E2E соответствуют запуску `scripts/test-e2e.ps1` с фильтром format/citation и large-table сценариев.
+
 ## M18 — приватный голосовой ввод в composer
 
 Дата: 3 октября 2026 года.

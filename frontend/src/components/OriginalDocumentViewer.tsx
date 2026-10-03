@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown, BookOpen, Calculator, ChevronDown, Fil
 import { renderAsync } from 'docx-preview'
 import * as pdfjsLib from 'pdfjs-dist'
 import { useAppHelpTargetRef } from '../appHelpUiTargets'
+import { getDocumentPreviewRenderer, getDocumentViewerKind } from '../documentFormats'
 import type { DocumentPreview, DocumentRecord, PreviewBlock, SourceRef, StreamCitation, TableAggregate, TableCalculation, TableFilter, TableFilterKind, TablePreview } from '../types'
 
 const API = '/api/v1'
@@ -1187,7 +1188,8 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   const dialogRef = useRef<HTMLDialogElement>(null)
   const handleMatch = useCallback((quality: MatchQuality) => setMatchReport({ sourceId: selectedSourceId, quality }), [selectedSourceId])
   const matchQuality = matchReport.sourceId === selectedSourceId ? matchReport.quality : 'not_found'
-  const renderer = preview.renderer || (record.file_type === 'docx' ? 'docx' : record.file_type === 'pdf' ? 'pdf' : ['csv', 'xlsx', 'xls'].includes(record.file_type) ? record.file_type : record.file_type === 'xml' ? 'xml' : record.file_type === 'pptx' || record.file_type === 'epub' ? record.file_type : 'text')
+  const renderer = preview.renderer || getDocumentPreviewRenderer(record.file_type)
+  const viewerKind = getDocumentViewerKind(record.file_type)
   const rawPageMap = Array.isArray(record.metadata.pdf_page_map) ? record.metadata.pdf_page_map as Record<string, unknown>[] : []
   const rawOcrPageMap = Array.isArray(record.metadata.ocr_page_map) ? record.metadata.ocr_page_map as Record<string, unknown>[] : []
   const ocrPageMap = new Map(rawOcrPageMap.flatMap((item) => typeof item.page === 'number' ? [[item.page, item] as const] : []))
@@ -1272,12 +1274,12 @@ export function OriginalDocumentViewer({ document: record, preview, selectedSour
   }
   const content = useMemo(() => {
     const onError = (message: string) => setRenderError(message)
-    if (renderer === 'pdf') return <PdfOriginalViewer key={retryKey} originalUrl={originalUrl} pageNumber={pageNumber} selectedSource={selectedSource} onMatch={handleMatch} />
-    if (renderer === 'docx') return <DocxOriginalViewer key={retryKey} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
-    if (renderer === 'csv' || renderer === 'xlsx' || renderer === 'xls') return <CsvOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
-    if (renderer === 'pptx' || renderer === 'epub') return <SourceMapOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} />
+    if (viewerKind === 'pdf') return <PdfOriginalViewer key={retryKey} originalUrl={originalUrl} pageNumber={pageNumber} selectedSource={selectedSource} onMatch={handleMatch} />
+    if (viewerKind === 'docx') return <DocxOriginalViewer key={retryKey} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
+    if (viewerKind === 'csv') return <CsvOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
+    if (viewerKind === 'mapped') return <SourceMapOriginalViewer key={retryKey} preview={preview} selectedSource={selectedSource} onMatch={handleMatch} />
     return <TextOriginalViewer key={retryKey} preview={preview} originalUrl={originalUrl} selectedSource={selectedSource} onMatch={handleMatch} onError={onError} />
-  }, [handleMatch, originalUrl, pageNumber, preview, record.file_type, renderer, retryKey, selectedSource])
+  }, [handleMatch, originalUrl, pageNumber, preview, record.file_type, renderer, retryKey, selectedSource, viewerKind])
   useEffect(() => { setRenderError(null) }, [preview.document_id, renderer, retryKey])
   return <div className={`original-viewer-body renderer-${renderer}`} data-renderer={renderer} data-selected-source={selectedSourceId || undefined}>
     <div className="preview-toolbar"><span>Оригинал файла{preview.encoding ? ` · ${preview.encoding}` : ''}</span><a href={originalUrl} target="_blank" rel="noreferrer">Открыть исходный файл</a></div>

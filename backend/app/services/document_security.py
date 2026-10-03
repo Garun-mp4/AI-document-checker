@@ -14,32 +14,15 @@ from urllib.parse import urlsplit
 from defusedxml import ElementTree
 
 from app.config import settings
+from app.services.document_formats import MIME_TYPES, PACKAGE_PARTS
 from app.services.parsing import DocumentParsingError, _decode_text
-
-PACKAGE_PARTS = {
-    '.docx': 'word/document.xml', '.xlsx': 'xl/workbook.xml',
-    '.pptx': 'ppt/presentation.xml', '.epub': 'META-INF/container.xml',
-}
-MIME_TYPES = {
-    '.pdf': {'application/pdf'},
-    '.docx': {'application/vnd.openxmlformats-officedocument.wordprocessingml.document'},
-    '.xlsx': {'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},
-    '.xls': {'application/vnd.ms-excel'},
-    '.pptx': {'application/vnd.openxmlformats-officedocument.presentationml.presentation'},
-    '.epub': {'application/epub+zip', 'application/epub', 'application/zip', 'application/x-zip-compressed'},
-    '.txt': {'text/plain'}, '.md': {'text/plain', 'text/markdown', 'text/x-markdown'},
-    '.csv': {'text/plain', 'text/csv', 'application/csv', 'application/vnd.ms-excel'},
-    '.xml': {'text/plain', 'application/xml', 'text/xml'},
-    '.html': {'text/plain', 'text/html'}, '.htm': {'text/plain', 'text/html'},
-    '.json': {'text/plain', 'application/json'},
-}
 
 
 def validate_mime(filename: str, mime: str | None) -> None:
     value = (mime or '').split(';', 1)[0].strip().lower()
     if value in {'', 'application/octet-stream', 'binary/octet-stream'}:
         return
-    if value not in MIME_TYPES.get(Path(filename).suffix.lower(), set()):
+    if value not in MIME_TYPES.get(Path(filename).suffix.lower(), ()):
         raise DocumentParsingError('Тип содержимого не соответствует расширению файла.')
 
 

@@ -4,19 +4,19 @@ import path from 'node:path'
 
 test.beforeEach(async ({ request }) => provider(request))
 
-const formats = {
-  pdf: 'pdf', docx: 'docx', txt: 'text', md: 'text', csv: 'csv', xml: 'text',
-  xlsx: 'csv', xls: 'csv', pptx: 'mapped', html: 'text', htm: 'text', json: 'text', epub: 'mapped',
-}
+const formatCapabilities = JSON.parse(await readFile(new URL('../src/document-formats.json', import.meta.url), 'utf8')).formats
 
-for (const [extension, renderer] of Object.entries(formats)) {
-  test(`${extension}: upload → original → Markdown → citation → download`, async ({ page }) => {
+for (const { fileType, viewer, previewRenderer } of formatCapabilities) {
+  test(`${fileType}: upload → original → Markdown → citation → download`, async ({ page }) => {
+    const extension = fileType
+    const renderer = viewer
     const doc = await upload(page, `sample.${extension}`)
     await originalVisible(page, renderer)
     const state = await (await page.request.get(`/api/v1/documents/${doc.id}`)).json()
     expect(state.chunk_count).toBeGreaterThan(0)
     expect(state.markdown_status).toBe('ready')
     const preview = await (await page.request.get(`/api/v1/documents/${doc.id}/preview`)).json()
+    expect(preview.renderer).toBe(previewRenderer)
     expect(preview.blocks[0].locator).toMatchObject({
       locator_version: 1,
       document_id: doc.id,
@@ -230,6 +230,25 @@ test('export dialog downloads selected answers as Markdown and saved analysis as
   const pdfContent = await readFile(await pdfDownload.path())
   expect(pdfContent.subarray(0, 5).toString()).toBe('%PDF-')
 })
+
+for (const fileName of ['large.csv', 'large.xlsx']) {
+  test(`${fileName}: original table keeps pagination and bounded DOM rows`, async ({ page }) => {
+    const doc = await upload(page, fileName)
+    await originalVisible(page, 'csv')
+    const table = page.locator('.original-csv-table')
+    const rows = table.locator('tbody tr[data-row-number]')
+    await expect(rows.first()).toBeVisible()
+    expect(await rows.count()).toBeLessThanOrEqual(100)
+    await expect(page.locator('.csv-table-footer')).toContainText('из 240 строк')
+    const showMore = page.getByRole('button', { name: 'Показать ещё' })
+    await expect(showMore).toBeVisible()
+    await showMore.click()
+    await expect(page.locator('.csv-table-footer')).toContainText('Показано 200 из 240 строк')
+    expect(await rows.count()).toBeLessThanOrEqual(100)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
+    expect(doc.id).toBeTruthy()
+  })
+}
 
 test('Citation loads and highlights a matching CSV range beyond the first table page', async ({ page }) => {
   const doc = await upload(page, 'large.csv')
