@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from openpyxl import Workbook
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TERMINAL_STATES = {"ready", "needs_auth", "model_unavailable", "error"}
@@ -277,6 +278,76 @@ def test_compose_indexes_every_supported_fixture_through_the_real_api(compose_cl
             expected_kind,
         )
         assert document["status"] == "needs_auth"
+
+
+@pytest.mark.integration
+def test_compose_preserves_xlsx_formula_states_through_worker_and_citations(compose_client: httpx.Client) -> None:
+    _require_disconnected_codex(compose_client)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Данные"
+    sheet.append(["Товар", "Количество", "Сохранённый итог", "Итог без кэша"])
+    sheet.append(["A", 0, "=B2", "=B2+1"])
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    patched = BytesIO()
+    with zipfile.ZipFile(BytesIO(stream.getvalue())) as source, zipfile.ZipFile(patched, "w") as target:
+        for entry in source.infolist():
+            contents = source.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                contents = contents.replace(b"<f>B2</f><v></v>", b"<f>B2</f><v>0</v>")
+            target.writestr(entry, contents)
+    original = patched.getvalue()
+
+    response = compose_client.post(
+        "/api/v1/documents",
+        files={"file": ("formula-states.xlsx", original, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert response.status_code == 202, response.text
+    document_id = response.json()["id"]
+    try:
+        document = _wait_for_document(compose_client, document_id)
+        assert document["status"] == "needs_auth", document.get("error_message")
+        assert document["markdown_status"] == "ready"
+        assert document["analysis_source"] == "markitdown"
+        assert document["metadata"]["formula_count"] == 2
+        assert document["metadata"]["formula_cache_missing_count"] == 1
+
+        chunks_response = compose_client.get(f"/api/v1/documents/{document_id}/chunks?limit=200")
+        assert chunks_response.status_code == 200, chunks_response.text
+        chunks = chunks_response.json()
+        cached = next(chunk for chunk in chunks if chunk["locator"].get("cell") == "C2")
+        uncached = next(chunk for chunk in chunks if chunk["locator"].get("cell") == "D2")
+        assert cached["locator"]["sheet"] == uncached["locator"]["sheet"] == "Данные"
+        assert cached["locator"]["row_start"] == uncached["locator"]["row_start"] == 2
+        assert cached["locator"]["mapping_confidence"] == uncached["locator"]["mapping_confidence"] == "exact"
+        assert cached["locator"]["formula_has_cached_value"] is True
+        assert uncached["locator"]["formula_has_cached_value"] is False
+        assert "сохранённое значение: 0" in cached["text"]
+        assert "не вычисляло" in uncached["text"]
+
+        markdown = compose_client.get(f"/api/v1/documents/{document_id}/markdown")
+        assert markdown.status_code == 200, markdown.text
+        assert "выражение `=B2`" in markdown.json()["markdown"]
+        assert "выражение `=B2+1`" in markdown.json()["markdown"]
+        assert "Нет сохранённого результата" in markdown.json()["markdown"]
+        markdown_download = compose_client.get(f"/api/v1/documents/{document_id}/markdown/download")
+        assert markdown_download.status_code == 200, markdown_download.text
+        assert markdown_download.content.decode("utf-8") == markdown.json()["markdown"]
+
+        table = compose_client.get(f"/api/v1/documents/{document_id}/preview/table?offset=0&limit=10")
+        assert table.status_code == 200, table.text
+        formula_row = next(row for row in table.json()["rows"] if row["number"] == 2)
+        assert formula_row["cells"][2:4] == ["0", ""]
+        assert [item["has_cached_value"] for item in formula_row["formula_cells"]] == [True, False]
+
+        original_response = compose_client.get(f"/api/v1/documents/{document_id}/file")
+        assert original_response.status_code == 200, original_response.text
+        assert original_response.content == original
+    finally:
+        delete_response = compose_client.delete(f"/api/v1/documents/{document_id}")
+        assert delete_response.status_code == 204, delete_response.text
 
 
 @pytest.mark.integration

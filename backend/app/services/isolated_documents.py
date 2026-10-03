@@ -25,9 +25,16 @@ from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlo
 _slots = asyncio.Semaphore(2)
 _PROGRESS_PREFIX = b'\x1eDOC_PROGRESS '
 PARSER_CACHE_VERSION = "document-parser-m14-v1"
+XLSX_FORMULA_CACHE_VERSION = "xlsx-formula-context-m17-v1"
 OCR_CACHE_VERSION = "tesseract-ocr-m14-v1"
 MAPPING_CACHE_VERSION = "markdown-source-map-m14-v1"
 logger = logging.getLogger(__name__)
+
+
+def _parser_cache_version(filename: str) -> str:
+    if Path(filename).suffix.lower() == ".xlsx":
+        return f"{PARSER_CACHE_VERSION}:{XLSX_FORMULA_CACHE_VERSION}"
+    return PARSER_CACHE_VERSION
 
 
 async def _consume_progress(
@@ -256,7 +263,7 @@ async def parse_uploaded(
         input_checksum=checksum,
         filename=filename,
         parameters=parser_parameters,
-        parser_version=PARSER_CACHE_VERSION,
+        parser_version=_parser_cache_version(filename),
     )
     cached = load_json_cache(settings.upload_dir, "parsed", key)
     if cached is not None:
@@ -317,7 +324,7 @@ async def map_uploaded(path: Path, filename: str, markdown_path: Path, *, cache_
         input_checksum=original_checksum,
         filename=filename,
         parameters={"markdown_checksum": markdown_checksum},
-        parser_version=f"{MAPPING_CACHE_VERSION}:{PARSER_CACHE_VERSION}",
+        parser_version=f"{MAPPING_CACHE_VERSION}:{_parser_cache_version(filename)}",
     )
     cached = load_json_cache(settings.upload_dir, "mapping", key)
     if cached is not None:

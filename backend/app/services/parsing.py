@@ -840,13 +840,21 @@ def _parse_html(data: bytes, file_type: str = "html") -> ParsedDocument:
     })
 
 
-def _spreadsheet_blocks(rows_by_sheet: Iterable[tuple[str, list[list[str]]]], file_type: str) -> ParsedDocument:
+def _spreadsheet_blocks(
+    rows_by_sheet: Iterable[tuple[str, list[list[str]]]],
+    file_type: str,
+    formula_cells_by_sheet: dict[str, dict[int, list[dict[str, Any]]]] | None = None,
+) -> ParsedDocument:
     blocks: list[SourceBlock] = []
     sheet_count = 0
     total_rows = 0
     max_columns = 0
+    formula_count = 0
+    formula_cache_missing_count = 0
     columns_by_sheet: dict[str, list[str]] = {}
     numeric_columns: list[dict[str, Any]] = []
+    if formula_cells_by_sheet is None:
+        formula_cells_by_sheet = {}
     for sheet_name, rows in rows_by_sheet:
         sheet_count += 1
         if sheet_count > 200:
@@ -875,16 +883,64 @@ def _spreadsheet_blocks(rows_by_sheet: Iterable[tuple[str, list[list[str]]]], fi
                         "minimum": str(min(numbers)),
                         "maximum": str(max(numbers)),
                     })
-        blocks.append(SourceBlock(
-            f"Лист «{sheet_name}»: " + " | ".join(headers),
-            {"kind": file_type, "label": f"Лист «{sheet_name}»", "sheet": sheet_name, "row": 1, "row_start": 1, "row_end": 1},
-        ))
+        header_formulas = formula_cells_by_sheet.get(sheet_name, {}).get(1, [])
+        header_locator: dict[str, Any] = {
+            "kind": file_type,
+            "label": f"Лист «{sheet_name}»",
+            "sheet": sheet_name,
+            "row": 1,
+            "row_start": 1,
+            "row_end": 1,
+        }
+        if file_type == "xlsx":
+            header_locator["sheet_row_count"] = len(rows)
+            header_locator["populated_columns"] = [
+                index for index, value in enumerate(rows[0][:len(headers)])
+                if str(value).strip()
+            ]
+        if header_formulas:
+            header_locator["formula_cells"] = [
+                {
+                    **item,
+                    "column": headers[item["column_index"]] if item["column_index"] < len(headers) else f"Столбец {item['column_index'] + 1}",
+                }
+                for item in header_formulas
+            ]
+            formula_count += len(header_formulas)
+            formula_cache_missing_count += sum(not item["has_cached_value"] for item in header_formulas)
+        blocks.append(SourceBlock(f"Лист «{sheet_name}»: " + " | ".join(headers), header_locator))
         for row_number, row in enumerate(data_rows, start=2):
             normalized = [str(value).strip() for value in row[:len(headers)]]
             normalized.extend([""] * max(0, len(headers) - len(normalized)))
-            line = " | ".join(f"{headers[index]}: {normalized[index]}" for index in range(len(headers)) if normalized[index])
+            formula_cells = [
+                {
+                    **item,
+                    "column": headers[item["column_index"]] if item["column_index"] < len(headers) else f"Столбец {item['column_index'] + 1}",
+                }
+                for item in formula_cells_by_sheet.get(sheet_name, {}).get(row_number, [])
+            ]
+            formulas_by_column = {item["column_index"]: item for item in formula_cells}
+            values: list[str] = []
+            for index, value in enumerate(normalized):
+                formula = formulas_by_column.get(index)
+                if formula is None:
+                    display = value
+                elif formula["has_cached_value"]:
+                    cached_value = formula["cached_value"]
+                    cached = str(cached_value) if cached_value is not None else "пустое значение"
+                    display = f"{value} (формула: {formula['formula']}; сохранённое значение: {cached})"
+                else:
+                    display = (
+                        f"формула: {formula['formula']}; сохранённое значение отсутствует "
+                        "(приложение формулу не вычисляло)"
+                    )
+                if display:
+                    values.append(f"{headers[index]}: {display}")
+            line = " | ".join(values)
+            formula_count += len(formula_cells)
+            formula_cache_missing_count += sum(not item["has_cached_value"] for item in formula_cells)
             if line:
-                blocks.append(SourceBlock(line, {
+                locator: dict[str, Any] = {
                     "kind": file_type,
                     "label": f"Лист «{sheet_name}», строка {row_number}",
                     "sheet": sheet_name,
@@ -892,7 +948,15 @@ def _spreadsheet_blocks(rows_by_sheet: Iterable[tuple[str, list[list[str]]]], fi
                     "row_start": row_number,
                     "row_end": row_number,
                     "columns": headers,
-                }))
+                }
+                if file_type == "xlsx":
+                    locator["populated_columns"] = [
+                        index for index, value in enumerate(normalized)
+                        if value or index in formulas_by_column
+                    ]
+                if formula_cells:
+                    locator["formula_cells"] = formula_cells
+                blocks.append(SourceBlock(line, locator))
     if not blocks:
         raise DocumentParsingError("В таблице не найдено заполненных листов.")
     return ParsedDocument(file_type, blocks, {
@@ -902,27 +966,70 @@ def _spreadsheet_blocks(rows_by_sheet: Iterable[tuple[str, list[list[str]]]], fi
         "columns_by_sheet": columns_by_sheet,
         "columns": next(iter(columns_by_sheet.values()), []),
         "numeric_columns": numeric_columns,
+        "formula_count": formula_count,
+        "formula_cache_missing_count": formula_cache_missing_count,
     })
 
 
 def _parse_xlsx(data: bytes) -> ParsedDocument:
     try:
         from openpyxl import load_workbook
-        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except ImportError as exc:
         raise DocumentParsingError("Для XLSX не установлен модуль openpyxl.") from exc
-    except Exception as exc:
-        raise DocumentParsingError("XLSX повреждён или имеет неверную структуру.") from exc
+    formulas_workbook = None
+    values_workbook = None
     try:
-        if len(workbook.worksheets) > 200 or any(
+        formulas_workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
+        values_workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
+        if len(formulas_workbook.worksheets) > 200 or any(
             (sheet.max_row or 0) > SPREADSHEET_MAX_ROWS or (sheet.max_column or 0) > SPREADSHEET_MAX_COLUMNS
-            for sheet in workbook.worksheets
+            for sheet in formulas_workbook.worksheets
         ):
             raise DocumentParsingError('Размер таблицы превышает безопасный предел строк, столбцов или листов.')
-        rows = ((sheet.title, [["" if value is None else str(value) for value in row] for row in sheet.iter_rows(values_only=True)]) for sheet in workbook.worksheets)
-        return _spreadsheet_blocks(rows, "xlsx")
+        formula_cells_by_sheet: dict[str, dict[int, list[dict[str, Any]]]] = {}
+
+        def sheet_rows() -> Iterable[tuple[str, list[list[str]]]]:
+            for formula_sheet in formulas_workbook.worksheets:
+                value_sheet = values_workbook[formula_sheet.title]
+                rows: list[list[str]] = []
+                formula_rows: dict[int, list[dict[str, Any]]] = {}
+                formula_iterator = formula_sheet.iter_rows(values_only=False)
+                value_iterator = value_sheet.iter_rows(values_only=False)
+                for row_number, (formula_row, value_row) in enumerate(
+                    zip(formula_iterator, value_iterator, strict=True),
+                    start=1,
+                ):
+                    row_values: list[str] = []
+                    for column_index, (formula_cell, value_cell) in enumerate(zip(formula_row, value_row, strict=True)):
+                        cached_value = value_cell.value
+                        row_values.append("" if cached_value is None else str(cached_value))
+                        if formula_cell.data_type != "f":
+                            continue
+                        raw_formula = formula_cell.value
+                        formula = str(getattr(raw_formula, "text", raw_formula))
+                        if not formula.startswith("="):
+                            formula = f"={formula}"
+                        formula_rows.setdefault(row_number, []).append({
+                            "cell": formula_cell.coordinate,
+                            "column_index": column_index,
+                            "formula": formula,
+                            "has_cached_value": cached_value is not None,
+                            "cached_value": None if cached_value is None else str(cached_value),
+                        })
+                    rows.append(row_values)
+                formula_cells_by_sheet[formula_sheet.title] = formula_rows
+                yield formula_sheet.title, rows
+
+        return _spreadsheet_blocks(sheet_rows(), "xlsx", formula_cells_by_sheet)
+    except DocumentParsingError:
+        raise
+    except Exception as exc:
+        raise DocumentParsingError("XLSX повреждён или имеет неверную структуру.") from exc
     finally:
-        workbook.close()
+        if formulas_workbook is not None:
+            formulas_workbook.close()
+        if values_workbook is not None:
+            values_workbook.close()
 
 
 def _parse_xls(data: bytes) -> ParsedDocument:

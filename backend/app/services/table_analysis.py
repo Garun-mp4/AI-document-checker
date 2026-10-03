@@ -152,7 +152,7 @@ def _read_xlsx(data: bytes, sheet: str | None) -> TableDataset:
                 is_formula = formula_cell.data_type == "f"
                 cached_value = value_cell.value
                 if is_formula:
-                    formula_text = str(formula)
+                    formula_text = str(getattr(formula, "text", formula))
                     formula_cells.append(FormulaCell(
                         column_index,
                         formula_text if formula_text.startswith("=") else f"={formula_text}",

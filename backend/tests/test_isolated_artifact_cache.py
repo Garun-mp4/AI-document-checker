@@ -144,3 +144,9 @@ def test_source_map_cache_keys_markdown_content(monkeypatch: pytest.MonkeyPatch,
     assert first == second == third
     assert changed_parser == first
     assert calls == 3
+
+
+def test_m17_parser_cache_revision_is_limited_to_xlsx() -> None:
+    assert isolated_documents._parser_cache_version("formulas.xlsx").endswith("xlsx-formula-context-m17-v1")
+    assert isolated_documents._parser_cache_version("report.txt") == isolated_documents.PARSER_CACHE_VERSION
+    assert isolated_documents._parser_cache_version("report.xls") == isolated_documents.PARSER_CACHE_VERSION

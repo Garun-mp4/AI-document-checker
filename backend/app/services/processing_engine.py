@@ -28,7 +28,7 @@ from app.services.isolated_documents import (
     run_document_operation,
 )
 from app.services.job_queue import LeaseLost, discard, enter_analysis, fenced
-from app.services.markdown_mapping import serialize_map
+from app.services.markdown_mapping import add_xlsx_formula_context, serialize_map
 from app.services.markitdown_service import MarkdownConversionError, MarkItDownService
 from app.services.ocr import OCRProcessingError
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
@@ -245,14 +245,21 @@ class ProcessingAttempt:
                 markdown_result = await self.markitdown.convert(path, cache_checksum=checksum)
                 await self.record_timing('markdown_conversion_ms', (time.perf_counter() - markdown_started) * 1_000)
                 markdown_text = markdown_result.markdown
-                await self.write(markdown_path, markdown_result.markdown)
+                if parsed.file_type == "xlsx":
+                    markdown_text = add_xlsx_formula_context(markdown_text, parsed.blocks)
+                    if (
+                        len(markdown_text) > settings.markdown_max_chars
+                        or len(markdown_text.encode("utf-8")) > settings.document_worker_max_output_bytes
+                    ):
+                        raise MarkdownConversionError("Сформированный Markdown для XLSX превышает безопасный размер.")
+                await self.write(markdown_path, markdown_text)
                 mapping_started = time.perf_counter()
                 mapped_blocks, markdown_mapping = await map_uploaded(path, filename, markdown_path, cache_checksum=checksum)
                 await self.record_timing('source_mapping_ms', (time.perf_counter() - mapping_started) * 1_000)
                 if not mapped_blocks or not any(block.locator.get("source_locators") for block in mapped_blocks):
                     raise MarkdownConversionError("MarkItDown не смог связать Markdown с исходными местами документа.")
                 await self.write(markdown_map_path, serialize_map(markdown_mapping))
-                markdown_checksum = hashlib.sha256(markdown_result.markdown.encode("utf-8")).hexdigest()
+                markdown_checksum = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
                 analysis_blocks = [(
                     block.text,
                     block.locator,

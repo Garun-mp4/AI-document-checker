@@ -9,7 +9,7 @@ import pytest
 
 from app.services.codex import CodexModelUnavailable, CodexNeedsLogin, CodexUnavailable
 from app.services.embeddings import EmbeddingConfigurationError
-from app.services.markdown_mapping import MappedMarkdownBlock
+from app.services.markdown_mapping import MappedMarkdownBlock, map_markdown
 from app.services.markitdown_service import MarkdownConversionError, MarkdownResult
 from app.services.parsing import DocumentParsingError, ParsedDocument, SourceBlock
 from app.services.processing_helpers import (
@@ -196,6 +196,31 @@ def harness(monkeypatch, tmp_path, file_type='txt', status='queued'):
     return ProcessingAttempt(job, SimpleNamespace()), document, original, version, session
 
 
+def _xlsx_formula_parsed() -> tuple[ParsedDocument, str]:
+    formula = {
+        "cell": "B2",
+        "column": "Итог",
+        "column_index": 1,
+        "formula": "=1-1",
+        "has_cached_value": True,
+        "cached_value": "0",
+    }
+    header = SourceBlock("Лист «Данные»: Код | Итог", {
+        "kind": "xlsx", "sheet": "Данные", "row": 1, "row_start": 1, "row_end": 1,
+        "sheet_row_count": 2, "populated_columns": [0, 1], "columns": ["Код", "Итог"],
+    })
+    row = SourceBlock("Код: A | Итог: 0 (формула: =1-1; сохранённое значение: 0)", {
+        "kind": "xlsx", "sheet": "Данные", "row": 2, "row_start": 2, "row_end": 2,
+        "populated_columns": [0, 1], "columns": ["Код", "Итог"], "formula_cells": [formula],
+    })
+    parsed = ParsedDocument("xlsx", [header, row], {
+        "sheet_count": 1, "row_count": 1, "column_count": 2,
+        "columns": ["Код", "Итог"], "numeric_columns": [],
+    })
+    markdown = "# Данные\n\n| Код | Итог |\n| --- | --- |\n| A | NaN |\n"
+    return parsed, markdown
+
+
 @pytest.mark.parametrize(('raised','status','message'), [
     (CodexNeedsLogin('login'), 'needs_auth', 'login'),
     (CodexModelUnavailable('model'), 'model_unavailable', 'model'),
@@ -247,6 +272,55 @@ def test_process_persists_markdown_mapping_and_indexes_markdown(monkeypatch, tmp
     assert attempt.job.progress['performance_ms']['markdown_conversion_ms'] >= 0
     assert attempt.job.progress['performance_ms']['source_mapping_ms'] >= 0
     assert attempt.job.progress['performance_ms']['embedding_ms'] >= 0
+
+
+def test_xlsx_processing_indexes_formula_markdown_and_preserves_original(monkeypatch, tmp_path):
+    attempt, document, original, _version, session = harness(monkeypatch, tmp_path, 'xlsx')
+    parsed, converted_markdown = _xlsx_formula_parsed()
+    async def parse(*args, **kwargs): return parsed
+    async def convert(*args, **kwargs): return MarkdownResult(converted_markdown, 'Данные')
+    async def mapping(_path, _filename, markdown_path, **_kwargs):
+        markdown = Path(markdown_path).read_text(encoding='utf-8')
+        return map_markdown(markdown, parsed.blocks)
+    monkeypatch.setattr(engine, 'parse_uploaded', parse)
+    monkeypatch.setattr(engine, 'map_uploaded', mapping)
+    attempt.markitdown.convert = convert
+
+    asyncio.run(attempt.run())
+
+    markdown = Path(document.markdown_path).read_text(encoding='utf-8')
+    assert attempt.job.state == 'succeeded'
+    assert document.markdown_status == 'ready'
+    assert document.analysis_source == 'markitdown'
+    assert '| A | 0 |' in markdown
+    assert 'выражение `=1-1`' in markdown
+    assert 'сохранённое значение: 0' in markdown
+    assert original.read_bytes() == 'Автор: Алексей Пример'.encode('cp1251')
+    citation = next(row for row in session.added if row.content_source == 'markitdown' and row.locator.get('cell') == 'B2')
+    assert citation.locator['sheet'] == 'Данные'
+    assert citation.locator['row_start'] == 2
+    assert citation.locator['formula_has_cached_value'] is True
+    assert citation.mapping_confidence == 'exact'
+
+
+def test_xlsx_formula_markdown_overflow_uses_native_fallback(monkeypatch, tmp_path):
+    attempt, document, original, _version, session = harness(monkeypatch, tmp_path, 'xlsx')
+    parsed, converted_markdown = _xlsx_formula_parsed()
+    monkeypatch.setattr(engine.settings, 'markdown_max_chars', len(converted_markdown))
+    async def parse(*args, **kwargs): return parsed
+    async def convert(*args, **kwargs): return MarkdownResult(converted_markdown, 'Данные')
+    monkeypatch.setattr(engine, 'parse_uploaded', parse)
+    attempt.markitdown.convert = convert
+
+    asyncio.run(attempt.run())
+
+    assert attempt.job.state == 'succeeded'
+    assert document.markdown_status == 'fallback'
+    assert document.analysis_source == 'native_fallback'
+    assert 'превышает безопасный размер' in document.markdown_error
+    assert document.markdown_path is None
+    assert all(row.content_source == 'native_fallback' for row in session.added if not row.is_derived)
+    assert original.read_bytes() == 'Автор: Алексей Пример'.encode('cp1251')
 
 
 @pytest.mark.parametrize('file_type', ['txt','md'])

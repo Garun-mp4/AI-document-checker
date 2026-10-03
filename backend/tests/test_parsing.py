@@ -1,15 +1,48 @@
 from __future__ import annotations
 
 import csv
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
 import pytest
 from docx import Document as DocxDocument
+from openpyxl import Workbook
+from openpyxl.worksheet.formula import ArrayFormula
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
+from app.services.markdown_mapping import add_xlsx_formula_context, map_markdown
+from app.services.markitdown_service import MarkItDownService
 from app.services.parsing import DocumentParsingError, parse_document, safe_filename
+
+
+def _xlsx_with_formula_states() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Данные"
+    sheet.append(["Позиция", "Количество", "Итог"])
+    sheet.append(["A", 2, "=B2*10"])
+    sheet.append([None, None, None])
+    sheet.append(["B", 3, "=B4*10"])
+    sheet.append(["Literal NaN", "NaN", None])
+    sheet.append(["Zero result", 0, "=B6-B6"])
+    totals = workbook.create_sheet("Итоги")
+    totals.append(["Показатель", "Значение"])
+    totals.append(["Проверка", "=2+2"])
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+
+    cached = BytesIO()
+    with zipfile.ZipFile(BytesIO(stream.getvalue())) as source, zipfile.ZipFile(cached, "w") as target:
+        for item in source.infolist():
+            content = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                content = content.replace(b"<f>B2*10</f><v></v>", b"<f>B2*10</f><v>20</v>")
+                content = content.replace(b"<f>B6-B6</f><v></v>", b"<f>B6-B6</f><v>0</v>")
+            target.writestr(item, content)
+    return cached.getvalue()
 
 
 def test_safe_filename_keeps_only_leaf_name() -> None:
@@ -61,6 +94,103 @@ def test_csv_calculates_decimal_comma_columns_exactly() -> None:
         "minimum": "1.5",
         "maximum": "2.5",
     }]
+
+
+def test_xlsx_parser_keeps_formula_and_cached_value_states_with_cell_locators() -> None:
+    parsed = parse_document("formulas.xlsx", _xlsx_with_formula_states())
+    by_cell = {
+        formula["cell"]: (block, formula)
+        for block in parsed.blocks
+        for formula in block.locator.get("formula_cells", [])
+    }
+
+    cached_block, cached_formula = by_cell["C2"]
+    assert cached_formula == {
+        "cell": "C2",
+        "column": "Итог",
+        "column_index": 2,
+        "formula": "=B2*10",
+        "has_cached_value": True,
+        "cached_value": "20",
+    }
+    assert "Количество: 2" in cached_block.text
+    assert "формула: =B2*10" in cached_block.text
+    assert "сохранённое значение: 20" in cached_block.text
+
+    uncached_block, uncached_formula = by_cell["C4"]
+    assert uncached_formula["has_cached_value"] is False
+    assert uncached_formula["cached_value"] is None
+    assert "формула: =B4*10" in uncached_block.text
+    assert "сохранённое значение отсутствует" in uncached_block.text
+    assert "не вычисля" in uncached_block.text
+    assert uncached_block.locator["sheet"] == "Данные"
+    assert uncached_block.locator["row_start"] == 4
+    assert uncached_block.locator["columns"] == ["Позиция", "Количество", "Итог"]
+
+    second_sheet_block, second_sheet_formula = by_cell["B2"]
+    assert second_sheet_block.locator["sheet"] == "Итоги"
+    assert second_sheet_formula["formula"] == "=2+2"
+    zero_formula = next(
+        formula for block in parsed.blocks for formula in block.locator.get("formula_cells", [])
+        if formula["cell"] == "C6"
+    )
+    assert zero_formula["has_cached_value"] is True
+    assert zero_formula["cached_value"] == "0"
+    assert parsed.metadata["formula_count"] == 4
+    assert parsed.metadata["formula_cache_missing_count"] == 2
+
+
+def test_xlsx_parser_extracts_array_formula_expression_without_evaluating_it() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Input", "Result"])
+    sheet.append([2, None])
+    sheet["B2"] = ArrayFormula(ref="B2:B2", text="=A2*2")
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+
+    parsed = parse_document("array-formula.xlsx", stream.getvalue())
+    formula = next(
+        formula for block in parsed.blocks for formula in block.locator.get("formula_cells", [])
+    )
+
+    assert formula["formula"] == "=A2*2"
+    assert formula["has_cached_value"] is False
+    assert parsed.metadata["formula_cache_missing_count"] == 1
+    assert "приложение формулу не вычисляло" in next(block.text for block in parsed.blocks if formula in block.locator.get("formula_cells", []))
+
+
+def test_xlsx_markdown_reconciles_empty_cells_and_maps_formula_citations(tmp_path: Path) -> None:
+    content = _xlsx_with_formula_states()
+    source = tmp_path / "formulas.xlsx"
+    source.write_bytes(content)
+    native = parse_document(source.name, content)
+    converted = MarkItDownService(tmp_path).convert_local(source).markdown
+
+    markdown = add_xlsx_formula_context(converted, native.blocks)
+
+    assert "| A | 2.0 | 20 |" in markdown
+    assert "|  |  |  |" in markdown
+    assert "| B | 3.0 | Нет сохранённого результата |" in markdown
+    assert "| Literal NaN | NaN |  |" in markdown
+    assert "выражение `=B2*10`" in markdown
+    assert "Формула XLSX — лист «Данные», ячейка C6" in markdown
+    assert "сохранённое значение: 0" in markdown
+    assert "сохранённое значение отсутствует; приложение формулу не вычисляло" in markdown
+    mapped, _mapping = map_markdown(markdown, native.blocks)
+    cached_citation = next(block for block in mapped if block.locator.get("cell") == "C2")
+    uncached_citation = next(block for block in mapped if block.locator.get("cell") == "C4")
+    zero_citation = next(block for block in mapped if block.locator.get("cell") == "C6")
+    assert cached_citation.locator["sheet"] == "Данные"
+    assert cached_citation.locator["row_start"] == 2
+    assert cached_citation.locator["column_index"] == 2
+    assert cached_citation.locator["mapping_confidence"] == "exact"
+    assert uncached_citation.locator["row_start"] == 4
+    assert uncached_citation.locator["column_index"] == 2
+    assert uncached_citation.locator["formula_has_cached_value"] is False
+    assert zero_citation.locator["row_start"] == 6
+    assert zero_citation.locator["formula_has_cached_value"] is True
 
 
 def test_large_csv_row_is_split_without_losing_its_locator() -> None:

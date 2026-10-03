@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
+from openpyxl.worksheet.formula import ArrayFormula
 from pydantic import ValidationError
 
 from app.schemas import TableFilterIn
@@ -14,7 +15,7 @@ from app.services.parsing import DocumentParsingError, parse_document
 from app.services.table_analysis import calculate_table, query_table
 
 
-def _xlsx_with_formula_cache(*, cached: bool = True) -> bytes:
+def _xlsx_with_formula_cache(*, cached: bool = True, cached_value: str = "1200.25") -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["Товар", "Цена", "Итог"])
@@ -30,7 +31,7 @@ def _xlsx_with_formula_cache(*, cached: bool = True) -> bytes:
             if entry.filename == "xl/worksheets/sheet1.xml":
                 xml = content.decode("utf-8")
                 if cached:
-                    xml = xml.replace("<f>SUM(B2:B2)</f><v></v>", "<f>SUM(B2:B2)</f><v>1200.25</v>")
+                    xml = xml.replace("<f>SUM(B2:B2)</f><v></v>", f"<f>SUM(B2:B2)</f><v>{cached_value}</v>")
                 content = xml.encode("utf-8")
             target.writestr(entry, content)
     return converted.getvalue()
@@ -171,6 +172,35 @@ def test_formula_view_shows_cached_result_without_running_formula() -> None:
         "has_cached_value": True,
     }]
     assert formula_row["cells"][2] == "1200.25"
+
+
+def test_formula_view_preserves_zero_cached_result() -> None:
+    table = query_table(_xlsx_with_formula_cache(cached_value="0"), "xlsx", limit=10)
+
+    formula_row = next(row for row in table["rows"] if row["number"] == 2)
+    assert formula_row["cells"][2] == "0"
+    assert formula_row["formula_cells"][0]["has_cached_value"] is True
+
+
+def test_formula_view_exposes_array_formula_without_evaluation() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Input", "Result"])
+    sheet.append([2, None])
+    sheet["B2"] = ArrayFormula(ref="B2:B2", text="=A2*2")
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+
+    table = query_table(stream.getvalue(), "xlsx", limit=10)
+    row = next(row for row in table["rows"] if row["number"] == 2)
+
+    assert row["formula_cells"] == [{
+        "column_index": 1,
+        "formula": "=A2*2",
+        "has_cached_value": False,
+    }]
+    assert row["cells"][1] == ""
 
 
 def test_uncached_formula_is_not_mistaken_for_an_empty_cell_or_calculated() -> None:
