@@ -8,6 +8,7 @@ test('Unified AI composer keeps attachment, model, voice, keyboard, and narrow-l
   test.setTimeout(240_000)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
+  await page.getByRole('button', { name: 'Новый чат', exact: true }).click()
 
   const emptyComposer = page.locator('.empty-chat-compose-area .ai-composer')
   await expect(emptyComposer.getByLabel('Вопрос по документу', { exact: true })).toBeDisabled()
