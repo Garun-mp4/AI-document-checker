@@ -10,6 +10,7 @@ const layoutSelector = await readFile(resolve(root, 'src/components/DocumentLayo
 const chatMarkdown = await readFile(resolve(root, 'src/components/ChatMarkdown.tsx'), 'utf8')
 const markdownViewer = await readFile(resolve(root, 'src/components/MarkdownViewer.tsx'), 'utf8')
 const originalViewer = await readFile(resolve(root, 'src/components/OriginalDocumentViewer.tsx'), 'utf8')
+const pdfOriginalViewer = await readFile(resolve(root, 'src/components/PdfOriginalViewer.tsx'), 'utf8')
 const styles = await readFile(resolve(root, 'src/styles.css'), 'utf8')
 const appHelpTargets = await readFile(resolve(root, 'src/appHelpUiTargets.ts'), 'utf8')
 const searchToolbar = await readFile(resolve(root, 'src/components/DocumentSearchToolbar.tsx'), 'utf8')
@@ -180,8 +181,8 @@ test('OCR has an explicit processing state and user-facing fallback message', ()
   assert.match(originalViewer, /Создаю карту координат/)
   assert.match(app, /Не удалось распознать скан/)
   assert.match(styles, /\.ocr-notice\s*\{[^}]*border/)
-  assert.match(originalViewer, /pdfOcrWordBoxes\(selectedSource\)/)
-  assert.match(originalViewer, /pdf-ocr-highlight-box/)
+  assert.match(pdfOriginalViewer, /pdfOcrWordBoxes\(selectedSource\)/)
+  assert.match(pdfOriginalViewer, /pdf-ocr-highlight-box/)
 })
 
 test('OCR retry keeps language, quality, scope, impact and page confidence explicit', () => {

@@ -1,8 +1,27 @@
 # Отчёт о тестировании AI Document Checker
 
+## M20 — ленивая загрузка PDF.js и производительность старта
+
+Дата: 4 октября 2026 года. M20 реализован и проверен. E2E прогоны используют синтетические документы и отдельные временные Compose volumes.
+
+| Проверка | Результат |
+| --- | --- |
+| Frontend contract/unit tests (`npm test`) | **37 passed** |
+| Frontend production build (`npm run build`) | **PASS** (`tsc --noEmit`, Vite и gzip budget) |
+| Стартовый JS bundle | **PASS**: 900,570 bytes raw / 266,659 gzip; на 26.6% меньше baseline 363,239 gzip; предел 290,591 gzip |
+| PDF assets | **PASS**: renderer chunk 334,596 bytes raw / 98,029 gzip; worker отдельный asset 1,375,838 bytes |
+| Backend unit suite | **438 passed, 11 integration deselected** |
+| Compose API integration | **11 passed, 438 deselected**; проверены dynamic manifest entry, отдельные renderer/worker assets, MIME и cache headers |
+| Chromium E2E: форматы, OCR и M20 | **31 passed**: все 13 заявленных расширений, кодировки, многостраничные PDF/DOCX, много-листовые XLS/XLSX, PPTX/EPUB, таблица с пагинацией, русский OCR, viewer/worker по требованию, три viewport, повтор chunk/worker с сохранением citation; отдельно в целевом PDF rerun подтверждены mixed native/OCR word boxes и существующий render fallback |
+| PostgreSQL queue checks / acceptance | **13 базовых проверок и 9 сценариев прошли** |
+| Изолированный security acceptance | **4 Linux resource/output + 2 upload/nginx + 3 descriptor/link + 1 converter-boundary проверки прошли** |
+| Migration acceptance в фильтрованном browser run | **Пропущена штатно**: фильтрованные сценарии не гарантируют сохранённый cited document; отдельный M20 миграционный сценарий не добавлялся |
+
+Сборка по-прежнему показывает штатное предупреждение Vite о JavaScript chunk больше 500 kB в несжатом виде; M20 уменьшает стартовую gzip-загрузку и переносит PDF.js в динамический chunk, не скрывая предупреждение. Начальная страница, открытие PDF, восстановление после отказа динамического chunk/worker, citation/OCR подсветка и три целевых viewport прошли браузерную проверку. После основного прогона M20 focused suite повторно прошёл (**5 passed**): включён новый DOCX network check (без загрузки PDF assets) и проверено сохранение citation при отказе worker и повторе.
+
 ## M19 — единый контракт поддерживаемых форматов
 
-Дата: 3 октября 2026 года. M19 реализован и проверен; M20 не начинался.
+Дата: 3 октября 2026 года. M19 реализован и проверен.
 
 | Проверка | Результат |
 | --- | --- |

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import random
-import re
 import time
 import zipfile
 from io import BytesIO
@@ -102,16 +101,29 @@ def test_compose_serves_frontend_assets_with_browser_mime_types(compose_client: 
         key: manifest[key] for key in ("build_id", "commit", "built_at")
     }
 
-    bundle_match = re.search(r'<script[^>]+src="([^"]+\.js)"', page.text)
-    assert bundle_match, page.text
-    bundle = compose_client.get(bundle_match.group(1))
+    vite_manifest_response = compose_client.get("/document-checker-manifest.json")
+    assert vite_manifest_response.status_code == 200, vite_manifest_response.text
+    vite_manifest = vite_manifest_response.json()
+    entry = next(value for value in vite_manifest.values() if value.get("isEntry"))
+    viewer_key = "src/components/PdfOriginalViewer.tsx"
+    worker_key = next(key for key in vite_manifest if key.endswith("/pdf.worker.min.mjs"))
+    assert viewer_key in entry["dynamicImports"], "PDF renderer must remain a lazy entry"
+    viewer = vite_manifest[viewer_key]
+    worker_asset = vite_manifest[worker_key]["file"]
+    assert worker_asset in viewer.get("assets", []), "PDF worker must be emitted beside the lazy renderer"
+
+    bundle = compose_client.get(f"/{entry['file']}")
     assert bundle.status_code == 200, bundle.text[:500]
     assert bundle.headers.get("content-type", "").startswith("application/javascript"), bundle.headers
     assert "immutable" in bundle.headers.get("cache-control", ""), bundle.headers
+    assert worker_asset not in bundle.text, "The startup bundle must not reference the PDF worker"
 
-    worker_match = re.search(r'(/assets/[^"`]+\.mjs)', bundle.text)
-    assert worker_match, "PDF.js worker is not present in the production bundle"
-    worker = compose_client.get(f"{worker_match.group(1)}?v=pdfjs-4")
+    viewer_response = compose_client.get(f"/{viewer['file']}")
+    assert viewer_response.status_code == 200, viewer_response.text[:500]
+    assert viewer_response.headers.get("content-type", "").startswith("application/javascript"), viewer_response.headers
+    assert "immutable" in viewer_response.headers.get("cache-control", ""), viewer_response.headers
+
+    worker = compose_client.get(f"/{worker_asset}?v=pdfjs-4")
     assert worker.status_code == 200, worker.text[:500]
     assert worker.headers.get("content-type", "").startswith("application/javascript"), worker.headers
     assert "immutable" in worker.headers.get("cache-control", ""), worker.headers

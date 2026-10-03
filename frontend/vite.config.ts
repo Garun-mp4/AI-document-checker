@@ -33,6 +33,9 @@ export default defineConfig(({ mode }) => {
       __APP_BUILD_INFO__: JSON.stringify(buildInfo),
     },
     plugins: [react(), buildInfoPlugin],
+    build: {
+      manifest: 'document-checker-manifest.json',
+    },
     server: {
       proxy: {
         '/api': 'http://localhost:8000',
