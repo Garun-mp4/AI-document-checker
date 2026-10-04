@@ -127,6 +127,8 @@ test('AI composers share accessible attachment, model, voice, send, and keyboard
   assert.match(aiComposer, /aria-label="Завершить диктовку"/)
   assert.match(aiComposer, /<VoiceLevelMeter analyser=\{voiceInput\.meterAnalyser\} recording=\{voiceInput\.meterAvailability === 'available'\}/)
   assert.match(aiComposer, /data-level-available=\{voiceInput\.meterAvailability === 'available'\}/)
+  assert.match(aiComposer, /if \(voiceInput\.browserConsentRequired\) setBrowserConsentOpen\(true\)/)
+  assert.match(aiComposer, /if \(browserConsentOpen \|\| voiceInput\.browserConsentRequired\) return/)
   assert.match(aiComposer, /stopVoiceRef\.current\?\.focus/)
   assert.match(aiComposer, /textareaRef\.current\?\.focus/)
   assert.match(aiComposer, /aria-label="Отправить вопрос"/)

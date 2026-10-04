@@ -95,12 +95,17 @@ export function AIComposer({
   }, [browserConsentOpen])
 
   useEffect(() => {
+    if (voiceInput.browserConsentRequired) setBrowserConsentOpen(true)
+  }, [voiceInput.browserConsentRequired])
+
+  useEffect(() => {
+    if (browserConsentOpen || voiceInput.browserConsentRequired) return
     if (recording) stopVoiceRef.current?.focus({ preventScroll: true })
     else if (voiceInput.state === 'processing') voiceControlRef.current?.focus({ preventScroll: true })
     else if (['complete', 'cancelled', 'error'].includes(voiceInput.state)) {
       if (voiceInputEnabled) textareaRef.current?.focus({ preventScroll: true })
     }
-  }, [recording, voiceInput.state, voiceInputEnabled])
+  }, [browserConsentOpen, recording, voiceInput.browserConsentRequired, voiceInput.state, voiceInputEnabled])
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
