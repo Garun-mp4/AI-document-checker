@@ -32,6 +32,7 @@ from app.database import SessionLocal
 from app.models import (
     AdditionalAnalysis,
     Chat,
+    ChatDocument,
     Chunk,
     Document,
     DocumentBookmark,
@@ -44,6 +45,9 @@ from app.schemas import (
     AdditionalAnalysisCreateIn,
     AdditionalAnalysisOut,
     AppVersionOut,
+    ChatComparisonCreateIn,
+    ChatComparisonUpdateIn,
+    ChatDocumentOut,
     ChatLibraryPageOut,
     ChatOut,
     ChatSettingsOut,
@@ -98,6 +102,18 @@ from app.services.codex import (
     CodexNeedsLogin,
     CodexPreferenceError,
     CodexUnavailable,
+)
+from app.services.comparison import (
+    COMPARISON_INSTRUCTIONS,
+    PER_DOCUMENT_RETRIEVAL_LIMIT,
+    ComparisonDocumentFinding,
+    ComparisonResponse,
+    ComparisonSynthesis,
+    citation_snapshot,
+    comparison_output_schema,
+    interleave_document_results,
+    render_comparison_answer,
+    validate_comparison_response,
 )
 from app.services.document_export import (
     MAX_EXPORT_SOURCES,
@@ -221,7 +237,7 @@ async def _sources_for_ids(session, document_id: uuid.UUID, ids: list[str]) -> l
 
 
 async def _sources_for_chat_ids(session, chat: Chat, ids: list[str]) -> list[SourceOut]:
-    """Resolve citations only inside this chat's document and the trusted app catalog."""
+    """Resolve citations only inside this chat's document scope and trusted app catalog."""
 
     app_by_id = {entry.source_id: entry for entry in APP_HELP_CATALOG}
     requested_app = {
@@ -230,6 +246,8 @@ async def _sources_for_chat_ids(session, chat: Chat, ids: list[str]) -> list[Sou
         if value in app_by_id and chat.scope in {"application", "document"}
     }
     document_ids = [value for value in ids if value not in app_by_id]
+    if chat.scope == "comparison":
+        return await _comparison_sources_for_chat(session, chat, document_ids)
     document_sources = (
         await _sources_for_ids(session, chat.document_id, document_ids)
         if chat.document_id is not None and document_ids
@@ -254,10 +272,82 @@ async def _sources_for_chat_ids(session, chat: Chat, ids: list[str]) -> list[Sou
     return resolved
 
 
+async def _comparison_sources_for_chat(session, chat: Chat, ids: list[str]) -> list[SourceOut]:
+    requested: list[uuid.UUID] = []
+    for value in ids:
+        try:
+            requested.append(uuid.UUID(value))
+        except (TypeError, ValueError):
+            continue
+    # This helper only resolves sources tied to a document historically linked
+    # to this chat, so citation IDs cannot widen retrieval to the whole library.
+    if not requested:
+        return []
+    linked_document_ids = (await session.execute(
+        select(ChatDocument.document_id).where(ChatDocument.chat_id == chat.id)
+    )).scalars().all()
+    if not linked_document_ids:
+        return []
+    rows = (await session.execute(
+        select(Chunk, Document)
+        .join(Document, Document.id == Chunk.document_id)
+        .where(Chunk.id.in_(requested), Chunk.document_id.in_(linked_document_ids))
+    )).all()
+    chunks_by_id = {str(chunk.id): (chunk, document) for chunk, document in rows}
+    return [
+        SourceOut(
+            id=value,
+            text=str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500],
+            locator=versioned_source_locator(
+                chunk.locator, document_id=str(document.id), processing_version=chunk.version,
+                file_type=document.file_type, is_derived=chunk.is_derived,
+            ),
+            ordinal=chunk.ordinal,
+            is_derived=chunk.is_derived,
+            document_id=str(document.id),
+            document_filename=document.filename,
+            source_version=chunk.version,
+        )
+        for value in ids
+        if value in chunks_by_id
+        for chunk, document in [chunks_by_id[value]]
+    ]
+
+
 async def _message_out(session, chat: Chat, message: Message) -> MessageOut:
+    citations = await _sources_for_chat_ids(session, chat, message.citations or [])
+    if chat.scope == "comparison":
+        snapshot_by_id = {
+            str(item.get("source_id")): item
+            for item in (message.citation_snapshots or [])
+            if isinstance(item, dict)
+        }
+        resolved = {item.id for item in citations}
+        for snapshot in message.citation_snapshots or []:
+            source_id = str(snapshot.get("source_id", ""))
+            if not source_id or source_id in resolved or source_id not in (message.citations or []):
+                continue
+            locator = snapshot.get("locator") if isinstance(snapshot.get("locator"), dict) else {}
+            citations.append(SourceOut(
+                id=source_id,
+                text="",
+                locator=locator,
+                ordinal=int(snapshot.get("ordinal", 0)),
+                is_derived=bool(snapshot.get("is_derived", False)),
+                document_id=str(snapshot.get("document_id", "")) or None,
+                document_filename=str(snapshot.get("document_filename", "")) or None,
+                source_version=int(snapshot.get("source_version", 0)) or None,
+                available=False,
+            ))
+        for citation in citations:
+            snapshot = snapshot_by_id.get(citation.id)
+            if snapshot:
+                citation.document_filename = str(snapshot.get("document_filename", "")) or citation.document_filename
+                citation.source_version = int(snapshot.get("source_version", 0)) or citation.source_version
+        citations.sort(key=lambda item: (message.citations or []).index(item.id) if item.id in (message.citations or []) else len(message.citations or []))
     return MessageOut(
         id=str(message.id), role=message.role, content=message.content,
-        citations=await _sources_for_chat_ids(session, chat, message.citations or []),
+        citations=citations,
         model=message.model, reasoning_effort=message.reasoning_effort,
         created_at=message.created_at,
         context_epoch=message.context_epoch,
@@ -338,9 +428,114 @@ async def create_application_chat(request: Request) -> ChatOut:
         return ChatOut(id=str(chat.id), scope="application", document_id=None, context_epoch=chat.context_epoch)
 
 
+async def _resolve_ready_comparison_sources(session, document_ids: list[uuid.UUID]) -> list[tuple[Document, int]]:
+    if not 2 <= len(document_ids) <= 5 or len(document_ids) != len(set(document_ids)):
+        raise HTTPException(status_code=422, detail="Выберите от двух до пяти разных документов.")
+    documents = (await session.execute(
+        select(Document).where(Document.id.in_(document_ids))
+    )).scalars().all()
+    by_id = {document.id: document for document in documents}
+    if len(by_id) != len(document_ids):
+        raise HTTPException(status_code=404, detail="Один из выбранных документов больше не существует.")
+    result: list[tuple[Document, int]] = []
+    for document_id in document_ids:
+        document = by_id[document_id]
+        if document.status != "ready":
+            raise HTTPException(status_code=409, detail=f"Документ «{document.filename}» ещё не готов к сравнению.")
+        version = await session.get(DocumentVersion, (document.id, document.active_version))
+        if version is None or version.state != "ready" or version.chunk_version < 1:
+            raise HTTPException(status_code=409, detail=f"Для документа «{document.filename}» нет готовой версии источников.")
+        result.append((document, version.chunk_version))
+    return result
+
+
+def _comparison_document_out(document: Document, source_version: int) -> ChatDocumentOut:
+    return ChatDocumentOut(
+        id=str(document.id), filename=document.filename, file_type=document.file_type,
+        status=document.status, source_version=source_version,
+    )
+
+
+@router.post("/chats/comparison", response_model=ChatOut, status_code=status.HTTP_201_CREATED)
+async def create_comparison_chat(body: ChatComparisonCreateIn, request: Request) -> ChatOut:
+    """Create a conversation whose retrieval scope is exactly the supplied ready documents."""
+
+    _reject_during_cache_cleanup(request)
+    async with SessionLocal() as session, session.begin():
+        sources = await _resolve_ready_comparison_sources(session, body.document_ids)
+        chat = Chat(scope="comparison", document_id=None)
+        session.add(chat)
+        await session.flush()
+        for position, (document, source_version) in enumerate(sources):
+            session.add(ChatDocument(
+                chat_id=chat.id,
+                document_id=document.id,
+                position=position,
+                source_version=source_version,
+                is_selected=True,
+            ))
+        await session.flush()
+        return ChatOut(
+            id=str(chat.id), scope="comparison", document_id=None,
+            context_epoch=chat.context_epoch, revision=chat.revision,
+            documents=[_comparison_document_out(document, source_version) for document, source_version in sources],
+        )
+
+
+@router.patch("/chats/{chat_id}/documents", response_model=ChatSettingsOut)
+async def update_comparison_documents(
+    chat_id: uuid.UUID,
+    body: ChatComparisonUpdateIn,
+    request: Request,
+) -> ChatSettingsOut:
+    """Replace the explicit source set and start a clean model context."""
+
+    _reject_during_cache_cleanup(request)
+    tasks = _chat_generation_tasks(request)
+    async with SessionLocal() as session, session.begin():
+        chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        if chat.scope != "comparison" or chat.document_id is not None:
+            raise HTTPException(status_code=409, detail="Изменять набор источников можно только в чате сравнения.")
+        if chat.revision != body.expected_revision:
+            raise HTTPException(status_code=409, detail="Состав чата изменился в другой вкладке. Обновите чат и повторите действие.")
+        active = (await session.execute(select(Message).where(
+            Message.chat_id == chat_id,
+            Message.generation_status == "streaming",
+        ).with_for_update())).scalars().all()
+        if any(str(message.id) in tasks and not tasks[str(message.id)].done() for message in active):
+            raise HTTPException(status_code=409, detail="Сначала остановите текущий ответ, затем меняйте документы.")
+        for message in active:
+            message.generation_status = "interrupted"
+            message.generation_error = "Набор источников изменён. Сохранённый фрагмент можно повторить в новом контексте."
+        sources = await _resolve_ready_comparison_sources(session, body.document_ids)
+        existing = (await session.execute(select(ChatDocument).where(ChatDocument.chat_id == chat_id).with_for_update())).scalars().all()
+        by_document = {link.document_id: link for link in existing}
+        for link in existing:
+            link.is_selected = False
+        for position, (document, source_version) in enumerate(sources):
+            link = by_document.get(document.id)
+            if link is None:
+                link = ChatDocument(chat_id=chat.id, document_id=document.id)
+                session.add(link)
+            link.position = position
+            link.source_version = source_version
+            link.is_selected = True
+            link.selected_at = datetime.now(timezone.utc)
+        chat.context_epoch += 1
+        chat.revision += 1
+        chat.codex_thread_id = None
+    async with SessionLocal() as session:
+        result = await get_chat_settings(session, chat_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Чат не найден.")
+        return result
+
+
 @router.delete("/chats/{chat_id}")
 async def delete_application_chat(chat_id: uuid.UUID, request: Request) -> dict[str, Any]:
-    """Delete one standalone application-help conversation and its messages."""
+    """Delete a standalone application-help or comparison conversation."""
 
     _reject_during_cache_cleanup(request)
     deleting = getattr(request.app.state, "maintenance_deleting_chats", None)
@@ -354,8 +549,8 @@ async def delete_application_chat(chat_id: uuid.UUID, request: Request) -> dict[
         chat = await session.get(Chat, chat_id)
         if chat is None:
             raise HTTPException(status_code=404, detail="Чат не найден.")
-        if chat.scope != "application" or chat.document_id is not None:
-            raise HTTPException(status_code=409, detail="Удалять отдельным действием можно только чат помощи по приложению.")
+        if chat.scope not in {"application", "comparison"} or chat.document_id is not None:
+            raise HTTPException(status_code=409, detail="Этот чат удаляется вместе со связанным документом.")
 
     deleting.add(key)
     cancelled = 0
@@ -367,7 +562,7 @@ async def delete_application_chat(chat_id: uuid.UUID, request: Request) -> dict[
             chat = (await session.execute(select(Chat).where(Chat.id == chat_id).with_for_update())).scalar_one_or_none()
             if chat is None:
                 raise HTTPException(status_code=404, detail="Чат не найден.")
-            if chat.scope != "application" or chat.document_id is not None:
+            if chat.scope not in {"application", "comparison"} or chat.document_id is not None:
                 raise HTTPException(status_code=409, detail="Область чата изменилась; он не был удалён.")
             await session.delete(chat)
         return {"id": key, "deleted": True, "cancelled_generations": cancelled}
@@ -1634,6 +1829,7 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
     user: Message | None = None
     history: list[Message] = []
     document: Document | None = None
+    comparison_sources: list[tuple[ChatDocument, Document]] = []
     chunks: list[Chunk] = []
     app_matches = ()
     request_scope: Literal["application", "document", "mixed"] = "document"
@@ -1657,6 +1853,32 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
                 raise HTTPException(status_code=409, detail="Документ удаляется. Повторите запрос после обновления библиотеки.")
             if document.status != "ready":
                 raise HTTPException(status_code=409, detail="Документ ещё обрабатывается или требует повторной обработки.")
+        elif chat.scope == "comparison":
+            if chat.document_id is not None:
+                raise HTTPException(status_code=409, detail="У чата сравнения некорректная область источников.")
+            links = (await session.execute(
+                select(ChatDocument).where(ChatDocument.chat_id == chat.id, ChatDocument.is_selected.is_(True))
+                .order_by(ChatDocument.position).with_for_update()
+            )).scalars().all()
+            if not 2 <= len(links) <= 5:
+                raise HTTPException(status_code=409, detail="Выберите от двух до пяти готовых документов для продолжения сравнения.")
+            for link in links:
+                selected_document = await session.get(Document, link.document_id)
+                if selected_document is None or selected_document.status != "ready":
+                    filename = selected_document.filename if selected_document else "Документ"
+                    raise HTTPException(status_code=409, detail=f"Документ «{filename}» сейчас не готов. Обновите набор источников после обработки.")
+                pinned_version = (await session.execute(
+                    select(DocumentVersion).where(
+                        DocumentVersion.document_id == link.document_id,
+                        DocumentVersion.chunk_version == link.source_version,
+                        DocumentVersion.state == "ready",
+                    ).order_by(DocumentVersion.number.desc()).limit(1)
+                )).scalar_one_or_none()
+                if pinned_version is None:
+                    raise HTTPException(status_code=409, detail=f"Версия источников документа «{selected_document.filename}» недоступна. Обновите набор сравнения.")
+                if str(selected_document.id) in getattr(request.app.state, "maintenance_deleting_documents", set()):
+                    raise HTTPException(status_code=409, detail="Один из выбранных документов удаляется. Повторите запрос после обновления библиотеки.")
+                comparison_sources.append((link, selected_document))
         elif chat.scope != "application" or chat.document_id is not None:
             raise HTTPException(status_code=409, detail="Область этого чата настроена некорректно.")
 
@@ -1689,8 +1911,8 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
             ).order_by(Message.created_at.desc(), Message.id.desc()).limit(32))).scalars().all()
             history.reverse()
 
-        app_matches = search_app_capabilities(text or "")
-        request_scope = classify_assistant_scope(text or "", app_matches, chat_scope=chat.scope)
+        app_matches = search_app_capabilities(text or "") if chat.scope != "comparison" else ()
+        request_scope = "document" if chat.scope == "comparison" else classify_assistant_scope(text or "", app_matches, chat_scope=chat.scope)
         use_app_contract = chat.scope == "application" or request_scope in {"application", "mixed"}
         document_id = document.id if document else None
         file_type = document.file_type if document else None
@@ -1703,7 +1925,18 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
         previous_messages = bounded_history(history, exclude_id=user.id if user else None)
         retrieval_query = " ".join([item["text"] for item in previous_messages[-4:]] + [text or ""])[-1_500:]
 
-    if document_id is not None and request_scope in {"document", "mixed"}:
+    if comparison_sources:
+        ranked_per_document = await asyncio.gather(*(
+            search_chunks(
+                selected_document.id,
+                retrieval_query,
+                limit=PER_DOCUMENT_RETRIEVAL_LIMIT,
+                version=link.source_version,
+            )
+            for link, selected_document in comparison_sources
+        ))
+        chunks = interleave_document_results(ranked_per_document)
+    elif document_id is not None and request_scope in {"document", "mixed"}:
         chunks = await search_chunks(document_id, retrieval_query, limit=8, version=source_version)
     if document_id is not None and request_scope in {"document", "mixed"} and file_type == "csv" and re.search(
         r"сумм|средн|миним|максим|итог|количеств|агрегат|скольк|посчит|вычисл|рассчит|подсчит|average|sum|total",
@@ -1727,7 +1960,46 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
     source_map: dict[str, Chunk] = {}
     structured_sources: dict[str, AppHelpAvailableSource] = {}
     structured_source_events: list[dict[str, Any]] = []
-    if use_app_contract:
+    comparison_source_documents = {str(document.id): document for _, document in comparison_sources}
+    comparison_document_manifest = [
+        {"document_id": str(document.id), "filename": document.filename, "source_version": link.source_version}
+        for link, document in comparison_sources
+    ]
+    comparison_available_sources: dict[str, str] = {}
+    if comparison_sources:
+        comparison_evidence: list[dict[str, Any]] = []
+        for chunk in chunks:
+            source_id = str(chunk.id)
+            source_document = comparison_source_documents[str(chunk.document_id)]
+            comparison_available_sources[source_id] = str(source_document.id)
+            label = str((chunk.locator or {}).get("label") or "Фрагмент документа")[:160]
+            comparison_evidence.append({
+                "source_id": source_id,
+                "document_id": str(source_document.id),
+                "filename": source_document.filename,
+                "source_version": chunk.version,
+                "location": label,
+                "excerpt": chunk.text[:1_500],
+            })
+            structured_source_events.append({
+                "id": source_id,
+                "text": str((chunk.locator or {}).get("source_text") or chunk.text)[:2_500],
+                "locator": chunk.locator,
+                "ordinal": chunk.ordinal,
+                "is_derived": chunk.is_derived,
+                "source_type": "document",
+                "document_id": str(source_document.id),
+                "document_filename": source_document.filename,
+                "source_version": chunk.version,
+            })
+        payload = {
+            "question": text,
+            "previous_messages": previous_messages,
+            "selected_documents": comparison_document_manifest,
+            "sources": comparison_evidence,
+            "instruction": COMPARISON_INSTRUCTIONS,
+        }
+    elif use_app_contract:
         for match in app_matches:
             capability = match.capability
             structured_sources[capability.source_id] = AppHelpAvailableSource(
@@ -1793,6 +2065,18 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
             latest_version = await session.get(DocumentVersion, (document_id, latest_document.active_version)) if latest_document else None
             if latest_version is None or latest_version.chunk_version != source_version:
                 raise HTTPException(status_code=409, detail="Версия документа изменилась. Повторите запрос.")
+        elif comparison_sources:
+            latest_links = (await session.execute(
+                select(ChatDocument.document_id, ChatDocument.source_version)
+                .where(ChatDocument.chat_id == chat_id, ChatDocument.is_selected.is_(True))
+                .order_by(ChatDocument.position)
+            )).all()
+            expected_links = [(link.document_id, link.source_version) for link, _ in comparison_sources]
+            if [(row[0], row[1]) for row in latest_links] != expected_links:
+                raise HTTPException(status_code=409, detail="Набор или версия источников изменились. Повторите запрос.")
+            if any(str(selected_document.id) in getattr(request.app.state, "maintenance_deleting_documents", set())
+                   for _, selected_document in comparison_sources):
+                raise HTTPException(status_code=409, detail="Один из выбранных документов удаляется. Повторите запрос позже.")
         elif chat.scope != "application" or chat.document_id is not None:
             raise HTTPException(status_code=409, detail="Чат приложения изменился. Повторите запрос.")
         if retry_user_id is None:
@@ -1838,8 +2122,77 @@ async def _create_chat_generation(chat_id: uuid.UUID, request: Request, *, text:
         try:
             yield _sse("started", {"user_message_id": str(user_id), "assistant_message_id": str(assistant_id),
                                    "context_epoch": context_epoch, "model": response_model,
-                                   "reasoning_effort": response_reasoning_effort, "source_version": source_version})
-            if use_app_contract:
+                                   "reasoning_effort": response_reasoning_effort, "source_version": source_version,
+                                   "source_versions": [{"document_id": str(document.id), "source_version": link.source_version}
+                                                       for link, document in comparison_sources]})
+            if comparison_sources:
+                yield _sse("sources", {"sources": structured_source_events})
+                if not comparison_available_sources:
+                    validated_comparison = ComparisonResponse(
+                        documents=[ComparisonDocumentFinding(
+                            document_id=item["document_id"], status="not_found", answer="", citations=[],
+                        ) for item in comparison_document_manifest],
+                        comparison=ComparisonSynthesis(status="not_found", answer="", citations=[]),
+                    )
+                else:
+                    structured_parts: list[str] = []
+                    async for item in codex.stream_chat(
+                        payload, None, model=response_model, reasoning_effort=response_reasoning_effort,
+                        output_schema=comparison_output_schema(), base_instructions=COMPARISON_INSTRUCTIONS,
+                        ephemeral=True,
+                    ):
+                        if item["kind"] != "delta":
+                            continue
+                        structured_parts.append(item["text"])
+                        if sum(map(len, structured_parts)) > 32_000:
+                            raise ValueError("Ответ сравнения превысил допустимый размер.")
+                    validated_comparison = validate_comparison_response(
+                        "".join(structured_parts),
+                        selected_document_ids=[item["document_id"] for item in comparison_document_manifest],
+                        available_sources=comparison_available_sources,
+                    )
+                answer, citation_ids = render_comparison_answer(
+                    validated_comparison,
+                    selected_documents=[(item["document_id"], item["filename"]) for item in comparison_document_manifest],
+                )
+                async with SessionLocal() as session:
+                    current_chat = await session.get(Chat, chat_id)
+                    citation_sources = await _sources_for_chat_ids(session, current_chat, citation_ids) if current_chat else []
+                if len(citation_sources) != len(citation_ids):
+                    raise ValueError("Не удалось разрешить одну из цитат выбранных документов.")
+                source_by_id = {str(chunk.id): chunk for chunk in chunks}
+                document_by_id = {str(document.id): document for _, document in comparison_sources}
+                snapshots = [citation_snapshot(
+                    source_id,
+                    document_id=str(source_by_id[source_id].document_id),
+                    filename=document_by_id[str(source_by_id[source_id].document_id)].filename,
+                    source_version=source_by_id[source_id].version,
+                    locator=source_by_id[source_id].locator or {},
+                    ordinal=source_by_id[source_id].ordinal,
+                    is_derived=source_by_id[source_id].is_derived,
+                ) for source_id in citation_ids]
+                async with SessionLocal() as session, session.begin():
+                    current_chat = await session.get(Chat, chat_id)
+                    message = await session.get(Message, assistant_id, with_for_update=True)
+                    if (current_chat is None or current_chat.context_epoch != context_epoch or
+                            message is None or message.generation_status != "streaming"):
+                        return
+                    if str(chat_id) in getattr(request.app.state, "maintenance_deleting_chats", set()):
+                        message.content = ""
+                        message.generation_status = "interrupted"
+                        message.generation_error = "Ответ прерван из-за удаления чата."
+                        return
+                    message.content = answer
+                    message.citations = citation_ids
+                    message.citation_snapshots = snapshots
+                    message.generation_status = "complete"
+                    message.generation_error = None
+                if answer:
+                    answer_parts.append(answer)
+                    yield _sse("delta", {"text": answer})
+                yield _sse("done", {"assistant_message_id": str(assistant_id), "answer": answer,
+                                     "citations": [source.model_dump() for source in citation_sources]})
+            elif use_app_contract:
                 yield _sse("sources", {"sources": structured_source_events})
                 if request_scope == "application" and not app_matches:
                     validated = AppHelpResponse(

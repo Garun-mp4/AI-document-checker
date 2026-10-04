@@ -57,6 +57,10 @@ class SourceOut(BaseModel):
     is_derived: bool
     source_type: Literal["document", "application"] = "document"
     title: str | None = None
+    document_id: str | None = None
+    document_filename: str | None = None
+    source_version: int | None = None
+    available: bool = True
 
 
 class PreviewBlockOut(BaseModel):
@@ -328,11 +332,36 @@ class DocumentExportIn(BaseModel):
         return self
 
 
+class ChatDocumentOut(BaseModel):
+    id: str
+    filename: str
+    file_type: str
+    status: str
+    source_version: int
+
+
+class ChatComparisonCreateIn(BaseModel):
+    document_ids: list[uuid.UUID] = Field(min_length=2, max_length=5)
+
+    @field_validator("document_ids")
+    @classmethod
+    def validate_unique_documents(cls, ids: list[uuid.UUID]) -> list[uuid.UUID]:
+        if len(ids) != len(set(ids)):
+            raise ValueError("Документы в сравнении не должны повторяться.")
+        return ids
+
+
+class ChatComparisonUpdateIn(ChatComparisonCreateIn):
+    expected_revision: int = Field(ge=1)
+
+
 class ChatOut(BaseModel):
     id: str
-    scope: Literal["document", "application"] = "document"
+    scope: Literal["document", "application", "comparison"] = "document"
     document_id: str | None
     context_epoch: int = 0
+    revision: int = 1
+    documents: list[ChatDocumentOut] = Field(default_factory=list)
 
 
 class StartChatContextOut(BaseModel):
@@ -364,8 +393,9 @@ class ChatSummaryOut(BaseModel):
     """A durable library entry for a document or application-help conversation."""
 
     id: str
-    scope: Literal["document", "application"] = "document"
+    scope: Literal["document", "application", "comparison"] = "document"
     document_id: str | None
+    documents: list[ChatDocumentOut] = Field(default_factory=list)
     title: str
     custom_title: str | None = None
     pinned: bool = False
@@ -396,13 +426,14 @@ class ChatLibraryPageOut(BaseModel):
 
 class ChatSettingsOut(BaseModel):
     id: str
-    scope: Literal["document", "application"] = "document"
+    scope: Literal["document", "application", "comparison"] = "document"
     document_id: str | None
     title: str
     custom_title: str | None
     pinned: bool
     revision: int
     context_epoch: int = 0
+    documents: list[ChatDocumentOut] = Field(default_factory=list)
 
 
 class ChatUpdateIn(BaseModel):

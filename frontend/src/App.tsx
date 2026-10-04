@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlignLeft,
   ArrowUp,
@@ -15,6 +15,7 @@ import {
   Download,
   Database,
   FileCode2,
+  Files,
   FileSpreadsheet,
   FileText,
   FileUp,
@@ -40,7 +41,7 @@ import {
   X,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import type { AdditionalAnalysis, AdditionalAnalysisMode, ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentBookmark, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
+import type { AdditionalAnalysis, AdditionalAnalysisMode, ChatDocumentRef, ChatLibraryPage, ChatMessage, ChatRecord, ChatSettings, ChatSummary, CodexStatus, DocumentAnalysisVersion, DocumentBookmark, DocumentPreview, DocumentRecord, DocumentSearchMatch, DocumentSearchScope, Insight, MarkdownDocument, ProcessingJob, SourceRef, StreamCitation } from './types'
 import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_UPLOAD_BYTES, SUPPORTED_DOCUMENT_EXTENSION_SET, SUPPORTED_FORMAT_LABELS, SUPPORTED_FORMAT_LABELS_DOTTED } from './documentFormats'
 import { DocumentLayoutSelector } from './components/DocumentLayoutSelector'
 import type { AnalysisLayoutMode } from './components/DocumentLayoutSelector'
@@ -69,6 +70,7 @@ const API = '/api/v1'
 const ACCEPTED = ACCEPTED_DOCUMENT_EXTENSIONS.join(',')
 const SELECTED_CHAT_STORAGE_KEY = 'document-checker-selected-chat'
 const SELECTED_APPLICATION_CHAT_STORAGE_KEY = 'document-checker-selected-application-chat'
+const SELECTED_COMPARISON_CHAT_STORAGE_KEY = 'document-checker-selected-comparison-chat'
 const NEW_CHAT_STORAGE_KEY = 'document-checker-new-chat'
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'document-checker-sidebar-collapsed'
 const ANALYSIS_LAYOUT_STORAGE_KEY = 'document-checker-analysis-layout'
@@ -285,10 +287,14 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(() => {
     const isNewChat = localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true'
     const savedApplicationChat = localStorage.getItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY)
-    return isNewChat || savedApplicationChat ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY)
+    const savedComparisonChat = localStorage.getItem(SELECTED_COMPARISON_CHAT_STORAGE_KEY)
+    return isNewChat || savedApplicationChat || savedComparisonChat ? null : localStorage.getItem(SELECTED_CHAT_STORAGE_KEY)
   })
   const [selectedApplicationChatId, setSelectedApplicationChatId] = useState<string | null>(() =>
     localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY),
+  )
+  const [selectedComparisonChatId, setSelectedComparisonChatId] = useState<string | null>(() =>
+    localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true' ? null : localStorage.getItem(SELECTED_COMPARISON_CHAT_STORAGE_KEY),
   )
   const [newChatOpen, setNewChatOpen] = useState(() => localStorage.getItem(NEW_CHAT_STORAGE_KEY) === 'true')
   const [document, setDocument] = useState<DocumentRecord | null>(null)
@@ -344,6 +350,15 @@ function App() {
   const [codexPreferenceMessage, setCodexPreferenceMessage] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
   const [deleteApplicationChatTarget, setDeleteApplicationChatTarget] = useState<ChatSummary | null>(null)
+  const [comparisonPickerOpen, setComparisonPickerOpen] = useState(false)
+  const [comparisonPickerChatId, setComparisonPickerChatId] = useState<string | null>(null)
+  const [comparisonPickerDocuments, setComparisonPickerDocuments] = useState<DocumentRecord[]>([])
+  const [comparisonPickerSelection, setComparisonPickerSelection] = useState<string[]>([])
+  const [comparisonPickerLoading, setComparisonPickerLoading] = useState(false)
+  const [comparisonPickerSaving, setComparisonPickerSaving] = useState(false)
+  const [comparisonPickerError, setComparisonPickerError] = useState('')
+  const [comparisonPickerQuery, setComparisonPickerQuery] = useState('')
+  const comparisonPickerReturnFocusRef = useRef<HTMLElement | null>(null)
   const [applicationSourceTarget, setApplicationSourceTarget] = useState<SourceRef | null>(null)
   const [localDataOpen, setLocalDataOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
@@ -356,6 +371,7 @@ function App() {
   const [toast, setToast] = useState('')
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
   const [selectedSource, setSelectedSource] = useState<SourceRef | StreamCitation | null>(null)
+  const [pendingCitationNavigation, setPendingCitationNavigation] = useState<SourceRef | StreamCitation | null>(null)
   const [searchScope, setSearchScope] = useState<DocumentSearchScope>('original')
   const [searchSelection, setSearchSelection] = useState<DocumentSearchMatch | null>(null)
   const [searchResetKey, setSearchResetKey] = useState(0)
@@ -549,8 +565,11 @@ function App() {
       setChats(result.items)
       setChatLibraryTotal(result.total)
       setChatLibraryHasMore(result.has_more)
-      if (preferredDocumentId) setSelectedApplicationChatId(null)
-      setSelectedId((current) => preferredDocumentId ?? (selectedApplicationChatId || newChatOpen
+      if (preferredDocumentId) {
+        setSelectedApplicationChatId(null)
+        setSelectedComparisonChatId(null)
+      }
+      setSelectedId((current) => preferredDocumentId ?? (selectedApplicationChatId || selectedComparisonChatId || newChatOpen
         ? null
         : current ?? result.items.find((item) => item.scope === 'document')?.document_id ?? null))
     } catch (error) {
@@ -560,7 +579,7 @@ function App() {
     } finally {
       if (requestId === chatLibraryRequestRef.current) setChatLibraryLoading(false)
     }
-  }, [debouncedChatSearch, newChatOpen, selectedApplicationChatId])
+  }, [debouncedChatSearch, newChatOpen, selectedApplicationChatId, selectedComparisonChatId])
 
   useEffect(() => {
     void refreshLibrary()
@@ -609,14 +628,15 @@ function App() {
     setHighlightedMessageId(null)
     setNewChatOpen(false)
     setSelectedApplicationChatId(item.scope === 'application' ? item.id : null)
+    setSelectedComparisonChatId(item.scope === 'comparison' ? item.id : null)
     setSelectedId(item.scope === 'document' ? item.document_id : null)
-    if (item.scope === 'application') {
+    if (item.scope !== 'document') {
       setChat(null)
       setMessages([])
     }
     setChatOpen(true)
     setMobileLibraryOpen(false)
-    setMobileChatOpen(item.scope === 'application' && compactChatLayout)
+    setMobileChatOpen(item.scope !== 'document' && compactChatLayout)
     if (item.scope === 'document' && selectedId === item.document_id && item.search_message_id) {
       void api<ChatMessage[]>(`${API}/chats/${item.id}/messages`)
         .then(setMessages)
@@ -760,6 +780,11 @@ function App() {
     if (selectedApplicationChatId) localStorage.setItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY, selectedApplicationChatId)
     else localStorage.removeItem(SELECTED_APPLICATION_CHAT_STORAGE_KEY)
   }, [selectedApplicationChatId])
+
+  useEffect(() => {
+    if (selectedComparisonChatId) localStorage.setItem(SELECTED_COMPARISON_CHAT_STORAGE_KEY, selectedComparisonChatId)
+    else localStorage.removeItem(SELECTED_COMPARISON_CHAT_STORAGE_KEY)
+  }, [selectedComparisonChatId])
 
   useEffect(() => {
     try {
@@ -971,10 +996,40 @@ function App() {
   }, [compactChatLayout, selectedApplicationChatId, showToast])
 
   useEffect(() => {
+    if (!selectedComparisonChatId) return
+    let active = true
+    const loadComparisonChat = async () => {
+      try {
+        const [record, savedMessages] = await Promise.all([
+          api<ChatRecord>(`${API}/chats/${selectedComparisonChatId}`),
+          api<ChatMessage[]>(`${API}/chats/${selectedComparisonChatId}/messages`),
+        ])
+        if (!active) return
+        if (record.scope !== 'comparison' || record.document_id !== null) throw new Error('Сохранённый чат сравнения имеет некорректный тип.')
+        setChat(record)
+        setMessages(savedMessages)
+      } catch (error) {
+        if (!active) return
+        setSelectedComparisonChatId(null)
+        setNewChatOpen(true)
+        showToast(error instanceof Error ? error.message : 'Не удалось открыть чат сравнения.')
+      }
+    }
+    void loadComparisonChat()
+    return () => { active = false }
+  }, [compactChatLayout, selectedComparisonChatId, showToast])
+
+  useEffect(() => {
     if (compactChatLayout && chat?.scope === 'application' && chat.id === selectedApplicationChatId && chatOpen) {
       setMobileChatOpen(true)
     }
   }, [chat?.id, chat?.scope, chatOpen, compactChatLayout, selectedApplicationChatId])
+
+  useEffect(() => {
+    if (compactChatLayout && chat?.scope === 'comparison' && chat.id === selectedComparisonChatId && chatOpen) {
+      setMobileChatOpen(true)
+    }
+  }, [chat?.id, chat?.scope, chatOpen, compactChatLayout, selectedComparisonChatId])
 
   useEffect(() => {
     if (!pendingMessageNavigation || !selectedId || !messages.length) return
@@ -1046,6 +1101,11 @@ function App() {
           })
           return
         }
+        if (comparisonPickerOpen) {
+          event.preventDefault()
+          if (!comparisonPickerSaving) setComparisonPickerOpen(false)
+          return
+        }
         if (exportOpen) {
           event.preventDefault()
           closeExportDialog()
@@ -1069,7 +1129,7 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [applicationSourceTarget, chatActionMenu, clearChatRename, closeChatActionMenu, closeExportDialog, deleteApplicationChatTarget, exportOpen, openPreferenceMenu, renameTargetId])
+  }, [applicationSourceTarget, chatActionMenu, clearChatRename, closeChatActionMenu, closeExportDialog, comparisonPickerOpen, comparisonPickerSaving, deleteApplicationChatTarget, exportOpen, openPreferenceMenu, renameTargetId])
 
   useEffect(() => {
     if (!openPreferenceMenu) return
@@ -1085,8 +1145,8 @@ function App() {
   }, [authOpen])
 
   useEffect(() => {
-    if (!authOpen && !deleteTarget && !deleteApplicationChatTarget && !applicationSourceTarget && !exportOpen) return
-    const dialog = window.document.querySelector<HTMLElement>(exportOpen ? '.export-dialog' : '.modal-card')
+    if (!authOpen && !deleteTarget && !deleteApplicationChatTarget && !applicationSourceTarget && !exportOpen && !comparisonPickerOpen) return
+    const dialog = window.document.querySelector<HTMLElement>(comparisonPickerOpen ? '.comparison-picker-dialog' : exportOpen ? '.export-dialog' : '.modal-card')
     if (!dialog) return
     const focusableSelector = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
     const getFocusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => element.offsetParent !== null)
@@ -1106,7 +1166,7 @@ function App() {
     }
     window.document.addEventListener('keydown', onKeyDown)
     return () => window.document.removeEventListener('keydown', onKeyDown)
-  }, [applicationSourceTarget, authOpen, deleteApplicationChatTarget, deleteTarget, exportOpen])
+  }, [applicationSourceTarget, authOpen, comparisonPickerOpen, deleteApplicationChatTarget, deleteTarget, exportOpen])
 
   const uploadFiles = useCallback(async (input: FileList | File[] | null | undefined, retryIds?: string[]) => {
     const files = Array.from(input ?? [])
@@ -1247,6 +1307,7 @@ function App() {
     if (latest) {
       setNewChatOpen(false)
       setSelectedApplicationChatId(null)
+      setSelectedComparisonChatId(null)
       setSelectedId(latest.id)
       setChatOpen(true)
       setPreviewOpen(true)
@@ -1303,6 +1364,7 @@ function App() {
   const openUploadQueueChat = useCallback((documentId: string) => {
     setNewChatOpen(false)
     setSelectedApplicationChatId(null)
+    setSelectedComparisonChatId(null)
     setSelectedId(documentId)
     setMobileLibraryOpen(false)
     setChatOpen(true)
@@ -1311,6 +1373,7 @@ function App() {
   const startNewChat = useCallback(() => {
     setNewChatOpen(true)
     setSelectedApplicationChatId(null)
+    setSelectedComparisonChatId(null)
     setSelectedId(null)
     setDocument(null)
     setInsights([])
@@ -1342,6 +1405,7 @@ function App() {
       const created = await api<ChatRecord>(`${API}/chats/application`, { method: 'POST' })
       setNewChatOpen(false)
       setSelectedApplicationChatId(created.id)
+      setSelectedComparisonChatId(null)
       setSelectedId(null)
       setChat(created)
       setMessages([])
@@ -1357,12 +1421,106 @@ function App() {
     }
   }, [isUploading, refreshLibrary, showToast])
 
+  const openComparisonPicker = useCallback(async (existingChatId?: string) => {
+    const activeElement = window.document.activeElement
+    comparisonPickerReturnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null
+    setComparisonPickerChatId(existingChatId ?? null)
+    setComparisonPickerSelection(existingChatId && chat?.scope === 'comparison' && chat.id === existingChatId
+      ? (chat.documents ?? []).map((item) => item.id)
+      : [])
+    setComparisonPickerQuery('')
+    setComparisonPickerError('')
+    setComparisonPickerOpen(true)
+    setComparisonPickerLoading(true)
+    try {
+      const documents = await api<DocumentRecord[]>(`${API}/documents`)
+      setComparisonPickerDocuments(documents)
+    } catch (error) {
+      setComparisonPickerError(error instanceof Error ? error.message : 'Не удалось загрузить библиотеку документов.')
+    } finally {
+      setComparisonPickerLoading(false)
+    }
+  }, [chat])
+
+  useEffect(() => {
+    if (comparisonPickerOpen) return
+    const trigger = comparisonPickerReturnFocusRef.current
+    if (!trigger?.isConnected) return
+    window.requestAnimationFrame(() => trigger.focus())
+    comparisonPickerReturnFocusRef.current = null
+  }, [comparisonPickerOpen])
+
+  const saveComparisonSelection = useCallback(async () => {
+    if (comparisonPickerSaving || comparisonPickerSelection.length < 2 || comparisonPickerSelection.length > 5) return
+    setComparisonPickerSaving(true)
+    setComparisonPickerError('')
+    try {
+      let comparison: ChatRecord
+      if (comparisonPickerChatId) {
+        if (!chat || chat.id !== comparisonPickerChatId || chat.scope !== 'comparison') {
+          throw new Error('Не удалось восстановить открытый чат сравнения. Обновите страницу и повторите действие.')
+        }
+        comparison = await api<ChatRecord>(`${API}/chats/${comparisonPickerChatId}/documents`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expected_revision: chat.revision ?? 1, document_ids: comparisonPickerSelection }),
+        })
+        const savedMessages = await api<ChatMessage[]>(`${API}/chats/${comparison.id}/messages`)
+        setMessages(savedMessages)
+      } else {
+        comparison = await api<ChatRecord>(`${API}/chats/comparison`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ document_ids: comparisonPickerSelection }),
+        })
+        setMessages([])
+      }
+      setNewChatOpen(false)
+      setSelectedId(null)
+      setSelectedApplicationChatId(null)
+      setSelectedComparisonChatId(comparison.id)
+      setChat(comparison)
+      setChatInput('')
+      setPendingMessageNavigation(null)
+      setChatOpen(true)
+      setChatFull(false)
+      setMobileLibraryOpen(false)
+      setMobileChatOpen(compactChatLayout)
+      setComparisonPickerOpen(false)
+      void refreshLibrary()
+    } catch (error) {
+      setComparisonPickerError(error instanceof Error ? error.message : 'Не удалось сохранить состав сравнения.')
+    } finally {
+      setComparisonPickerSaving(false)
+    }
+  }, [chat, comparisonPickerChatId, comparisonPickerSaving, comparisonPickerSelection, compactChatLayout, refreshLibrary])
+
   const openSource = useCallback(async (source: SourceRef | StreamCitation) => {
     if (source.source_type === 'application') {
       setApplicationSourceTarget(source)
       return
     }
-    if (!document) return
+    if (source.available === false) {
+      showToast(`Источник «${source.document_filename || 'документ'}» больше недоступен. Переписка сохранена; выберите актуальные документы для продолжения сравнения.`)
+      return
+    }
+    const sourceDocumentId = source.document_id ?? null
+    if (sourceDocumentId && sourceDocumentId !== selectedId) {
+      setPendingCitationNavigation(source)
+      setNewChatOpen(false)
+      setSelectedApplicationChatId(null)
+      setSelectedComparisonChatId(null)
+      setSelectedId(sourceDocumentId)
+      setChatOpen(true)
+      setMobileChatOpen(false)
+      setMobileLibraryOpen(false)
+      return
+    }
+    if (!document || (sourceDocumentId && document.id !== sourceDocumentId)) {
+      if (sourceDocumentId) setPendingCitationNavigation(source)
+      else return
+      return
+    }
     searchNavigationRef.current += 1
     setSearchResetKey((key) => key + 1)
     setPreviewOpen(true)
@@ -1377,7 +1535,30 @@ function App() {
       scrollIntoViewRespectingMotion(window.document.getElementById('document-original-viewer'))
     })
     setMobileChatOpen(false)
-  }, [document])
+  }, [document, selectedId, showToast])
+
+  useEffect(() => {
+    const source = pendingCitationNavigation
+    if (!source?.document_id || selectedId !== source.document_id || document?.id !== source.document_id) return
+    if (document.status !== 'ready' || documentPreview?.document_id !== source.document_id) {
+      if (document.status === 'error' || document.status === 'cancelled') {
+        showToast(`Документ «${document.filename}» пока не готов к просмотру. Повторите обработку и откройте источник ещё раз.`)
+        setPendingCitationNavigation(null)
+      }
+      return
+    }
+    setSearchResetKey((key) => key + 1)
+    setPreviewOpen(true)
+    setPreviewTab('original')
+    setSearchScope('original')
+    setSearchSelection(null)
+    setSelectedSourceId(source.id)
+    setSelectedSource(source)
+    const page = source.locator.page
+    if (typeof page === 'number' && page > 0) setPreviewPage(page)
+    setPendingCitationNavigation(null)
+    window.requestAnimationFrame(() => scrollIntoViewRespectingMotion(window.document.getElementById('document-original-viewer')))
+  }, [document, documentPreview?.document_id, pendingCitationNavigation, selectedId, showToast])
 
   const clearDocumentSearch = useCallback(() => {
     searchNavigationRef.current += 1
@@ -1621,12 +1802,18 @@ function App() {
         setMessages([])
         setNewChatOpen(true)
       }
+      if (selectedComparisonChatId === deleteApplicationChatTarget.id) {
+        setSelectedComparisonChatId(null)
+        setChat(null)
+        setMessages([])
+        setNewChatOpen(true)
+      }
       setDeleteApplicationChatTarget(null)
       void refreshLibrary()
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Не удалось удалить чат помощи.')
     }
-  }, [deleteApplicationChatTarget, refreshLibrary, selectedApplicationChatId, showToast])
+  }, [deleteApplicationChatTarget, refreshLibrary, selectedApplicationChatId, selectedComparisonChatId, showToast])
 
   const handleMaintenanceDeleted = useCallback((documentIds: string[]) => {
     const clearAll = documentIds.includes('*')
@@ -1638,8 +1825,19 @@ function App() {
       setNewChatOpen(true)
       localStorage.setItem(NEW_CHAT_STORAGE_KEY, 'true')
     }
+    if (selectedComparisonChatId) {
+      void Promise.all([
+        api<ChatRecord>(`${API}/chats/${selectedComparisonChatId}`),
+        api<ChatMessage[]>(`${API}/chats/${selectedComparisonChatId}/messages`),
+      ]).then(([record, savedMessages]) => {
+        if (record.scope === 'comparison') {
+          setChat(record)
+          setMessages(savedMessages)
+        }
+      }).catch(() => showToast('Набор документов сравнения обновлён. Проверьте, остались ли в нём два готовых источника.'))
+    }
     void refreshLibrary()
-  }, [refreshLibrary, selectedId])
+  }, [refreshLibrary, selectedComparisonChatId, selectedId, showToast])
 
   const streamChatRequest = useCallback(async (targetChat: ChatRecord, text: string, retryUserId?: string) => {
     if (!text.trim() || sendingChats[targetChat.id]) return
@@ -1969,6 +2167,30 @@ function App() {
   const currentListItem = selectedId ? chats.find((item) => item.scope === 'document' && item.document_id === selectedId) : undefined
   const visibleStatus = document ?? (currentListItem ? summaryToDocument(currentListItem) : null)
   const isApplicationChat = chat?.scope === 'application'
+  const isComparisonChat = chat?.scope === 'comparison'
+  const comparisonDocuments: ChatDocumentRef[] = isComparisonChat ? chat?.documents ?? [] : []
+  const comparisonReady = comparisonDocuments.length >= 2 && comparisonDocuments.length <= 5
+    && comparisonDocuments.every((item) => item.status === 'ready')
+  const comparisonPickerNameInfo = useMemo(() => {
+    const keyFor = (filename: string) => filename.trim().toLocaleLowerCase()
+    const counts = new Map<string, number>()
+    for (const item of comparisonPickerDocuments) {
+      const key = keyFor(item.filename)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    const positions = new Map<string, number>()
+    const info = new Map<string, { index: number; count: number }>()
+    for (const item of comparisonPickerDocuments) {
+      const key = keyFor(item.filename)
+      const index = (positions.get(key) ?? 0) + 1
+      positions.set(key, index)
+      info.set(item.id, { index, count: counts.get(key) ?? 1 })
+    }
+    return info
+  }, [comparisonPickerDocuments])
+  const comparisonPickerFiltered = comparisonPickerDocuments.filter((item) =>
+    !comparisonPickerQuery.trim() || item.filename.toLocaleLowerCase().includes(comparisonPickerQuery.trim().toLocaleLowerCase()),
+  )
   const activeAnalysisVersion = analysisVersions.find((item) => item.is_active)
   const displayedAnalysisVersion = analysisVersions.find((item) => item.number === selectedAnalysisVersion) ?? activeAnalysisVersion
   const deleteQuestion = (() => {
@@ -2079,7 +2301,7 @@ function App() {
   const mainClasses = [
     'app-shell',
     sidebarCollapsed ? 'library-manual-collapsed' : '',
-    !selectedId && !isApplicationChat ? 'empty-state' : '',
+    !selectedId && !isApplicationChat && !isComparisonChat ? 'empty-state' : '',
     !chatOpen ? 'chat-hidden' : '',
     chatFull ? 'chat-full' : '',
     mobileLibraryOpen ? 'mobile-library-open' : '',
@@ -2091,8 +2313,13 @@ function App() {
 
   const renderChatRow = (item: ChatSummary) => {
     const isRenaming = renameTargetId === item.id
+    const isSelected = item.scope === 'application'
+      ? selectedApplicationChatId === item.id
+      : item.scope === 'comparison'
+        ? selectedComparisonChatId === item.id
+        : selectedId === item.document_id
     return (
-      <div key={item.id} className={`document-row ${(item.scope === 'application' ? selectedApplicationChatId === item.id : selectedId === item.document_id) ? 'selected' : ''} ${item.pinned ? 'is-pinned' : ''}`} data-chat-id={item.id}>
+      <div key={item.id} className={`document-row ${isSelected ? 'selected' : ''} ${item.pinned ? 'is-pinned' : ''}`} data-chat-id={item.id}>
         {isRenaming ? (
           <form className="chat-rename-form" onSubmit={(event) => { event.preventDefault(); void saveChatRename(item) }}>
             <input
@@ -2110,19 +2337,19 @@ function App() {
           </form>
         ) : (
           <>
-            <button className="document-select" onClick={() => selectLibraryChat(item)} title={item.scope === 'application' ? 'Помощь по приложению' : item.filename ?? item.title} aria-label={`Открыть чат ${item.title}`}>
-              <span className="document-type-icon">{item.scope === 'application' ? <CircleHelp size={17} /> : fileIcon(item.file_type ?? 'txt', 17)}</span>
+            <button className="document-select" onClick={() => selectLibraryChat(item)} title={item.scope === 'application' ? 'Помощь по приложению' : item.scope === 'comparison' ? (item.documents.map((doc) => doc.filename).join(', ') || item.title) : item.filename ?? item.title} aria-label={`Открыть чат ${item.title}`}>
+              <span className="document-type-icon">{item.scope === 'application' ? <CircleHelp size={17} /> : item.scope === 'comparison' ? <Files size={17} /> : fileIcon(item.file_type ?? 'txt', 17)}</span>
               <span className="document-row-text">
                 <span className="document-row-name">{item.title}</span>
                 <span className="document-row-meta">
-                  {item.scope === 'application' ? <span>Помощь по приложению</span> : <>
+                  {item.scope === 'application' ? <span>Помощь по приложению</span> : item.scope === 'comparison' ? <span>{item.documents.length} {pluralLabel(item.documents.length, 'документ', 'документа', 'документов')} · {item.message_count} {pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}</span> : <>
                     <span className={`status-dot status-${item.status}`} />
                     {item.message_count ? `${item.message_count} ${pluralLabel(item.message_count, 'сообщение', 'сообщения', 'сообщений')}` : statusLabel(item.status ?? 'queued')}
                   </>}
                   <span className="row-meta-divider">·</span>{relativeDate(item.last_activity_at)}
                   {item.pinned && <span className="chat-pinned-indicator"><Pin size={11} /> Закреплён</span>}
                 </span>
-                {debouncedChatSearch && <span className="chat-search-snippet">{item.search_snippet ?? item.last_message_preview ?? item.filename ?? 'Помощь по приложению'}</span>}
+                {debouncedChatSearch && <span className="chat-search-snippet">{item.search_snippet ?? item.last_message_preview ?? (item.scope === 'comparison' ? item.documents.map((doc) => doc.filename).join(', ') : item.scope === 'document' ? item.filename : 'Помощь по приложению')}</span>}
               </span>
             </button>
             <button
@@ -2200,6 +2427,9 @@ function App() {
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
           <span>Новый чат</span>
         </button>
+        <button className="library-compare-add" type="button" onClick={() => void openComparisonPicker()} disabled={isUploading}>
+          <Files size={16} aria-hidden="true" /><span>Сравнить документы</span>
+        </button>
         <div className="library-search-wrap">
           <Search className="library-search-icon" size={15} aria-hidden="true" />
           <input
@@ -2256,9 +2486,9 @@ function App() {
           <div className="chat-actions-divider" />
           <button type="button" role="menuitem" tabIndex={-1} className="chat-actions-delete" onClick={() => {
             closeChatActionMenu()
-            if (activeMenuItem.scope === 'application') setDeleteApplicationChatTarget(activeMenuItem)
+            if (activeMenuItem.scope !== 'document') setDeleteApplicationChatTarget(activeMenuItem)
             else setDeleteTarget(summaryToDocument(activeMenuItem))
-          }}><Trash2 size={15} /> {activeMenuItem.scope === 'application' ? 'Удалить чат' : 'Удалить документ и чат'}</button>
+          }}><Trash2 size={15} /> {activeMenuItem.scope === 'document' ? 'Удалить документ и чат' : 'Удалить чат'}</button>
         </div>,
         window.document.body,
       )}
@@ -2275,7 +2505,11 @@ function App() {
         {uploadActive && <div className="drop-overlay"><FileUp size={24} /><strong>Отпустите файлы, чтобы загрузить</strong><span>Можно добавить несколько документов за раз · {SUPPORTED_FORMAT_LABELS.join(', ')}</span></div>}
 
         {!selectedId || !visibleStatus ? (
-          isApplicationChat ? <ApplicationHelpWorkspace /> : <EmptyWorkspace
+          isApplicationChat ? <ApplicationHelpWorkspace /> : isComparisonChat ? <ComparisonWorkspace
+              documents={comparisonDocuments}
+              ready={comparisonReady}
+              onEdit={() => void openComparisonPicker(chat?.id)}
+            /> : <EmptyWorkspace
               isUploading={isUploading}
               onChoose={() => fileInput.current?.click()}
               onOpenModelSettings={() => setAuthOpen(true)}
@@ -2496,17 +2730,18 @@ function App() {
       </main>
 
       {chatOpen && <div className="chat-resizer" role="separator" aria-label="Ширина чата" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={560} aria-valuenow={chatWidth} tabIndex={0} onPointerDown={startResize} onKeyDown={resizeByKeyboard} />}
-      <aside id="document-chat" className={`chat-panel ${chatFull ? 'chat-panel-full' : ''}`} aria-label={isApplicationChat ? 'Помощь по приложению' : 'Чат по документу'}>
+      <aside id="document-chat" className={`chat-panel ${chatFull ? 'chat-panel-full' : ''}`} aria-label={isApplicationChat ? 'Помощь по приложению' : isComparisonChat ? 'Сравнение документов' : 'Чат по документу'}>
         <div className="chat-panel-header">
-          <div className="chat-title"><span className="chat-title-icon"><MessageSquareText size={16} /></span><div><strong>{isApplicationChat ? 'Помощь по приложению' : 'Чат с документом'}</strong><span>{isApplicationChat ? 'Инструкции по проверенным функциям' : document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
+          <div className="chat-title"><span className="chat-title-icon">{isComparisonChat ? <Files size={16} /> : <MessageSquareText size={16} />}</span><div><strong>{isApplicationChat ? 'Помощь по приложению' : isComparisonChat ? 'Сравнение документов' : 'Чат с документом'}</strong><span>{isApplicationChat ? 'Инструкции по проверенным функциям' : isComparisonChat ? `${comparisonDocuments.length} выбранных источника` : document?.status === 'ready' ? 'Ответы с источниками' : 'Ожидает документ'}</span></div></div>
           <div className="chat-header-actions">
+            {isComparisonChat && <button className="button button-light comparison-edit-trigger" type="button" onClick={() => void openComparisonPicker(chat?.id)} disabled={isSending} title="Изменить выбранные документы"><Files size={14} /><span>Документы</span></button>}
             {chat && <button className="icon-button chat-context-trigger" type="button" aria-label="Начать новый контекст" title="Начать новый контекст. Предыдущая переписка останется в истории, но не будет передаваться модели." onClick={() => void startNewContext()} disabled={contextPending || isSending}><RotateCw size={15} /></button>}
             <button className="icon-button desktop-chat-size" aria-label={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} title={chatFull ? 'Вернуть панель чата' : 'Чат на всю рабочую область'} onClick={() => setChatFull((value) => !value)}>{chatFull ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
           </div>
         </div>
         <div className="chat-context-line">
-          <span className={`context-status-dot ${(isApplicationChat || document?.status === 'ready') ? 'context-ready' : ''}`} />
-          <span>{isApplicationChat ? 'Каталог функций приложения' : document?.filename ?? 'Загрузите документ, чтобы начать'}</span>
+          <span className={`context-status-dot ${(isApplicationChat || (isComparisonChat ? comparisonReady : document?.status === 'ready')) ? 'context-ready' : ''}`} />
+          <span>{isApplicationChat ? 'Каталог функций приложения' : isComparisonChat ? comparisonDocuments.map((item) => item.filename).join(' · ') || 'Добавьте готовые документы' : document?.filename ?? 'Загрузите документ, чтобы начать'}</span>
           {chat && <small>Контекст {chat.context_epoch ?? 0}</small>}
         </div>
         <div className="conversation" ref={conversation} aria-live="polite">
@@ -2534,6 +2769,44 @@ function App() {
                 canRetry={(message.context_epoch ?? 0) === (chat?.context_epoch ?? 0)}
               />)}
               {isSending && <div className="assistant-thinking"><span className="thinking-mark"><span /><span /><span /></span><span>{streamText ? 'Проверяю ответ по функциям приложения' : 'Ищу подтверждённые сведения'}</span></div>}
+            </div>
+          ) : isComparisonChat ? messages.length === 0 && !isSending ? (
+            <div className="chat-welcome comparison-chat-welcome">
+              <span className="welcome-kicker">СРАВНЕНИЕ ДОКУМЕНТОВ</span>
+              <h3>{comparisonReady ? 'Что сопоставить?' : 'Обновите набор источников'}</h3>
+              <p>{comparisonReady
+                ? 'Ответы будут опираться только на выбранные версии документов и показывать, где найдено подтверждение.'
+                : 'Для сравнения нужны два-пять готовых документов. Выберите другой состав источников, чтобы продолжить.'}</p>
+              <div className="comparison-chat-documents" aria-label="Выбранные документы">
+                {comparisonDocuments.map((item) => <span key={item.id} className={`comparison-document-chip ${item.status !== 'ready' ? 'is-unavailable' : ''}`} title={`Версия источников ${item.source_version} · ${item.status === 'ready' ? 'готов' : statusLabel(item.status)}`}>
+                  <FileText size={13} /><span>{item.filename}</span><small>v{item.source_version}</small>
+                </span>)}
+              </div>
+              <button className="button button-light" type="button" onClick={() => void openComparisonPicker(chat?.id)}>Изменить документы</button>
+            </div>
+          ) : (
+            <div className="message-list">
+              {messages.map((message, index) => {
+                const epoch = message.context_epoch ?? 0
+                const previousEpoch = index > 0 ? messages[index - 1].context_epoch ?? 0 : epoch
+                return <Fragment key={message.id}>
+                  {index > 0 && epoch !== previousEpoch && <div className="chat-context-divider" role="separator"><span>Новый контекст</span><small>Предыдущая переписка сохранена и не передаётся модели</small></div>}
+                  <ChatBubble
+                    message={message}
+                    canShowUiTarget={false}
+                    onShowUiTarget={showAppHelpTarget}
+                    onOpenSource={openSource}
+                    highlighted={message.id === highlightedMessageId}
+                    onDelete={() => setMessageDeleteTarget(message)}
+                    onRetry={(userMessageId) => retryChatMessage(userMessageId)}
+                    onStop={(messageId) => chat && void stopChatMessage(messageId, chat)}
+                    canRetry={(message.context_epoch ?? 0) === (chat?.context_epoch ?? 0)}
+                  />
+                </Fragment>
+              })}
+              {messages.length > 0 && (messages[messages.length - 1].context_epoch ?? 0) < (chat?.context_epoch ?? 0)
+                && <div className="chat-context-divider" role="separator"><span>Новый контекст</span><small>Набор документов изменён. История выше сохранена и не передаётся модели.</small></div>}
+              {isSending && <div className="assistant-thinking"><span className="thinking-mark"><span /><span /><span /></span><span>{streamText ? 'Сопоставляю выбранные документы' : 'Ищу подтверждения в каждом источнике'}</span></div>}
             </div>
           ) : !document || document.status !== 'ready' ? (
             <div className="chat-empty-state"><span className="chat-empty-icon"><MessageSquareText size={21} /></span><strong>{document ? statusLabel(document.status) : 'Выберите документ'}</strong><p>{document ? processingDescription(document.status) : 'После загрузки файла здесь можно задавать вопросы и получать ответы с привязкой к источнику.'}</p></div>
@@ -2571,7 +2844,7 @@ function App() {
           )}
         </div>
         <div className="chat-compose-area">
-          {!authReady && ((isApplicationChat && chat) || document?.status === 'ready') && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
+          {!authReady && ((isApplicationChat && chat) || (isComparisonChat && comparisonReady) || document?.status === 'ready') && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
           <AIComposer
             inputRef={chatInputRef}
             value={chatInput}
@@ -2580,20 +2853,58 @@ function App() {
             onAttach={() => fileInput.current?.click()}
             onOpenModelSettings={() => setAuthOpen(true)}
             voiceInputEnabled={chatVisible}
-            placeholder={isApplicationChat ? 'Спросите о работе приложения…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
+            placeholder={isApplicationChat ? 'Спросите о работе приложения…' : isComparisonChat ? 'Задайте вопрос по выбранным документам…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
             inputLabel="Сообщение для чата"
-            helperText={isApplicationChat ? 'Ответы проверяются по функциям приложения' : 'Ответы проверяются по источникам'}
+            helperText={isApplicationChat ? 'Ответы проверяются по функциям приложения' : isComparisonChat ? 'Цитаты указывают документ и точное место' : 'Ответы проверяются по источникам'}
             modelName={codexModelLabel(codex)}
             reasoningName={codexReasoningLabel(codex?.reasoning_effort)}
-            inputDisabled={(!isApplicationChat && (!document || document.status !== 'ready')) || !authReady || isSending}
+            inputDisabled={(!isApplicationChat && (isComparisonChat ? !comparisonReady : (!document || document.status !== 'ready'))) || !authReady || isSending}
             sendDisabled={!chatInput.trim() || !chat || !authReady || isSending}
             attachmentDisabled={isUploading}
           />
-          <p className="chat-footnote">{isApplicationChat ? 'В Codex передаются только выбранные сведения о приложении и история этого чата. Документы не читаются.' : 'Текст документа обрабатывается локально. В Codex передаются выбранные фрагменты.'}</p>
+          <p className="chat-footnote">{isApplicationChat ? 'В Codex передаются только выбранные сведения о приложении и история этого чата. Документы не читаются.' : isComparisonChat ? 'В Codex передаются только найденные фрагменты выбранных документов. Остальная библиотека недоступна.' : 'Текст документа обрабатывается локально. В Codex передаются выбранные фрагменты.'}</p>
         </div>
       </aside>
 
       <button className="mobile-scrim" type="button" aria-label="Закрыть открытые панели" onClick={() => { setMobileLibraryOpen(false); setMobileChatOpen(false) }} />
+
+      {comparisonPickerOpen && <div className="modal-backdrop comparison-picker-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !comparisonPickerSaving) setComparisonPickerOpen(false) }}>
+        <section className="modal-card comparison-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="comparison-picker-title" aria-describedby="comparison-picker-description">
+          <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть выбор документов" onClick={() => setComparisonPickerOpen(false)} disabled={comparisonPickerSaving}><X size={19} /></button>
+          <span className="modal-symbol"><Files size={20} /></span>
+          <span className="modal-eyebrow">СРАВНЕНИЕ ДОКУМЕНТОВ</span>
+          <h2 id="comparison-picker-title">Выберите источники</h2>
+          <p id="comparison-picker-description" className="modal-intro">Отметьте от двух до пяти готовых документов. В чат попадут только выбранные фрагменты; для каждого источника будет закреплена текущая версия.</p>
+          <label className="comparison-picker-search"><Search size={15} aria-hidden="true" /><input type="search" autoFocus maxLength={120} aria-label="Поиск документов для сравнения" placeholder="Найти документ" value={comparisonPickerQuery} onChange={(event) => setComparisonPickerQuery(event.target.value)} /></label>
+          <div className="comparison-picker-list" aria-label="Документы библиотеки" aria-busy={comparisonPickerLoading}>
+            {comparisonPickerLoading ? <div className="comparison-picker-state"><LoaderCircle className="spin" size={18} /> Загружаю библиотеку…</div>
+              : comparisonPickerFiltered.length === 0 ? <div className="comparison-picker-state">{comparisonPickerDocuments.length ? 'По этому запросу документов не найдено.' : 'В библиотеке пока нет документов.'}</div>
+                : comparisonPickerFiltered.map((item) => {
+                  const checked = comparisonPickerSelection.includes(item.id)
+                  const canSelect = item.status === 'ready' || checked
+                  const nameInfo = comparisonPickerNameInfo.get(item.id)
+                  const duplicateName = (nameInfo?.count ?? 1) > 1
+                  const duplicateLabel = duplicateName && nameInfo ? `, документ ${nameInfo.index} из ${nameInfo.count}` : ''
+                  return <label key={item.id} className={`comparison-picker-option ${checked ? 'is-selected' : ''} ${!canSelect ? 'is-unavailable' : ''}`}>
+                    <input type="checkbox" aria-label={`Выбрать ${item.filename}${duplicateLabel}`} checked={checked} disabled={comparisonPickerSaving || !canSelect || (!checked && comparisonPickerSelection.length >= 5)} onChange={() => {
+                      setComparisonPickerError('')
+                      setComparisonPickerSelection((current) => current.includes(item.id)
+                        ? current.filter((id) => id !== item.id)
+                        : current.length < 5 ? [...current, item.id] : current)
+                    }} />
+                    <span className="comparison-picker-file-icon">{fileIcon(item.file_type, 17)}</span>
+                    <span className="comparison-picker-option-copy"><strong title={item.filename}>{item.filename}</strong><small>{item.file_type.toUpperCase()} · {item.status === 'ready' ? 'Готов' : statusLabel(item.status)}{duplicateName && nameInfo ? ` · документ ${nameInfo.index} из ${nameInfo.count}` : ''}</small></span>
+                    {!canSelect && <span className="comparison-picker-unavailable">Недоступен</span>}
+                  </label>
+                })}
+          </div>
+          <p className="comparison-picker-count" aria-live="polite">Выбрано: {comparisonPickerSelection.length} из 5 · минимум 2</p>
+          {comparisonPickerError && <p className="comparison-picker-error" role="alert">{comparisonPickerError}</p>}
+          <div className="confirm-actions"><button className="button button-light" type="button" onClick={() => setComparisonPickerOpen(false)} disabled={comparisonPickerSaving}>Отмена</button><button className="button button-dark" type="button" onClick={() => void saveComparisonSelection()} disabled={comparisonPickerSaving || comparisonPickerSelection.length < 2 || comparisonPickerSelection.length > 5}>
+            {comparisonPickerSaving ? <><LoaderCircle className="spin" size={15} /> Сохраняю…</> : comparisonPickerChatId ? 'Обновить источники' : 'Начать сравнение'}
+          </button></div>
+        </section>
+      </div>}
 
       {exportOpen && document && <div className="modal-backdrop export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeExportDialog() }}>
         <section className="modal-card export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" aria-describedby="export-description">
@@ -2779,7 +3090,7 @@ function App() {
           <button className="icon-button modal-close" data-modal-close="true" aria-label="Закрыть" onClick={() => setDeleteApplicationChatTarget(null)}><X size={19} /></button>
           <span className="modal-symbol"><Trash2 size={20} /></span>
           <span className="modal-eyebrow">УДАЛЕНИЕ ЧАТА</span>
-          <h2 id="delete-application-chat-title">Удалить чат помощи?</h2>
+          <h2 id="delete-application-chat-title">{deleteApplicationChatTarget.scope === 'comparison' ? 'Удалить чат сравнения?' : 'Удалить чат помощи?'}</h2>
           <p id="delete-application-chat-description" className="modal-intro">Переписка «{deleteApplicationChatTarget.title}» будет удалена. Документы и другие чаты останутся.</p>
           <div className="confirm-actions"><button className="button button-light" onClick={() => setDeleteApplicationChatTarget(null)}>Отмена</button><button className="button button-dark" onClick={() => void confirmDeleteApplicationChat()}>Удалить чат</button></div>
         </section>
@@ -2902,6 +3213,33 @@ function EmptyWorkspace({
   )
 }
 
+function ComparisonWorkspace({ documents, ready, onEdit }: {
+  documents: ChatDocumentRef[]
+  ready: boolean
+  onEdit: () => void
+}) {
+  return (
+    <section className="comparison-workspace" aria-labelledby="comparison-workspace-heading">
+      <span className="empty-eyebrow">СОПОСТАВЛЕНИЕ ИСТОЧНИКОВ</span>
+      <h1 id="comparison-workspace-heading">Сравнивайте документы в одном чате.</h1>
+      <p>Помощник проверяет каждый выбранный источник отдельно, затем формулирует общий вывод только при наличии подтверждений.</p>
+      <div className="comparison-workspace-sources" aria-label="Источники этого чата">
+        {documents.map((document) => <article className={`comparison-workspace-source ${document.status !== 'ready' ? 'is-unavailable' : ''}`} key={document.id}>
+          <span className="comparison-source-icon">{fileIcon(document.file_type, 17)}</span>
+          <span className="comparison-source-copy"><strong title={document.filename}>{document.filename}</strong><small>{document.file_type.toUpperCase()} · версия источников {document.source_version}</small></span>
+          <span className={`comparison-source-status ${document.status === 'ready' ? 'is-ready' : ''}`}><i />{document.status === 'ready' ? 'Готов' : statusLabel(document.status)}</span>
+        </article>)}
+      </div>
+      <div className="comparison-workspace-footer">
+        <p role="status"><ShieldCheck size={15} />{ready
+          ? 'В модель передаются только найденные фрагменты этих документов. Остальная библиотека изолирована.'
+          : 'Для нового ответа нужны два-пять готовых документов. Обновите состав источников.'}</p>
+        <button className="button button-light" type="button" onClick={onEdit}><Files size={15} /> Изменить документы</button>
+      </div>
+    </section>
+  )
+}
+
 function ApplicationHelpWorkspace() {
   return (
     <section className="application-help-workspace" aria-labelledby="application-help-heading">
@@ -2937,7 +3275,7 @@ function ChatBubble({ message, onOpenSource, onShowUiTarget, canShowUiTarget = f
         <div className="message-text">{message.role === 'assistant' ? <ChatMarkdown text={message.content} citations={message.citations} onOpenSource={onOpenSource} /> : <CitationText text={message.content} citations={message.citations} onOpenSource={onOpenSource} />}</div>
         {streaming && <div className="message-generation-status" role="status">Ответ формируется</div>}
         {partial && <div className="message-interrupted-status" role="status"><strong>Ответ прерван</strong><span>{message.generation_error || 'Частичный текст сохранён. Можно повторить вопрос.'}</span></div>}
-        {message.role === 'assistant' && message.citations.length > 0 && <div className="message-sources"><span>ИСТОЧНИКИ</span>{message.citations.map((source, index) => <button key={source.id} onClick={() => void onOpenSource(source)} title={source.text}><BookOpen size={12} /> {index + 1} · {locatorText(source)}</button>)}</div>}
+        {message.role === 'assistant' && message.citations.length > 0 && <div className="message-sources"><span>ИСТОЧНИКИ</span>{message.citations.map((source, index) => <button key={source.id} onClick={() => void onOpenSource(source)} title={source.text || source.document_filename || locatorText(source)}><BookOpen size={12} /> {index + 1} · {[source.document_filename, locatorText(source)].filter(Boolean).join(' · ')}</button>)}</div>}
         <div className="message-actions">
           {streaming && <button type="button" onClick={() => onStop(message.id)}><X size={13} /> Остановить</button>}
           {partial && canRetry && message.reply_to_message_id && <button type="button" onClick={() => onRetry(message.reply_to_message_id!)}><RotateCw size={13} /> Повторить вопрос</button>}

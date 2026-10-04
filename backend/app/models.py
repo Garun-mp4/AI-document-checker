@@ -98,10 +98,10 @@ class Chunk(Base):
 class Chat(Base):
     __tablename__ = "chats"
     __table_args__ = (
-        CheckConstraint("scope IN ('document','application')", name="ck_chats_scope"),
+        CheckConstraint("scope IN ('document','application','comparison')", name="ck_chats_scope"),
         CheckConstraint(
             "(scope = 'document' AND document_id IS NOT NULL) OR "
-            "(scope = 'application' AND document_id IS NULL)",
+            "(scope IN ('application','comparison') AND document_id IS NULL)",
             name="ck_chats_scope_document",
         ),
         Index(
@@ -125,6 +125,30 @@ class Chat(Base):
 
     document: Mapped[Document | None] = relationship(back_populates="chat")
     messages: Mapped[list[Message]] = relationship(back_populates="chat", cascade="all, delete-orphan", order_by="Message.created_at")
+    document_sources: Mapped[list[ChatDocument]] = relationship(back_populates="chat", cascade="all, delete-orphan", order_by="ChatDocument.position")
+
+
+class ChatDocument(Base):
+    """A version-pinned, explicitly selected source in a comparison conversation."""
+
+    __tablename__ = "chat_documents"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "document_id", name="uq_chat_documents_chat_document"),
+        CheckConstraint("source_version >= 1", name="ck_chat_documents_source_version"),
+        CheckConstraint("position >= 0", name="ck_chat_documents_position"),
+        Index("ix_chat_documents_selected", "chat_id", "is_selected", "position"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    selected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now())
+
+    chat: Mapped[Chat] = relationship(back_populates="document_sources")
+    document: Mapped[Document] = relationship()
 
 
 class Message(Base):
@@ -144,6 +168,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    citation_snapshots: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     model: Mapped[str | None] = mapped_column(String(120))
     reasoning_effort: Mapped[str | None] = mapped_column(String(20))
     context_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')

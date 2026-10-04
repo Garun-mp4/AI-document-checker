@@ -1,5 +1,29 @@
 # Отчёт о тестировании AI Document Checker
 
+## M21 — сравнение явно выбранных документов
+
+Дата: 4 октября 2026 года. M21 реализован и принят на изолированном Compose-проекте с собственными тестовыми volumes.
+
+| Проверка | Результат |
+| --- | --- |
+| Backend unit suite | **445 passed, 11 integration deselected**; одно существующее предупреждение Alembic `path_separator` |
+| M21 comparison unit tests | **7 passed**: границы/уникальность выбора, revision, точные владельцы citation, междокументные доказательства, safe snapshots и квоты retrieval |
+| Frontend contract/unit tests | **37 passed** |
+| Frontend production build | **PASS** (`tsc --noEmit`, Vite, initial gzip budget) |
+| Стартовый JS bundle | **PASS**: 916,053 bytes raw / 269,785 gzip; на 25.7% меньше baseline 363,239 gzip; предел 290,591 gzip |
+| Полный Compose Chromium E2E | **107 passed, 0 failed** (19.6 минуты); включает comparison flow, citations обоих файлов, смену состава/версий, reload, удаление выбранного источника и восстановление набора |
+| Дополнительный comparison E2E | **1 passed**: одинаковые длинные имена различаются в picker, выбор проверен на 390×844 без горизонтального overflow |
+| Responsive browser checks | **6/6 прошли**: 1440×900, 1280×720, 1024×768, 768×1024, 430×932, 390×844; мобильный comparison picker дополнительно проверен на 390×844 |
+| Migration acceptance | **PASS**: upgrade/downgrade до M10 и возврат к head сохранили старые document chat, messages, citations и original bytes; downgrade запрещён при comparison chat, существующий application-chat guard отдельно проверен |
+| API integration | **11 passed, 445 deselected** |
+| Security audit | **10 assertions passed**: process/file limits, chunked upload/nginx limits, descriptor/link protections, converter error boundary |
+| PostgreSQL queue | **13 базовых checks и 9 acceptance tests прошли** |
+| Maintenance acceptance | **1 passed** |
+| Backup/restore regression | **PASS** на отдельных временных database/document volumes |
+| Ruff для изменённых backend-файлов | **PASS** |
+
+Comparison acceptance подтверждает, что AI получает только retrieval-фрагменты документов из текущего выбранного набора; каждый document finding и citation проверяется на server-side принадлежность. Источники фиксируются по версии, набор ограничен 2–5 ready документов. При смене набора история сохраняется по `context_epoch`, предыдущие citation snapshots не теряют имя/locator, а удаление выбранного файла блокирует новые вопросы до восстановления набора. E2E suite тестировала только синтетические документы; live Codex не использовался.
+
 ## M20 — ленивая загрузка PDF.js и производительность старта
 
 Дата: 4 октября 2026 года. M20 реализован и проверен. E2E прогоны используют синтетические документы и отдельные временные Compose volumes.

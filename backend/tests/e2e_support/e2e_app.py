@@ -89,37 +89,65 @@ class DeterministicCodex(CodexService):
             self.structured_calls += 1
             application_evidence = payload.get("application_evidence", [])
             document_evidence = payload.get("document_evidence", [])
+            comparison_documents = payload.get("selected_documents", [])
             self.last_request_metadata = {
                 "document_evidence_count": len(document_evidence),
                 "application_evidence_count": len(application_evidence),
+                "comparison_documents_count": len(comparison_documents),
+                "comparison_source_document_ids": sorted({item.get("document_id") for item in payload.get("sources", []) if item.get("document_id")}),
                 "ephemeral": ephemeral,
                 "scope": payload.get("request_scope"),
             }
             citation_items = []
-            if application_evidence:
+            if comparison_documents:
+                sources_by_document = {
+                    document["document_id"]: [source["source_id"] for source in payload.get("sources", [])
+                                              if source.get("document_id") == document["document_id"]]
+                    for document in comparison_documents
+                }
+                findings = []
+                for document in comparison_documents:
+                    source_ids = sources_by_document[document["document_id"]]
+                    findings.append({
+                        "document_id": document["document_id"],
+                        "status": "supported" if source_ids else "not_found",
+                        "answer": "Синтетическое подтверждение из этого документа." if source_ids else "",
+                        "citations": source_ids[:1],
+                    })
+                supported_ids = [source_ids[0] for source_ids in sources_by_document.values() if source_ids]
+                response = {
+                    "documents": findings,
+                    "comparison": {
+                        "status": "supported" if len(supported_ids) >= 2 else "not_found",
+                        "answer": "В документах найдены отдельные подтверждения для сопоставления." if len(supported_ids) >= 2 else "",
+                        "citations": supported_ids[:2] if len(supported_ids) >= 2 else [],
+                    },
+                }
+            elif application_evidence:
                 application_source = next(
                     (source for source in application_evidence
                      if self.ui_target_override in source.get("ui_target_ids", [])),
                     application_evidence[0],
                 )
                 citation_items.append({"source_type": "application", "source_id": application_source["source_id"]})
-            if document_evidence and payload.get("request_scope") == "mixed":
-                citation_items.append({"source_type": "document", "source_id": document_evidence[0]["source_id"]})
-            if citation_items:
-                scope = "mixed" if len(citation_items) == 2 else citation_items[0]["source_type"]
-                response = {
-                    "answer": "Подтверждённая возможность приложения." + (" Также найден фрагмент документа." if document_evidence else ""),
-                    "status": "answered",
-                    "scope": scope,
-                    "citations": citation_items,
-                    "ui_target_id": (
-                        self.ui_target_override
-                        if self.ui_target_override is not None
-                        else (application_source.get("ui_target_ids") or [None])[0]
-                    ) if application_evidence else None,
-                }
-            else:
-                response = {"answer": "Подтверждений нет.", "status": "not_found", "scope": "unknown", "citations": [], "ui_target_id": None}
+            if not comparison_documents:
+                if document_evidence and payload.get("request_scope") == "mixed":
+                    citation_items.append({"source_type": "document", "source_id": document_evidence[0]["source_id"]})
+                if citation_items:
+                    scope = "mixed" if len(citation_items) == 2 else citation_items[0]["source_type"]
+                    response = {
+                        "answer": "Подтверждённая возможность приложения." + (" Также найден фрагмент документа." if document_evidence else ""),
+                        "status": "answered",
+                        "scope": scope,
+                        "citations": citation_items,
+                        "ui_target_id": (
+                            self.ui_target_override
+                            if self.ui_target_override is not None
+                            else (application_source.get("ui_target_ids") or [None])[0]
+                        ) if application_evidence else None,
+                    }
+                else:
+                    response = {"answer": "Подтверждений нет.", "status": "not_found", "scope": "unknown", "citations": [], "ui_target_id": None}
             serialized = json.dumps(response, ensure_ascii=False)
             split_at = max(1, len(serialized) // 2)
             yield {"kind": "delta", "text": serialized[:split_at]}

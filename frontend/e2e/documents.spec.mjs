@@ -240,7 +240,7 @@ for (const fileName of ['large.csv', 'large.xlsx']) {
     await expect(rows.first()).toBeVisible()
     expect(await rows.count()).toBeLessThanOrEqual(100)
     await expect(page.locator('.csv-table-footer')).toContainText('из 240 строк')
-    const showMore = page.getByRole('button', { name: 'Показать ещё' })
+    const showMore = page.getByRole('button', { name: 'Показать ещё', exact: true })
     await expect(showMore).toBeVisible()
     await showMore.click()
     await expect(page.locator('.csv-table-footer')).toContainText('Показано 200 из 240 строк')

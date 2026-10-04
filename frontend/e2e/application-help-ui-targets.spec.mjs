@@ -57,8 +57,7 @@ test('validated UI target persists, highlights only after keyboard or pointer ac
     ]
     for (const size of sizes) {
       await page.setViewportSize(size)
-      const openChatButton = page.getByRole('button', { name: 'Открыть чат', exact: true })
-      if (await openChatButton.count()) await openChatButton.click()
+      await expect(page.locator('#document-chat')).toBeVisible()
       await expect(restoredButton).toBeVisible()
       await restoredButton.click()
       await expect(restoredMessage.getByRole('status')).toBeVisible()

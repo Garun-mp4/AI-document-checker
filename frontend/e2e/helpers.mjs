@@ -23,22 +23,34 @@ export async function provider(request, options = {}) {
   expect(response.ok()).toBeTruthy()
 }
 
-export async function upload(page, name, expected = 'ready') {
+export async function upload(page, name, expected = 'ready', uploadName = name) {
   await page.goto('/')
   const uploaded = page.waitForResponse(response => response.url().endsWith('/api/v1/documents') && response.request().method() === 'POST')
-  await page.getByLabel('Выберите документ', { exact: true }).setInputFiles(path.join(fixtures, name))
+  const fixturePath = path.join(fixtures, name)
+  const fileInput = page.getByLabel('Выберите документ', { exact: true })
+  if (uploadName === name) {
+    await fileInput.setInputFiles(fixturePath)
+  } else {
+    const mimeTypes = { '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv' }
+    const extension = path.extname(uploadName).toLowerCase()
+    await fileInput.setInputFiles({
+      name: uploadName,
+      mimeType: mimeTypes[extension] || 'application/octet-stream',
+      buffer: await readFile(fixturePath),
+    })
+  }
   const response = await uploaded
   expect(response.status(), await response.text()).toBe(202)
   const document = await response.json()
   await expect.poll(async () => {
     const result = await page.request.get(`/api/v1/documents/${document.id}`)
     return (await result.json()).status
-  }, { timeout: 150_000, message: `Process ${name} with real parsers, OCR and embeddings` }).toBe(expected)
+  }, { timeout: 150_000, message: `Process ${uploadName} with real parsers, OCR and embeddings` }).toBe(expected)
   if (expected === 'ready') {
     const original = await page.request.get(`/api/v1/documents/${document.id}/file`)
-    expect(await original.body(), 'Original bytes are immutable after conversion').toEqual(await readFile(path.join(fixtures, name)))
+    expect(await original.body(), 'Original bytes are immutable after conversion').toEqual(await readFile(fixturePath))
     await expect(page.locator('.insight-card')).toHaveCount(7)
-    await expect(page.getByRole('heading', { name: name, exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: uploadName, exact: true })).toBeVisible()
   } else {
     await expect(page.locator('.issue-banner')).toBeVisible()
   }
@@ -46,10 +58,11 @@ export async function upload(page, name, expected = 'ready') {
 }
 
 export async function showChat(page) {
-  const chatToggle = page.locator('.chat-visibility-toggle[aria-label="Открыть чат"]')
-  if (await chatToggle.count()) {
-    await chatToggle.click()
+  const chatPanel = page.locator('#document-chat')
+  if (!(await chatPanel.isVisible())) {
+    await page.locator('.chat-visibility-toggle').click()
   }
+  await expect(chatPanel).toBeVisible()
   await expect(page.getByLabel('Сообщение для чата', { exact: true })).toBeVisible()
 }
 

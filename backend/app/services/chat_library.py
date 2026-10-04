@@ -6,8 +6,13 @@ from typing import Any
 from sqlalchemy import func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Chat, Document, Message
-from app.schemas import ChatLibraryPageOut, ChatSettingsOut, ChatSummaryOut
+from app.models import Chat, ChatDocument, Document, Message
+from app.schemas import (
+    ChatDocumentOut,
+    ChatLibraryPageOut,
+    ChatSettingsOut,
+    ChatSummaryOut,
+)
 
 DEFAULT_PAGE_SIZE = 30
 MAX_PAGE_SIZE = 100
@@ -35,6 +40,22 @@ def _preview(value: str | None) -> str | None:
         return None
     normalized = " ".join(value.split())
     return normalized[:180] if len(normalized) <= 180 else f"{normalized[:180].rstrip()}…"
+
+
+async def load_chat_documents(session: AsyncSession, chat_id: Any, *, selected_only: bool = True) -> list[ChatDocumentOut]:
+    statement = (
+        select(ChatDocument, Document)
+        .join(Document, Document.id == ChatDocument.document_id)
+        .where(ChatDocument.chat_id == chat_id)
+        .order_by(ChatDocument.position, ChatDocument.selected_at, ChatDocument.document_id)
+    )
+    if selected_only:
+        statement = statement.where(ChatDocument.is_selected.is_(True))
+    rows = (await session.execute(statement)).all()
+    return [ChatDocumentOut(
+        id=str(document.id), filename=document.filename, file_type=document.file_type,
+        status=document.status, source_version=link.source_version,
+    ) for link, document in rows]
 
 
 def _search_snippet(value: str | None, query: str) -> str | None:
@@ -66,16 +87,24 @@ def _summary_from_values(
     search_query: str | None = None,
     search_message_id: Any = None,
     search_message_content: str | None = None,
+    comparison_documents: list[ChatDocumentOut] | None = None,
 ) -> ChatSummaryOut:
     scope = getattr(chat, "scope", "document")
     is_application_chat = scope == "application"
+    is_comparison_chat = scope == "comparison"
+    selected_documents = comparison_documents or []
     custom_title = getattr(chat, "title", None)
-    fallback_title = "Помощь по приложению" if is_application_chat else document.filename
+    fallback_title = "Помощь по приложению" if is_application_chat else (
+        f"Сравнение: {selected_documents[0].filename} + {len(selected_documents) - 1}"
+        if is_comparison_chat and selected_documents else
+        "Сравнение документов" if is_comparison_chat else document.filename
+    )
     title = _trim_title(custom_title or first_user_message or fallback_title)
     return ChatSummaryOut(
         id=str(chat.id),
         scope=scope,
         document_id=str(document.id) if document is not None else None,
+        documents=selected_documents if is_comparison_chat else [],
         title=title,
         custom_title=custom_title,
         pinned=getattr(chat, "pinned_at", None) is not None,
@@ -97,7 +126,8 @@ def _summary_from_values(
     )
 
 
-def build_chat_summary(chat: Any, document: Any | None, messages: list[Any]) -> ChatSummaryOut:
+def build_chat_summary(chat: Any, document: Any | None, messages: list[Any], *,
+                       comparison_documents: list[ChatDocumentOut] | None = None) -> ChatSummaryOut:
     """Build a library row from an already-loaded chat and its messages."""
 
     first_user_message = next(
@@ -114,6 +144,7 @@ def build_chat_summary(chat: Any, document: Any | None, messages: list[Any]) -> 
         latest_message_at=latest_message.created_at if latest_message else None,
         latest_message_content=latest_message.content if latest_message else None,
         last_activity_at=latest_message.created_at if latest_message else fallback_activity,
+        comparison_documents=comparison_documents,
     )
 
 
@@ -158,7 +189,15 @@ def _summary_query(search_query: str | None):
     ).cte("chat_first_user")
 
     match = None
+    comparison_match = None
     if search_query:
+        comparison_match = select(ChatDocument.chat_id).join(
+            Document, Document.id == ChatDocument.document_id,
+        ).where(
+            ChatDocument.chat_id == Chat.id,
+            ChatDocument.is_selected.is_(True),
+            Document.filename.ilike(escape_like_query(search_query), escape="\\"),
+        ).exists()
         match_ranked = (
             select(
                 Message.chat_id.label("chat_id"),
@@ -201,6 +240,7 @@ def _summary_query(search_query: str | None):
             or_(
                 Chat.title.ilike(escape_like_query(search_query), escape="\\"),
                 Document.filename.ilike(escape_like_query(search_query), escape="\\"),
+                comparison_match,
                 match.c.message_id.is_not(None),
             )
         )
@@ -221,6 +261,13 @@ async def list_chat_library(
     count_statement = select(func.count()).select_from(Chat).outerjoin(Document, Document.id == Chat.document_id)
     if search_query:
         pattern = escape_like_query(search_query)
+        comparison_match = select(ChatDocument.chat_id).join(
+            Document, Document.id == ChatDocument.document_id,
+        ).where(
+            ChatDocument.chat_id == Chat.id,
+            ChatDocument.is_selected.is_(True),
+            Document.filename.ilike(pattern, escape="\\"),
+        ).exists()
         matched_message = select(Message.id).where(
             Message.chat_id == Chat.id,
             Message.content.ilike(pattern, escape="\\"),
@@ -228,6 +275,7 @@ async def list_chat_library(
         count_statement = count_statement.where(or_(
             Chat.title.ilike(pattern, escape="\\"),
             Document.filename.ilike(pattern, escape="\\"),
+            comparison_match,
             matched_message,
             (Chat.scope == "application") & literal("Помощь по приложению").ilike(pattern, escape="\\"),
         ))
@@ -242,6 +290,20 @@ async def list_chat_library(
     if limit is not None:
         statement = statement.limit(limit)
     rows = (await session.execute(statement)).all()
+    comparison_documents_by_chat: dict[Any, list[ChatDocumentOut]] = {}
+    comparison_chat_ids = [row[0].id for row in rows if row[0].scope == "comparison"]
+    if comparison_chat_ids:
+        link_rows = (await session.execute(
+            select(ChatDocument.chat_id, ChatDocument, Document)
+            .join(Document, Document.id == ChatDocument.document_id)
+            .where(ChatDocument.chat_id.in_(comparison_chat_ids), ChatDocument.is_selected.is_(True))
+            .order_by(ChatDocument.chat_id, ChatDocument.position)
+        )).all()
+        for chat_id, link, document_item in link_rows:
+            comparison_documents_by_chat.setdefault(chat_id, []).append(ChatDocumentOut(
+                id=str(document_item.id), filename=document_item.filename, file_type=document_item.file_type,
+                status=document_item.status, source_version=link.source_version,
+            ))
     items = [
         _summary_from_values(
             chat,
@@ -254,6 +316,7 @@ async def list_chat_library(
             search_query=search_query,
             search_message_id=search_message_id,
             search_message_content=search_message_content,
+            comparison_documents=comparison_documents_by_chat.get(chat.id, []),
         )
         for (
             chat,
@@ -291,8 +354,10 @@ async def get_chat_settings(session: AsyncSession, chat_id: Any) -> ChatSettings
         .limit(1)
     )
     title = _trim_title(chat.title or first_user_message or (
-        "Помощь по приложению" if chat.scope == "application" else document.filename
+        "Помощь по приложению" if chat.scope == "application" else
+        "Сравнение документов" if chat.scope == "comparison" else document.filename
     ))
+    documents = await load_chat_documents(session, chat.id) if chat.scope == "comparison" else []
     return ChatSettingsOut(
         id=str(chat.id),
         scope=chat.scope,
@@ -302,4 +367,5 @@ async def get_chat_settings(session: AsyncSession, chat_id: Any) -> ChatSettings
         pinned=chat.pinned_at is not None,
         revision=chat.revision,
         context_epoch=chat.context_epoch,
+        documents=documents,
     )

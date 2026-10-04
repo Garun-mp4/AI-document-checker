@@ -61,8 +61,9 @@ export interface DocumentRecord {
 
 export interface ChatSummary {
   id: string
-  scope: 'document' | 'application'
+  scope: 'document' | 'application' | 'comparison'
   document_id: string | null
+  documents: ChatDocumentRef[]
   title: string
   custom_title: string | null
   pinned: boolean
@@ -83,6 +84,14 @@ export interface ChatSummary {
   search_message_id: string | null
 }
 
+export interface ChatDocumentRef {
+  id: string
+  filename: string
+  file_type: string
+  status: DocumentStatus
+  source_version: number
+}
+
 export interface ChatLibraryPage {
   items: ChatSummary[]
   total: number
@@ -93,12 +102,14 @@ export interface ChatLibraryPage {
 
 export interface ChatSettings {
   id: string
-  scope: 'document' | 'application'
+  scope: 'document' | 'application' | 'comparison'
   document_id: string | null
   title: string
   custom_title: string | null
   pinned: boolean
   revision: number
+  context_epoch?: number
+  documents: ChatDocumentRef[]
 }
 
 export interface SourceRef {
@@ -109,6 +120,10 @@ export interface SourceRef {
   is_derived: boolean
   source_type?: 'document' | 'application'
   title?: string | null
+  document_id?: string | null
+  document_filename?: string | null
+  source_version?: number | null
+  available?: boolean
 }
 
 export type PreviewLayout = 'pdf' | 'paper' | 'table' | 'tree' | 'slides'
@@ -308,9 +323,11 @@ export interface ChatMessage {
 
 export interface ChatRecord {
   id: string
-  scope: 'document' | 'application'
+  scope: 'document' | 'application' | 'comparison'
   document_id: string | null
   context_epoch?: number
+  revision?: number
+  documents?: ChatDocumentRef[]
 }
 
 export interface DocumentAnalysisVersion {
@@ -360,4 +377,8 @@ export interface StreamCitation {
   is_derived: boolean
   source_type?: 'document' | 'application'
   title?: string | null
+  document_id?: string | null
+  document_filename?: string | null
+  source_version?: number | null
+  available?: boolean
 }

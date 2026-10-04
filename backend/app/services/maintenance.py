@@ -28,6 +28,7 @@ from app.database import SessionLocal
 from app.models import (
     AdditionalAnalysis,
     Chat,
+    ChatDocument,
     Chunk,
     Document,
     DocumentBookmark,
@@ -560,7 +561,10 @@ async def _delete_documents_locked(request: Request, ids: list[uuid.UUID], *, ac
         docs, versions, counts = await _get_docs_for_plan(session, ids)
         if len(docs) != len(ids):
             raise HTTPException(status_code=404, detail="Один из выбранных документов больше не существует.")
-        chat_ids = [str(value) for value in (await session.execute(select(Chat.id).where(Chat.document_id.in_(ids)))).scalars().all()]
+        chat_ids = [str(value) for value in (await session.execute(
+            select(Chat.id).where(Chat.document_id.in_(ids))
+            .union(select(ChatDocument.chat_id).where(ChatDocument.document_id.in_(ids)))
+        )).scalars().all()]
     version_map = _group_versions(versions)
     pre_signatures = {str(document.id): _document_plan_signature(
         document, version_map.get(document.id, []), counts[str(document.id)]) for document in docs}

@@ -7,8 +7,10 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,36 @@ def delete(path: str) -> Any:
     with urllib.request.urlopen(call, timeout=15) as response:
         raw = response.read()
     return json.loads(raw) if raw else None
+
+
+def upload_markdown_fixture() -> dict[str, Any]:
+    filename = f"m21-migration-{uuid.uuid4().hex}.md"
+    fixture = Path(__file__).resolve().parents[3] / "backend" / "tests" / "fixtures" / "sample.md"
+    boundary = f"----codex-{uuid.uuid4().hex}"
+    content = fixture.read_bytes()
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        "Content-Type: text/markdown\r\n\r\n"
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    call = urllib.request.Request(
+        f"{BASE_URL}/api/v1/documents", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST",
+    )
+    with urllib.request.urlopen(call, timeout=30) as response:
+        return json.loads(response.read())
+
+
+def wait_for_ready_document(document_id: str, *, timeout: float = 120) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        document = request(f"/api/v1/documents/{document_id}")
+        if document["status"] == "ready":
+            return document
+        if document["status"] == "failed":
+            raise RuntimeError(f"Migration fixture processing failed: {document.get('error_message')}")
+        time.sleep(1)
+    raise TimeoutError("Migration fixture did not become ready in time.")
 
 
 def original_digest(document_id: str) -> str:
@@ -133,7 +165,35 @@ def main() -> None:
     assert app_chat["scope"] == "application" and app_chat["document_id"] is None
     assert request(f"/api/v1/chats/{app_chat['id']}")["scope"] == "application"
     assert request(f"/api/v1/chats/{app_chat['id']}/messages") == []
+    comparison_chat_id = None
+    fixture_document_id = None
     try:
+        comparison_fixture = upload_markdown_fixture()
+        fixture_document_id = comparison_fixture["id"]
+        ready_fixture = wait_for_ready_document(fixture_document_id)
+        comparison_chat = post("/api/v1/chats/comparison", {
+            "document_ids": [before["document"]["id"], ready_fixture["id"]],
+        })
+        comparison_chat_id = comparison_chat["id"]
+        assert comparison_chat["scope"] == "comparison"
+        assert [item["id"] for item in comparison_chat["documents"]] == [before["document"]["id"], ready_fixture["id"]]
+
+        refused_comparison_downgrade = subprocess.run(
+            ["docker", "compose", "-p", PROJECT, "-f", str(Path(COMPOSE_FILE).resolve()),
+             "run", "--rm", "--no-deps", "api", "alembic", "downgrade", "0013_ui_target_metadata"],
+            check=False, capture_output=True, text=True, timeout=360,
+        )
+        comparison_downgrade_output = f"{refused_comparison_downgrade.stdout}\n{refused_comparison_downgrade.stderr}"
+        assert refused_comparison_downgrade.returncode != 0
+        assert "refusing to discard saved work" in comparison_downgrade_output.lower()
+        preserved_comparison = request(f"/api/v1/chats/{comparison_chat_id}")
+        assert preserved_comparison["scope"] == "comparison"
+        assert len(preserved_comparison["documents"]) == 2
+        delete(f"/api/v1/chats/{comparison_chat_id}")
+        comparison_chat_id = None
+        delete(f"/api/v1/documents/{fixture_document_id}")
+        fixture_document_id = None
+
         refused_downgrade = subprocess.run(
             ["docker", "compose", "-p", PROJECT, "-f", str(Path(COMPOSE_FILE).resolve()),
              "run", "--rm", "--no-deps", "api", "alembic", "downgrade", "0011_bookmarks_analysis"],
@@ -143,8 +203,12 @@ def main() -> None:
         assert refused_downgrade.returncode != 0 and "refusing to delete saved conversations" in downgrade_output.lower()
         assert request(f"/api/v1/chats/{app_chat['id']}")["scope"] == "application"
     finally:
+        if comparison_chat_id:
+            delete(f"/api/v1/chats/{comparison_chat_id}")
+        if fixture_document_id:
+            delete(f"/api/v1/documents/{fixture_document_id}")
         delete(f"/api/v1/chats/{app_chat['id']}")
-    print("APP-M02 migration upgrade preserved existing document chats, messages, citations and original bytes; application chats work without documents and unsafe downgrade is refused.")
+    print("Migration upgrade preserved existing document chats, messages, citations and original bytes; comparison chats pin selected documents, and unsafe M21 and application-chat downgrades are refused.")
 
 
 if __name__ == "__main__":
