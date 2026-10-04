@@ -19,6 +19,15 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
       starts: 0,
       aborts: 0,
       lastInstance: null,
+      microphoneConstraints: [],
+      microphoneError: false,
+      microphonePending: false,
+      resolvePendingMicrophone: null,
+      microphoneAmplitude: 32,
+      microphoneSampleCount: 0,
+      tracksStopped: 0,
+      contextsClosed: 0,
+      audioConnected: false,
     }
     class MockSpeechRecognition {
       lang = ''
@@ -59,6 +68,52 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
       }
     }
     Object.defineProperty(window, 'SpeechRecognition', { value: MockSpeechRecognition, configurable: true })
+    const mediaDevices = navigator.mediaDevices ?? {}
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        ...mediaDevices,
+        getUserMedia: async constraints => {
+          state.microphoneConstraints.push(constraints)
+          if (state.microphonePending) {
+            return new Promise(resolve => {
+              state.resolvePendingMicrophone = () => resolve({ getTracks: () => [{ stop: () => { state.tracksStopped += 1 } }] })
+            })
+          }
+          if (state.microphoneError) throw new DOMException('Microphone permission denied', 'NotAllowedError')
+          return { getTracks: () => [{ stop: () => { state.tracksStopped += 1 } }] }
+        },
+      },
+    })
+    class MockAudioContext {
+      state = 'suspended'
+
+      createMediaStreamSource() {
+        return {
+          connect: () => { state.audioConnected = true },
+          disconnect: () => { state.audioConnected = false },
+        }
+      }
+
+      createAnalyser() {
+        return {
+          fftSize: 512,
+          smoothingTimeConstant: 0,
+          getByteTimeDomainData(samples) {
+            state.microphoneSampleCount += 1
+            const amplitude = Math.round(state.microphoneAmplitude * (0.15 + 0.85 * Math.abs(Math.sin(state.microphoneSampleCount * 0.71))))
+            for (let index = 0; index < samples.length; index += 1) {
+              samples[index] = index % 2 === 0 ? 128 - amplitude : 128 + amplitude
+            }
+          },
+          disconnect() {},
+        }
+      }
+
+      async resume() { this.state = 'running' }
+      async close() { state.contextsClosed += 1; this.state = 'closed' }
+    }
+    Object.defineProperty(window, 'AudioContext', { value: MockAudioContext, configurable: true })
     Object.defineProperty(window, '__voiceMock', { value: state, configurable: true })
   })
 
@@ -67,14 +122,36 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
   const composer = page.locator('.chat-panel .ai-composer')
   const input = composer.getByLabel('Сообщение для чата', { exact: true })
   const status = composer.locator('.ai-composer-status')
+  const recordingStatus = composer.locator('.ai-composer-recording-status')
   const startButton = composer.getByRole('button', { name: 'Голосовой ввод', exact: true })
 
   await input.fill('Вопрос: документ')
   await input.evaluate(element => element.setSelectionRange(8, 8))
+  expect(await page.evaluate(() => window.__voiceMock.microphoneConstraints), 'Microphone capture must wait for an explicit user action').toHaveLength(0)
   await startButton.click()
-  const stopButton = composer.getByRole('button', { name: 'Остановить диктовку', exact: true })
+  const stopButton = composer.getByRole('button', { name: 'Завершить диктовку', exact: true })
   await expect(stopButton).toBeVisible()
-  await expect(status).toContainText('Идёт запись')
+  await expect(stopButton).toBeFocused()
+  await expect(recordingStatus).toContainText('шкала показывает уровень микрофона')
+  await expect(composer.locator('.voice-level-meter-bar')).toHaveCount(29)
+  const microphoneSetup = await page.evaluate(() => ({
+    constraints: window.__voiceMock.microphoneConstraints,
+    audioConnected: window.__voiceMock.audioConnected,
+  }))
+  expect(microphoneSetup.constraints).toEqual([{ audio: true, video: false }])
+  expect(microphoneSetup.audioConnected).toBe(true)
+
+  const getMaxMeterScale = () => composer.locator('.voice-level-meter-bar').evaluateAll(bars => Math.max(...bars.map(bar => Number(bar.style.transform.match(/scaleY\(([^)]+)\)/)?.[1] ?? 0))))
+  await page.evaluate(() => { window.__voiceMock.microphoneAmplitude = 8 })
+  await expect.poll(getMaxMeterScale, { timeout: 10_000 }).toBeLessThan(0.9)
+  const quietMeterScale = await getMaxMeterScale()
+  await page.evaluate(() => { window.__voiceMock.microphoneAmplitude = 72 })
+  await expect.poll(getMaxMeterScale).toBeGreaterThan(quietMeterScale)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  expect(await composer.locator('.ai-composer-recording').evaluate(element => getComputedStyle(element).animationName)).toBe('none')
+  const getMeterScaleCount = () => composer.locator('.voice-level-meter-bar').evaluateAll(bars => new Set(bars.map(bar => bar.style.transform)).size)
+  await expect.poll(getMeterScaleCount).toBe(1)
+
   const localConfiguration = await page.evaluate(() => ({
     options: window.__voiceMock.options,
     processLocally: window.__voiceMock.lastInstance.processLocally,
@@ -87,25 +164,95 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
   await stopButton.click()
   await expect(input).toHaveValue('Вопрос: сроки документ')
   await expect(status).toContainText('Проверьте его перед отправкой')
+  await expect(input).toBeFocused()
+  await expect.poll(() => input.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual([14, 14])
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.tracksStopped)).toBe(1)
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.contextsClosed)).toBe(1)
   expect(messagePosts, 'Speech recognition must never send the chat message').toHaveLength(0)
 
-  await page.evaluate(() => { window.__voiceMock.transcript = 'отменённый текст' })
+  await page.evaluate(() => { window.__voiceMock.transcript = 'отменённый кнопкой текст' })
   await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
-  await expect(composer.getByRole('button', { name: 'Остановить диктовку', exact: true })).toBeVisible()
+  await expect(composer.getByRole('button', { name: 'Завершить диктовку', exact: true })).toBeVisible()
+  await composer.getByRole('button', { name: 'Отменить диктовку', exact: true }).click()
+  await expect(status).toContainText('Диктовка отменена. Черновик не изменён.')
+  await expect(input).toHaveValue('Вопрос: сроки документ')
+  await expect.poll(() => input.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual([14, 14])
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.aborts)).toBe(1)
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.tracksStopped)).toBe(2)
+
+  await page.evaluate(() => { window.__voiceMock.transcript = 'отменённый клавишей текст' })
+  await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
+  await expect(composer.getByRole('button', { name: 'Завершить диктовку', exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(status).toContainText('Диктовка отменена. Черновик не изменён.')
   await expect(input).toHaveValue('Вопрос: сроки документ')
-  await expect.poll(() => page.evaluate(() => window.__voiceMock.aborts)).toBe(1)
+  await expect.poll(() => input.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual([14, 14])
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.aborts)).toBe(2)
 
   await page.evaluate(() => { window.__voiceMock.transcript = 'при закрытии' })
   await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
-  await expect(composer.getByRole('button', { name: 'Остановить диктовку', exact: true })).toBeVisible()
+  await expect(composer.getByRole('button', { name: 'Завершить диктовку', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Свернуть чат', exact: true }).click()
   await expect(page.locator('.chat-panel')).toBeHidden()
-  await expect.poll(() => page.evaluate(() => window.__voiceMock.aborts)).toBe(2)
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.aborts)).toBe(3)
   await page.locator('.chat-visibility-toggle[aria-label="Открыть чат"]').click()
   await expect(input).toBeVisible()
   await expect(input).toHaveValue('Вопрос: сроки документ')
+  await expect.poll(() => input.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual([14, 14])
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.tracksStopped)).toBe(4)
+
+  const startsBeforePendingCancel = await page.evaluate(() => window.__voiceMock.starts)
+  await page.evaluate(() => { window.__voiceMock.microphonePending = true })
+  await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
+  const cancelRequestButton = composer.getByRole('button', { name: 'Отменить запрос микрофона', exact: true })
+  await expect(cancelRequestButton).toBeVisible()
+  await cancelRequestButton.click()
+  await expect(status).toContainText('Диктовка отменена')
+  await page.evaluate(() => {
+    window.__voiceMock.microphonePending = false
+    window.__voiceMock.resolvePendingMicrophone?.()
+  })
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.tracksStopped)).toBe(5)
+  await expect.poll(() => page.evaluate(() => window.__voiceMock.contextsClosed)).toBe(5)
+  expect(await page.evaluate(() => window.__voiceMock.starts)).toBe(startsBeforePendingCancel)
+  await expect.poll(() => input.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual([14, 14])
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1280, height: 720 },
+    { width: 1024, height: 768 },
+    { width: 768, height: 1024 },
+    { width: 430, height: 932 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const chatToggle = page.locator('.chat-visibility-toggle')
+    if (await chatToggle.getAttribute('aria-expanded') === 'false') await chatToggle.click()
+    await expect(composer).toBeVisible()
+    const originalSelection = await input.evaluate(element => [element.selectionStart, element.selectionEnd])
+    await startButton.click()
+    const responsiveStop = composer.getByRole('button', { name: 'Завершить диктовку', exact: true })
+    await expect(responsiveStop).toBeVisible()
+    await expect(composer.locator('.voice-level-meter-bar')).toHaveCount(29)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `Recording panel fits ${viewport.width}x${viewport.height}`).toBeTruthy()
+    await composer.getByRole('button', { name: 'Отменить диктовку', exact: true }).click()
+    await expect(startButton).toBeVisible()
+    await expect.poll(() => input.evaluate(element => [element.selectionStart, element.selectionEnd])).toEqual(originalSelection)
+  }
+
+  await page.evaluate(() => {
+    window.__voiceMock.microphoneError = true
+    window.__voiceMock.transcript = 'текст без измерителя'
+  })
+  await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
+  const fallbackStopButton = composer.getByRole('button', { name: 'Завершить диктовку', exact: true })
+  await expect(fallbackStopButton).toBeVisible()
+  await expect(recordingStatus).toContainText('индикатор уровня недоступен')
+  await expect(fallbackStopButton).toBeEnabled()
+  await fallbackStopButton.click()
+  await expect(input).toHaveValue('Вопрос: сроки текст без измерителя документ')
+  await input.fill('Вопрос: сроки документ')
+  await page.evaluate(() => { window.__voiceMock.microphoneError = false })
 
   await page.evaluate(() => { window.__voiceMock.error = 'not-allowed' })
   await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
@@ -121,6 +268,7 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
   await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
   await expect(status).toContainText('Автозагрузка отключена')
   expect(await page.evaluate(() => window.__voiceMock.starts)).toBe(startsBeforeUnavailableLanguage)
+  expect(await page.evaluate(() => window.__voiceMock.microphoneConstraints)).toHaveLength(13)
   await expect(input).toHaveValue('Вопрос: сроки документ')
 
   await page.evaluate(() => {
