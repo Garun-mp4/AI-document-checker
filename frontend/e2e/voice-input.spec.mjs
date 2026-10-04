@@ -13,9 +13,14 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
   await page.addInitScript(() => {
     const state = {
       availability: 'available',
+      browserAvailability: 'available',
       transcript: 'сроки',
       error: '',
       options: null,
+      availabilityChecks: [],
+      installOptions: null,
+      installCalls: 0,
+      installResult: true,
       starts: 0,
       aborts: 0,
       lastInstance: null,
@@ -42,7 +47,15 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
 
       static async available(options) {
         state.options = options
-        return state.availability
+        state.availabilityChecks.push(options)
+        return options.processLocally ? state.availability : state.browserAvailability
+      }
+
+      static async install(options) {
+        state.installOptions = options
+        state.installCalls += 1
+        if (state.installResult) state.availability = 'available'
+        return state.installResult
       }
 
       start() {
@@ -265,10 +278,24 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
     window.__voiceMock.availability = 'downloadable'
   })
   const startsBeforeUnavailableLanguage = await page.evaluate(() => window.__voiceMock.starts)
+  const microphoneRequestsBeforePackageInstall = await page.evaluate(() => window.__voiceMock.microphoneConstraints.length)
   await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
-  await expect(status).toContainText('Автозагрузка отключена')
+  await expect(status).toContainText('установить вручную')
+  const installLocalPackButton = composer.getByRole('button', { name: 'Загрузить локальный пакет', exact: true })
+  await expect(installLocalPackButton).toBeVisible()
   expect(await page.evaluate(() => window.__voiceMock.starts)).toBe(startsBeforeUnavailableLanguage)
   expect(await page.evaluate(() => window.__voiceMock.microphoneConstraints)).toHaveLength(13)
+  await installLocalPackButton.click()
+  await expect(status).toContainText('пакет установлен')
+  expect(await page.evaluate(() => window.__voiceMock.installOptions)).toEqual({ langs: ['ru-RU'], processLocally: true, quality: 'dictation' })
+  expect(await page.evaluate(() => window.__voiceMock.installCalls)).toBe(1)
+  expect(await page.evaluate(() => window.__voiceMock.starts)).toBe(startsBeforeUnavailableLanguage)
+  expect(await page.evaluate(() => window.__voiceMock.microphoneConstraints)).toHaveLength(microphoneRequestsBeforePackageInstall)
+  await startButton.click()
+  await expect(composer.getByRole('button', { name: 'Завершить диктовку', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => window.__voiceMock.lastInstance.processLocally)).toBe(true)
+  await composer.getByRole('button', { name: 'Завершить диктовку', exact: true }).click()
+  await input.fill('Вопрос: сроки документ')
   await expect(input).toHaveValue('Вопрос: сроки документ')
 
   await page.evaluate(() => {
@@ -279,6 +306,62 @@ test('Local dictation edits the draft only and stops safely on cancel, close, an
   })
   await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
   await expect(status).toContainText('не поддерживается этим браузером')
+
+  await page.evaluate(() => {
+    const MockSpeechRecognition = window.__voiceMock.lastInstance.constructor
+    Object.defineProperty(window, 'SpeechRecognition', { value: MockSpeechRecognition, configurable: true })
+    window.__voiceMock.availability = 'unavailable'
+    window.__voiceMock.transcript = 'сроки'
+  })
+  const startsBeforeBrowserConsent = await page.evaluate(() => window.__voiceMock.starts)
+  await composer.getByRole('button', { name: 'Голосовой ввод', exact: true }).click()
+  await expect(status).toContainText('Локальная русская диктовка недоступна')
+  const browserRecognitionOption = composer.getByRole('button', { name: 'Распознать браузером…', exact: true })
+  await expect(browserRecognitionOption).toBeVisible()
+  const availabilityChecksBeforeOpeningConsent = await page.evaluate(() => window.__voiceMock.availabilityChecks.length)
+  await browserRecognitionOption.click()
+  const browserConsent = page.getByRole('dialog', { name: 'Распознавать речь браузером?' })
+  await expect(browserConsent).toBeVisible()
+  await expect(browserConsent).toContainText('браузер может передавать аудио внешнему сервису')
+  await expect(browserConsent).toContainText('не отправится в чат')
+  await expect(browserConsent.getByRole('button', { name: 'Отмена', exact: true })).toBeFocused()
+  await page.setViewportSize({ width: 390, height: 844 })
+  const mobileDialogWidth = await browserConsent.evaluate(element => element.getBoundingClientRect().width)
+  expect(mobileDialogWidth).toBeLessThanOrEqual(390)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Voice consent dialog has no mobile horizontal overflow').toBeTruthy()
+  await page.keyboard.press('Escape')
+  await expect(browserConsent).toBeHidden()
+  expect(await page.evaluate(() => window.__voiceMock.starts)).toBe(startsBeforeBrowserConsent)
+  expect(await page.evaluate(() => window.__voiceMock.availabilityChecks.length), 'The browser service is not queried before explicit consent').toBe(availabilityChecksBeforeOpeningConsent)
+  await page.setViewportSize({ width: 1440, height: 900 })
+
+  await page.evaluate(() => { window.__voiceMock.browserAvailability = 'unavailable' })
+  const microphoneRequestsBeforeUnavailableBrowserMode = await page.evaluate(() => window.__voiceMock.microphoneConstraints.length)
+  await browserRecognitionOption.click()
+  await browserConsent.getByRole('button', { name: 'Продолжить с браузером', exact: true }).click()
+  await expect(status).toContainText('Браузер не подтвердил доступность русского распознавания')
+  expect(await page.evaluate(() => window.__voiceMock.microphoneConstraints.length), 'An unavailable browser service is rejected before requesting microphone access').toBe(microphoneRequestsBeforeUnavailableBrowserMode)
+  expect(await page.evaluate(() => window.__voiceMock.starts), 'A browser service reported unavailable must not start recognition').toBe(startsBeforeBrowserConsent)
+
+  await page.evaluate(() => { window.__voiceMock.browserAvailability = 'available' })
+  const availabilityChecksBeforeBrowserStart = await page.evaluate(() => window.__voiceMock.availabilityChecks.length)
+  await browserRecognitionOption.click()
+  await browserConsent.getByRole('button', { name: 'Продолжить с браузером', exact: true }).click()
+  const browserRecognitionStop = composer.getByRole('button', { name: 'Завершить диктовку', exact: true })
+  await expect(browserRecognitionStop).toBeVisible()
+  const browserConfiguration = await page.evaluate(() => ({
+    mode: window.__voiceMock.lastInstance.processLocally,
+    language: window.__voiceMock.lastInstance.lang,
+    availabilityChecks: window.__voiceMock.availabilityChecks.length,
+  }))
+  expect(browserConfiguration.mode, 'Browser-managed recognition starts only after the explicit consent action').toBe(false)
+  expect(browserConfiguration.language).toBe('ru-RU')
+  expect(browserConfiguration.availabilityChecks, 'Browser-managed availability is checked only after the consent action').toBe(availabilityChecksBeforeBrowserStart + 1)
+  expect(await page.evaluate(() => window.__voiceMock.availabilityChecks.at(-1)), 'The opted-in check permits browser-managed processing but does not require a local pack').toEqual({ langs: ['ru-RU'], processLocally: false, quality: 'dictation' })
+  await browserRecognitionStop.click()
+  await expect(status).toContainText('Проверьте его перед отправкой')
+  await expect(input).toHaveValue('Вопрос: сроки документ сроки')
+  expect(messagePosts, 'Choosing browser recognition does not upload a recording or send the draft').toHaveLength(0)
 
   await page.setViewportSize({ width: 390, height: 844 })
   await showChat(page)

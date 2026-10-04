@@ -8,9 +8,10 @@ import { openLocalMicrophoneAnalyzer } from './microphoneLevel.mjs'
 
 const VOICE_LANGUAGE = 'ru-RU'
 
-type VoiceState = 'idle' | 'checking' | 'requesting' | 'recording' | 'processing' | 'complete' | 'error' | 'cancelled'
+type VoiceState = 'idle' | 'checking' | 'installing' | 'requesting' | 'recording' | 'processing' | 'complete' | 'error' | 'cancelled'
 type SpeechAvailability = 'available' | 'downloadable' | 'downloading' | 'unavailable'
 type MeterAvailability = 'idle' | 'checking' | 'available' | 'unavailable'
+type RecognitionMode = 'local' | 'browser-managed'
 
 type SpeechAlternativeLike = { transcript?: string }
 type SpeechResultLike = { isFinal: boolean; 0?: SpeechAlternativeLike }
@@ -36,9 +37,14 @@ type LocalSpeechRecognitionConstructor = {
   new(): LocalSpeechRecognition
   available?: (options: {
     langs: string[]
-    processLocally: true
+    processLocally: boolean
     quality: 'dictation'
   }) => Promise<SpeechAvailability>
+  install?: (options: {
+    langs: string[]
+    processLocally: true
+    quality: 'dictation'
+  }) => Promise<boolean>
 }
 
 type SpeechRecognitionWindow = Window & {
@@ -59,6 +65,8 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
   const [message, setMessage] = useState('')
   const [meterAnalyser, setMeterAnalyser] = useState<AnalyserNode | null>(null)
   const [meterAvailability, setMeterAvailability] = useState<MeterAvailability>('idle')
+  const [canInstallLocalPack, setCanInstallLocalPack] = useState(false)
+  const [canUseBrowserRecognition, setCanUseBrowserRecognition] = useState(false)
   const stateRef = useRef<VoiceState>('idle')
   const recognitionRef = useRef<LocalSpeechRecognition | null>(null)
   const meterMonitorRef = useRef<Awaited<ReturnType<typeof openLocalMicrophoneAnalyzer>> | null>(null)
@@ -67,6 +75,7 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
   const operationRef = useRef(0)
   const transcriptRef = useRef('')
   const errorMessageRef = useRef('')
+  const localPackInstallActiveRef = useRef(false)
   const draftRef = useRef(value)
   const onChangeRef = useRef(onChange)
   const enabledRef = useRef(enabled)
@@ -164,8 +173,8 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
     else publish('error', 'Речь не распознана. Попробуйте ещё раз.')
   }, [publish, releaseMicrophoneMeter, textareaRef])
 
-  const start = useCallback(async () => {
-    if (disabled || !enabled || sessionActiveRef.current) return
+  const start = useCallback(async (mode: RecognitionMode = 'local') => {
+    if (disabled || !enabled || sessionActiveRef.current || localPackInstallActiveRef.current) return
     const operation = operationRef.current + 1
     operationRef.current = operation
     sessionActiveRef.current = true
@@ -174,6 +183,8 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
     meterAvailabilityRef.current = 'checking'
     setMeterAvailability('checking')
     setMeterAnalyser(null)
+    setCanInstallLocalPack(false)
+    setCanUseBrowserRecognition(false)
     const textarea = textareaRef.current
     const currentValue = draftRef.current
     selectionRef.current = {
@@ -181,7 +192,7 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
       end: textarea?.selectionEnd ?? currentValue.length,
       value: currentValue,
     }
-    publish('checking', 'Проверяю поддержку локальной диктовки…')
+    publish('checking', mode === 'local' ? 'Проверяю поддержку локальной диктовки…' : 'Запускаю распознавание речи браузером…')
 
     const browser = window as SpeechRecognitionWindow
     const Recognition = browser.SpeechRecognition ?? browser.webkitSpeechRecognition
@@ -199,46 +210,98 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
       publish('error', 'Не удалось запустить локальную диктовку в этом браузере. Можно продолжить печатать.')
       return
     }
-    if (!('processLocally' in recognition) || typeof Recognition.available !== 'function') {
-      sessionActiveRef.current = false
-      publish('error', 'Браузер не подтверждает локальную обработку речи. Аудио не отправлялось; можно продолжить печатать.')
-      return
-    }
+    if (mode === 'local') {
+      if (!('processLocally' in recognition) || typeof Recognition.available !== 'function') {
+        sessionActiveRef.current = false
+        setCanUseBrowserRecognition(true)
+        publish('error', 'Браузер не подтверждает локальную обработку речи. Можно продолжить печатать или выбрать режим распознавания браузером.')
+        return
+      }
 
-    let availability: SpeechAvailability
-    try {
-      availability = await Recognition.available({
-        langs: [VOICE_LANGUAGE],
-        processLocally: true,
-        quality: 'dictation',
-      })
-    } catch {
+      let availability: SpeechAvailability
+      try {
+        availability = await Recognition.available({
+          langs: [VOICE_LANGUAGE],
+          processLocally: true,
+          quality: 'dictation',
+        })
+      } catch {
+        if (operationRef.current !== operation || !sessionActiveRef.current) return
+        sessionActiveRef.current = false
+        setCanUseBrowserRecognition(true)
+        publish('error', 'Не удалось проверить локальную диктовку. Проверьте настройки браузера или выберите режим распознавания браузером.')
+        return
+      }
       if (operationRef.current !== operation || !sessionActiveRef.current) return
-      sessionActiveRef.current = false
-      publish('error', 'Не удалось проверить локальную диктовку. Проверьте настройки браузера или продолжите печатать.')
-      return
-    }
-    if (operationRef.current !== operation || !sessionActiveRef.current) return
-    if (availability !== 'available') {
-      sessionActiveRef.current = false
-      meterAvailabilityRef.current = 'idle'
-      setMeterAvailability('idle')
-      publish('error', speechAvailabilityMessage(availability, VOICE_LANGUAGE))
-      return
+      if (availability !== 'available') {
+        sessionActiveRef.current = false
+        meterAvailabilityRef.current = 'idle'
+        setMeterAvailability('idle')
+        setCanInstallLocalPack(
+          (availability === 'downloadable' || availability === 'downloading')
+          && typeof Recognition.install === 'function',
+        )
+        setCanUseBrowserRecognition(true)
+        publish('error', speechAvailabilityMessage(availability, VOICE_LANGUAGE))
+        return
+      }
+
+      recognition.processLocally = true
+      if (recognition.processLocally !== true) {
+        sessionActiveRef.current = false
+        meterAvailabilityRef.current = 'idle'
+        setMeterAvailability('idle')
+        setCanUseBrowserRecognition(true)
+        publish('error', 'Браузер не включил локальную обработку речи. Можно продолжить печатать или выбрать режим распознавания браузером.')
+        return
+      }
+    } else {
+      // This branch is called only from the explicit browser-recognition consent dialog.
+      if ('processLocally' in recognition) {
+        try {
+          recognition.processLocally = false
+        } catch {
+          sessionActiveRef.current = false
+          setCanUseBrowserRecognition(true)
+          publish('error', 'Браузер не разрешил выбранный режим распознавания. Аудио не записывалось.')
+          return
+        }
+        if (recognition.processLocally !== false) {
+          sessionActiveRef.current = false
+          setCanUseBrowserRecognition(true)
+          publish('error', 'Браузер не включил выбранный режим распознавания. Микрофон не включался.')
+          return
+        }
+      }
+      if (typeof Recognition.available === 'function') {
+        let browserAvailability: SpeechAvailability
+        try {
+          browserAvailability = await Recognition.available({
+            langs: [VOICE_LANGUAGE],
+            processLocally: false,
+            quality: 'dictation',
+          })
+        } catch {
+          if (operationRef.current !== operation || !sessionActiveRef.current) return
+          sessionActiveRef.current = false
+          setCanUseBrowserRecognition(true)
+          publish('error', 'Браузер не смог проверить русский режим распознавания. Микрофон не включался.')
+          return
+        }
+        if (operationRef.current !== operation || !sessionActiveRef.current) return
+        if (browserAvailability !== 'available') {
+          sessionActiveRef.current = false
+          setCanUseBrowserRecognition(true)
+          publish('error', 'Браузер не подтвердил доступность русского распознавания. Микрофон не включался; можно продолжить печатать.')
+          return
+        }
+      }
     }
 
     recognition.lang = VOICE_LANGUAGE
     recognition.continuous = true
     recognition.interimResults = true
     recognition.maxAlternatives = 1
-    recognition.processLocally = true
-    if (recognition.processLocally !== true) {
-      sessionActiveRef.current = false
-      meterAvailabilityRef.current = 'idle'
-      setMeterAvailability('idle')
-      publish('error', 'Браузер не включил локальную обработку речи. Аудио не отправлялось.')
-      return
-    }
 
     publish('requesting', 'Запрашиваю доступ к микрофону…')
     let meterMonitor: Awaited<ReturnType<typeof openLocalMicrophoneAnalyzer>> | null = null
@@ -259,15 +322,19 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
     } else {
       meterAvailabilityRef.current = 'unavailable'
       setMeterAvailability('unavailable')
-      setMessage('Уровень микрофона недоступен. Продолжаю локальную диктовку…')
+      setMessage(mode === 'local'
+        ? 'Уровень микрофона недоступен. Продолжаю локальную диктовку…'
+        : 'Уровень микрофона недоступен. Продолжаю распознавание браузером…')
     }
 
     recognitionRef.current = recognition
     recognition.onstart = () => {
       if (recognitionRef.current !== recognition) return
-      const status = meterAvailabilityRef.current === 'available'
-        ? 'Говорите: шкала показывает уровень микрофона. Нажмите «Завершить диктовку», чтобы проверить текст; Escape — отменить.'
-        : 'Идёт диктовка; индикатор уровня недоступен. Нажмите «Завершить диктовку», чтобы проверить текст; Escape — отменить.'
+      const status = mode === 'browser-managed'
+        ? 'Распознавание браузером: звук может обрабатываться внешним сервисом. Завершите диктовку, чтобы проверить текст.'
+        : meterAvailabilityRef.current === 'available'
+          ? 'Говорите: шкала показывает уровень микрофона. Нажмите «Завершить диктовку», чтобы проверить текст; Escape — отменить.'
+          : 'Идёт диктовка; индикатор уровня недоступен. Нажмите «Завершить диктовку», чтобы проверить текст; Escape — отменить.'
       publish('recording', status)
     }
     recognition.onresult = (event) => {
@@ -282,7 +349,8 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
     }
     recognition.onerror = (event) => {
       if (recognitionRef.current !== recognition) return
-      errorMessageRef.current = speechRecognitionErrorMessage(event.error ?? '')
+      errorMessageRef.current = speechRecognitionErrorMessage(event.error ?? '', mode)
+      if (mode === 'browser-managed') setCanUseBrowserRecognition(true)
       releaseMicrophoneMeter()
     }
     recognition.onend = () => finish(recognition)
@@ -293,11 +361,76 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
       sessionActiveRef.current = false
       releaseMicrophoneMeter()
       const name = error instanceof Error ? error.name : ''
+      if (mode === 'browser-managed') setCanUseBrowserRecognition(true)
       publish('error', name === 'NotAllowedError'
         ? speechRecognitionErrorMessage('not-allowed')
-        : 'Не удалось включить микрофон. Проверьте разрешение браузера и попробуйте ещё раз.')
+        : mode === 'local'
+          ? 'Не удалось включить микрофон. Проверьте разрешение браузера и попробуйте ещё раз.'
+          : 'Не удалось запустить распознавание браузером. Проверьте микрофон, подключение к сети и попробуйте ещё раз.')
     }
   }, [disabled, enabled, finish, publish, releaseMicrophoneMeter, textareaRef])
+
+  const installLocalPack = useCallback(async () => {
+    if (disabled || !enabled || localPackInstallActiveRef.current) return
+    const browser = window as SpeechRecognitionWindow
+    const Recognition = browser.SpeechRecognition ?? browser.webkitSpeechRecognition
+    if (!Recognition?.install || typeof Recognition.available !== 'function') {
+      setCanInstallLocalPack(false)
+      setCanUseBrowserRecognition(Boolean(Recognition))
+      publish('error', 'Этот браузер не умеет устанавливать локальный пакет. Можно продолжить печатать или выбрать режим распознавания браузером.')
+      return
+    }
+
+    localPackInstallActiveRef.current = true
+    const operation = operationRef.current + 1
+    operationRef.current = operation
+    setCanInstallLocalPack(false)
+    setCanUseBrowserRecognition(false)
+    publish('installing', 'Загружаю локальный пакет русского языка. Микрофон пока не включён.')
+    try {
+      const installed = await Recognition.install({
+        langs: [VOICE_LANGUAGE],
+        processLocally: true,
+        quality: 'dictation',
+      })
+      if (operationRef.current !== operation) return
+      if (!installed) {
+        setCanInstallLocalPack(true)
+        setCanUseBrowserRecognition(true)
+        publish('error', 'Браузер не установил локальный пакет. Можно повторить попытку позже или выбрать режим распознавания браузером.')
+        return
+      }
+
+      const availability = await Recognition.available({
+        langs: [VOICE_LANGUAGE],
+        processLocally: true,
+        quality: 'dictation',
+      })
+      if (operationRef.current !== operation) return
+      if (availability === 'available') {
+        setCanUseBrowserRecognition(false)
+        publish('complete', 'Локальный пакет установлен. Нажмите микрофон ещё раз, чтобы начать диктовку.')
+      } else {
+        setCanInstallLocalPack(
+          (availability === 'downloadable' || availability === 'downloading')
+          && typeof Recognition.install === 'function',
+        )
+        setCanUseBrowserRecognition(true)
+        publish('error', speechAvailabilityMessage(availability, VOICE_LANGUAGE))
+      }
+    } catch {
+      if (operationRef.current !== operation) return
+      setCanInstallLocalPack(true)
+      setCanUseBrowserRecognition(true)
+      publish('error', 'Не удалось загрузить локальный пакет. Проверьте соединение или выберите режим распознавания браузером.')
+    } finally {
+      localPackInstallActiveRef.current = false
+    }
+  }, [disabled, enabled, publish])
+
+  const startBrowserRecognition = useCallback(() => {
+    void start('browser-managed')
+  }, [start])
 
   const toggle = useCallback(() => {
     if (!sessionActiveRef.current) {
@@ -367,6 +500,8 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
 
   const clearFeedback = useCallback(() => {
     if (stateRef.current === 'complete' || stateRef.current === 'error' || stateRef.current === 'cancelled') {
+      setCanInstallLocalPack(false)
+      setCanUseBrowserRecognition(false)
       publish('idle', '')
     }
   }, [publish])
@@ -378,6 +513,10 @@ export function useLocalSpeechInput({ value, onChange, textareaRef, disabled, en
     active,
     meterAnalyser,
     meterAvailability,
+    canInstallLocalPack,
+    canUseBrowserRecognition,
+    installLocalPack,
+    startBrowserRecognition,
     clearFeedback,
     toggle,
     cancel,

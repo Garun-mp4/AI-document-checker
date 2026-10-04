@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, type FormEvent, type KeyboardEvent, type Ref } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type Ref } from 'react'
 import { ArrowUp, ChevronDown, Mic, Plus, Square, X } from 'lucide-react'
 import { useLocalSpeechInput } from '../useLocalSpeechInput'
 import { VoiceLevelMeter } from './VoiceLevelMeter'
@@ -41,6 +41,8 @@ export function AIComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const voiceControlRef = useRef<HTMLButtonElement>(null)
   const stopVoiceRef = useRef<HTMLButtonElement>(null)
+  const browserConsentDialogRef = useRef<HTMLDialogElement>(null)
+  const [browserConsentOpen, setBrowserConsentOpen] = useState(false)
   const assignTextareaRef = useCallback((element: HTMLTextAreaElement | null) => {
     textareaRef.current = element
     if (typeof inputRef === 'function') inputRef(element)
@@ -63,12 +65,21 @@ export function AIComposer({
         ? 'Отменить запрос микрофона'
         : voiceInput.state === 'checking'
           ? 'Отменить проверку диктовки'
+        : voiceInput.state === 'installing'
+          ? 'Загружается локальный пакет'
           : 'Голосовой ввод'
   const voiceTitle = voiceActive
     ? `${voiceLabel}. Нажмите Escape, чтобы отменить.`
-    : 'Локальная диктовка на русском языке. Аудио не отправляется приложению.'
+    : 'Сначала проверяется локальная диктовка. Если её нет, можно отдельно выбрать режим браузера, который может передавать аудио внешнему сервису.'
   const voiceStatusText = voiceInput.message || helperText
   const recording = voiceInput.state === 'recording'
+
+  useEffect(() => {
+    const dialog = browserConsentDialogRef.current
+    if (!dialog) return
+    if (browserConsentOpen && !dialog.open) dialog.showModal()
+    else if (!browserConsentOpen && dialog.open) dialog.close()
+  }, [browserConsentOpen])
 
   useEffect(() => {
     if (recording) stopVoiceRef.current?.focus({ preventScroll: true })
@@ -168,17 +179,37 @@ export function AIComposer({
             >
               <Plus aria-hidden="true" size={21} strokeWidth={1.8} />
             </button>
-            <span
-              className="ai-composer-status"
-              data-voice-state={voiceInput.state}
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-              aria-busy={['checking', 'requesting', 'processing'].includes(voiceInput.state)}
-              title={voiceStatusText}
-            >
-              {voiceStatusText}
-            </span>
+            <div className="ai-composer-status-block">
+              <span
+                className="ai-composer-status"
+                data-voice-state={voiceInput.state}
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                aria-busy={['checking', 'installing', 'requesting', 'processing'].includes(voiceInput.state)}
+                title={voiceStatusText}
+              >
+                {voiceStatusText}
+              </span>
+              {(voiceInput.canInstallLocalPack || voiceInput.canUseBrowserRecognition) && <div className="ai-composer-voice-options">
+                {voiceInput.canInstallLocalPack && <button
+                  className="ai-composer-voice-option"
+                  type="button"
+                  onClick={() => void voiceInput.installLocalPack()}
+                  disabled={voiceInput.state === 'installing'}
+                >
+                  {voiceInput.state === 'installing' ? 'Загружается пакет…' : 'Загрузить локальный пакет'}
+                </button>}
+                {voiceInput.canUseBrowserRecognition && <button
+                  className="ai-composer-voice-option"
+                  type="button"
+                  onClick={() => setBrowserConsentOpen(true)}
+                  disabled={voiceInput.state === 'installing'}
+                >
+                  Распознать браузером…
+                </button>}
+              </div>}
+            </div>
             <div className="ai-composer-controls">
               <button
                 className="ai-composer-model-control"
@@ -201,9 +232,9 @@ export function AIComposer({
                 title={voiceTitle}
                 aria-pressed={voiceActive}
                 aria-keyshortcuts={voiceActive ? 'Escape' : undefined}
-                aria-busy={['checking', 'requesting', 'processing'].includes(voiceInput.state)}
+                aria-busy={['checking', 'installing', 'requesting', 'processing'].includes(voiceInput.state)}
                 onClick={voiceInput.toggle}
-                disabled={inputDisabled || !voiceInputEnabled}
+                disabled={inputDisabled || !voiceInputEnabled || voiceInput.state === 'installing'}
               >
                 {voiceActive ? <Square aria-hidden="true" size={17} strokeWidth={2} fill="currentColor" /> : <Mic aria-hidden="true" size={21} strokeWidth={1.8} />}
               </button>
@@ -220,6 +251,32 @@ export function AIComposer({
           </div>
         </>
       )}
+      <dialog
+        ref={browserConsentDialogRef}
+        className="ocr-impact-dialog speech-consent-dialog"
+        aria-labelledby="speech-consent-title"
+        aria-describedby="speech-consent-description"
+        onCancel={(event) => {
+          event.preventDefault()
+          setBrowserConsentOpen(false)
+        }}
+        onClose={() => setBrowserConsentOpen(false)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) setBrowserConsentOpen(false)
+        }}
+      >
+        <span className="ocr-impact-icon"><Mic aria-hidden="true" size={18} /></span>
+        <h3 id="speech-consent-title">Распознавать речь браузером?</h3>
+        <p id="speech-consent-description">Локальная русская диктовка в этом браузере недоступна. При выборе этого режима браузер может передавать аудио внешнему сервису; его поставщика и правила хранения приложение определить не может.</p>
+        <p>Приложение не сохраняет и не загружает аудио на собственный сервер; локальная шкала уровня работает только в памяти вкладки. Распознанный текст сначала появится в поле сообщения и не отправится в чат, пока вы сами не нажмёте кнопку отправки. Согласие действует только для этой диктовки.</p>
+        <div className="ocr-impact-actions">
+          <button className="button button-light" type="button" autoFocus onClick={() => setBrowserConsentOpen(false)}>Отмена</button>
+          <button className="button button-dark" type="button" onClick={() => {
+            setBrowserConsentOpen(false)
+            voiceInput.startBrowserRecognition()
+          }}>Продолжить с браузером</button>
+        </div>
+      </dialog>
     </form>
   )
 }

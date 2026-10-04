@@ -22,12 +22,12 @@ export function insertTranscriptAtSelection(value, selectionStart, selectionEnd,
 
 export function speechAvailabilityMessage(availability, language) {
   if (availability === 'unavailable') {
-    return `Локальное распознавание ${language} недоступно в этом браузере. Можно продолжить печатать.`
+    return 'Локальная русская диктовка недоступна в этом браузере. Можно продолжить печатать или выбрать распознавание браузером.'
   }
-  return `Пакет ${language} для локальной диктовки не установлен или ещё загружается. Автозагрузка отключена; можно продолжить печатать.`
+  return `Пакет ${language} для локальной диктовки не установлен или ещё загружается. Его можно установить вручную; автоматическая загрузка не запускается.`
 }
 
-export function speechRecognitionErrorMessage(error) {
+export function speechRecognitionErrorMessage(error, mode = 'local') {
   switch (error) {
     case 'not-allowed':
     case 'service-not-allowed':
@@ -35,11 +35,15 @@ export function speechRecognitionErrorMessage(error) {
     case 'audio-capture':
       return 'Микрофон не найден или занят другим приложением.'
     case 'language-not-supported':
-      return 'Локальное распознавание этого языка недоступно. Аудио не отправлялось в интернет.'
+      return mode === 'local'
+        ? 'Локальное распознавание этого языка недоступно. Аудио не отправлялось в интернет.'
+        : 'Режим браузера не поддерживает русский язык. Можно попробовать ещё раз или продолжить печатать.'
     case 'no-speech':
       return 'Речь не распознана. Попробуйте ещё раз.'
     case 'network':
-      return 'Локальное распознавание завершилось с ошибкой. Переключения на сетевой сервис нет.'
+      return mode === 'local'
+        ? 'Локальное распознавание завершилось с ошибкой. Переключения на сетевой сервис нет.'
+        : 'Сервис распознавания браузера недоступен. Проверьте подключение к интернету и попробуйте ещё раз.'
     default:
       return 'Не удалось распознать речь. Проверьте микрофон и попробуйте ещё раз.'
   }

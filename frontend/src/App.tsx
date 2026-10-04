@@ -2427,7 +2427,7 @@ function App() {
           {isUploading ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
           <span>Новый чат</span>
         </button>
-        <button className="library-compare-add" type="button" onClick={() => void openComparisonPicker()} disabled={isUploading}>
+        <button className="library-compare-add" type="button" title="Сравнить документы" aria-label="Сравнить документы" onClick={() => void openComparisonPicker()} disabled={isUploading}>
           <Files size={16} aria-hidden="true" /><span>Сравнить документы</span>
         </button>
         <div className="library-search-wrap">

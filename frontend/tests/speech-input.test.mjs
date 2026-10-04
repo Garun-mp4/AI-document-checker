@@ -31,9 +31,9 @@ test('empty transcript leaves the draft untouched and clamps invalid selection p
   })
 })
 
-test('local speech availability explains missing packs without silently downloading them', () => {
-  assert.match(speechAvailabilityMessage('downloadable', 'ru-RU'), /Автозагрузка отключена/)
-  assert.match(speechAvailabilityMessage('unavailable', 'ru-RU'), /недоступно/)
+test('local speech availability distinguishes an installable pack from an unsupported language', () => {
+  assert.match(speechAvailabilityMessage('downloadable', 'ru-RU'), /установить вручную/)
+  assert.match(speechAvailabilityMessage('unavailable', 'ru-RU'), /Локальная русская диктовка недоступна/)
 })
 
 test('speech errors distinguish permission, missing microphone, language, and local engine failures', () => {
@@ -41,5 +41,7 @@ test('speech errors distinguish permission, missing microphone, language, and lo
   assert.match(speechRecognitionErrorMessage('audio-capture'), /Микрофон не найден/)
   assert.match(speechRecognitionErrorMessage('language-not-supported'), /Аудио не отправлялось/)
   assert.match(speechRecognitionErrorMessage('network'), /Переключения на сетевой сервис нет/)
+  assert.match(speechRecognitionErrorMessage('network', 'browser-managed'), /Сервис распознавания браузера недоступен/)
+  assert.match(speechRecognitionErrorMessage('language-not-supported', 'browser-managed'), /не поддерживает русский язык/)
   assert.match(speechRecognitionErrorMessage('unknown'), /попробуйте ещё раз/)
 })

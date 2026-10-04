@@ -31,6 +31,14 @@ test('sidebar collapse has persistent state and an accessible control contract',
   assert.match(styles, /\.app-shell\.library-manual-collapsed\s*\{[^}]*72px/)
 })
 
+test('document comparison action follows the sidebar button design and remains usable when collapsed', () => {
+  assert.match(app, /className="library-compare-add"[^>]*aria-label="Сравнить документы"/)
+  assert.match(styles, /\.library-compare-add\s*\{[^}]*border-radius:\s*999px/)
+  assert.match(styles, /\.library-compare-add\s*\{[^}]*border:\s*1px solid var\(--line\)/)
+  assert.match(styles, /\.library-compare-add:hover:not\(:disabled\)/)
+  assert.match(styles, /\.library-manual-collapsed\s+\.library-compare-add\s+span\s*\{\s*display:\s*none/)
+})
+
 test('model picker exposes only the two supported Codex models', () => {
   assert.match(app, /ALLOWED_CODEX_MODELS\s*=\s*new Set\(\['gpt-6-luna',\s*'gpt-6\.1-sol'\]\)/)
   assert.match(app, /filter\(\(item\) => ALLOWED_CODEX_MODELS\.has\(item\.id\.toLowerCase\(\)\)\)/)
@@ -135,12 +143,16 @@ test('AI composers share accessible attachment, model, voice, send, and keyboard
   assert.match(voiceLevelMeter, /if \(reducedMotion\)/)
   assert.match(voiceLevelMeter, /aria-hidden="true"/)
   assert.match(localSpeechInput, /Recognition\.available\(\{[\s\S]*processLocally: true[\s\S]*quality: 'dictation'/)
+  assert.match(localSpeechInput, /Recognition\.install\(\{[\s\S]*processLocally: true[\s\S]*quality: 'dictation'/)
   assert.match(localSpeechInput, /recognition\.processLocally = true/)
+  assert.match(localSpeechInput, /recognition\.processLocally = false/)
+  assert.match(localSpeechInput, /startBrowserRecognition/)
   assert.match(localSpeechInput, /recognition\.abort\(\)/)
   assert.match(localSpeechInput, /document\.visibilityState === 'hidden'/)
   assert.match(localSpeechInput, /openLocalMicrophoneAnalyzer\(\)/)
   assert.match(localSpeechInput, /meterMonitor\.dispose\(\)/)
-  assert.doesNotMatch(localSpeechInput, /Recognition\.install|processLocally\s*=\s*false|processLocally:\s*false|MediaRecorder|fetch\(/)
+  assert.match(localSpeechInput, /mode === 'local'[\s\S]*processLocally: false[\s\S]*startBrowserRecognition/)
+  assert.doesNotMatch(localSpeechInput, /MediaRecorder|fetch\(/)
   assert.match(microphoneLevel, /getUserMedia\(\{ audio: true, video: false \}\)/)
   assert.match(microphoneLevel, /source\.connect\(analyser\)/)
   assert.doesNotMatch(microphoneLevel, /MediaRecorder|fetch\(|localStorage|\.destination/)

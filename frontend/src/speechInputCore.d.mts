@@ -12,4 +12,4 @@ export function speechAvailabilityMessage(
   language: string,
 ): string
 
-export function speechRecognitionErrorMessage(error: string): string
+export function speechRecognitionErrorMessage(error: string, mode?: 'local' | 'browser-managed'): string
