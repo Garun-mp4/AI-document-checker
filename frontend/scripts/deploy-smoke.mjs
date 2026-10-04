@@ -36,15 +36,16 @@ try {
 
   const response = await page.goto(baseUrl, { waitUntil: 'networkidle' })
   assert.equal(response?.status(), 200, 'Web root returns HTTP 200')
-  await page.getByRole('button', { name: 'Свернуть библиотеку', exact: true }).click()
+  const library = page.getByRole('complementary', { name: 'История чатов', exact: true })
+  await library.getByRole('button', { name: 'Свернуть библиотеку', exact: true }).click()
   assert.equal(await page.locator('#chat-library').evaluate(element => Math.round(element.getBoundingClientRect().width)), 72)
-  await page.getByRole('button', { name: 'Развернуть библиотеку', exact: true }).click()
+  await library.getByRole('button', { name: 'Развернуть библиотеку', exact: true }).click()
   assert.equal(await page.locator('#chat-library').evaluate(element => Math.round(element.getBoundingClientRect().width)), 240)
 
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Открыть документы', exact: true }).click()
   assert.equal(await page.locator('#chat-library').evaluate(element => Math.round(element.getBoundingClientRect().width)), 300)
-  await page.getByRole('button', { name: 'Свернуть библиотеку', exact: true }).click()
+  await library.getByRole('button', { name: 'Свернуть библиотеку', exact: true }).click()
   assert.equal(await page.locator('#chat-library').evaluate(element => Math.round(element.getBoundingClientRect().width)), 72)
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Mobile UI has no horizontal overflow')
 
