@@ -46,6 +46,7 @@ import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_UPLOAD_BYTES, SUPPORTED_DOCUMENT_EXTE
 import { DocumentLayoutSelector } from './components/DocumentLayoutSelector'
 import type { AnalysisLayoutMode } from './components/DocumentLayoutSelector'
 import { AIComposer } from './components/AIComposer'
+import type { AIComposerPreferences } from './components/AIComposer'
 import { OriginalDocumentViewer } from './components/OriginalDocumentViewer'
 import type { OcrReprocessOptions } from './components/OriginalDocumentViewer'
 import { MarkdownViewer } from './components/MarkdownViewer'
@@ -1663,6 +1664,18 @@ function App() {
     return saveCodexPreferences(codex?.model || DEFAULT_CODEX_MODEL, reasoningEffort)
   }, [codex, saveCodexPreferences])
 
+  const selectComposerModel = useCallback(async (model: string) => {
+    const saved = await changeCodexModel(model)
+    if (!saved) showToast('Не удалось сохранить модель. Проверьте соединение и попробуйте ещё раз.')
+    return saved
+  }, [changeCodexModel, showToast])
+
+  const selectComposerReasoning = useCallback(async (reasoningEffort: string) => {
+    const saved = await changeCodexReasoning(reasoningEffort)
+    if (!saved) showToast('Не удалось сохранить уровень размышления. Попробуйте ещё раз.')
+    return saved
+  }, [changeCodexReasoning, showToast])
+
   const retryDocument = useCallback(async (operation: 'retry' | 'process' = 'retry') => {
     if (!document || processingActionPending) return
     setProcessingActionPending(true)
@@ -2122,6 +2135,19 @@ function App() {
   const codexReasoningOptions = selectedCodexModel?.reasoning_efforts ?? []
   const modelMenuDisabled = !codex?.authenticated || !catalogModelOptions.length || codexSaving
   const reasoningMenuDisabled = !codex?.authenticated || !codex?.model_available || !codexReasoningOptions.length || codexSaving
+  const composerPreferences: AIComposerPreferences = {
+    modelOptions: catalogModelOptions,
+    selectedModelId: codex?.model || DEFAULT_CODEX_MODEL,
+    reasoningOptions: codexReasoningOptions,
+    selectedReasoningEffort: codex?.reasoning_effort || DEFAULT_CODEX_REASONING,
+    modelName: codexModelLabel(codex),
+    reasoningName: codexReasoningLabel(codex?.reasoning_effort),
+    authenticated: Boolean(codex?.authenticated),
+    busy: codexSaving,
+    onOpenModelSettings: () => setAuthOpen(true),
+    onSelectModel: selectComposerModel,
+    onSelectReasoning: selectComposerReasoning,
+  }
   const togglePreferenceMenu = (menu: 'model' | 'reasoning') => {
     if ((menu === 'model' && modelMenuDisabled) || (menu === 'reasoning' && reasoningMenuDisabled)) return
     if (openPreferenceMenu === menu) {
@@ -2512,9 +2538,7 @@ function App() {
             /> : <EmptyWorkspace
               isUploading={isUploading}
               onChoose={() => fileInput.current?.click()}
-              onOpenModelSettings={() => setAuthOpen(true)}
-              modelName={codexModelLabel(codex)}
-              reasoningName={codexReasoningLabel(codex?.reasoning_effort)}
+              preferences={composerPreferences}
               onStartApplicationHelp={() => void startApplicationHelpChat()}
               documentsCount={chats.length}
               onToggleLibrary={() => setSidebarCollapsed((value) => !value)}
@@ -2846,18 +2870,16 @@ function App() {
         <div className="chat-compose-area">
           {!authReady && ((isApplicationChat && chat) || (isComparisonChat && comparisonReady) || document?.status === 'ready') && <button className="codex-reminder" onClick={() => setAuthOpen(true)}><CircleHelp size={14} /> Подключите Codex, чтобы отправить вопрос <ChevronRight size={14} /></button>}
           <AIComposer
+            {...composerPreferences}
             inputRef={chatInputRef}
             value={chatInput}
             onChange={setChatInput}
             onSend={() => void sendMessage()}
             onAttach={() => fileInput.current?.click()}
-            onOpenModelSettings={() => setAuthOpen(true)}
             voiceInputEnabled={chatVisible}
             placeholder={isApplicationChat ? 'Спросите о работе приложения…' : isComparisonChat ? 'Задайте вопрос по выбранным документам…' : document?.status === 'ready' ? 'Задайте вопрос по документу…' : 'Чат станет доступен после обработки'}
             inputLabel="Сообщение для чата"
             helperText={isApplicationChat ? 'Ответы проверяются по функциям приложения' : isComparisonChat ? 'Цитаты указывают документ и точное место' : 'Ответы проверяются по источникам'}
-            modelName={codexModelLabel(codex)}
-            reasoningName={codexReasoningLabel(codex?.reasoning_effort)}
             inputDisabled={(!isApplicationChat && (isComparisonChat ? !comparisonReady : (!document || document.status !== 'ready'))) || !authReady || isSending}
             sendDisabled={!chatInput.trim() || !chat || !authReady || isSending}
             attachmentDisabled={isUploading}
@@ -3144,9 +3166,7 @@ function processingDescription(status: DocumentRecord['status']): string {
 function EmptyWorkspace({
   isUploading,
   onChoose,
-  onOpenModelSettings,
-  modelName,
-  reasoningName,
+  preferences,
   onStartApplicationHelp,
   documentsCount,
   onToggleLibrary,
@@ -3154,9 +3174,7 @@ function EmptyWorkspace({
 }: {
   isUploading: boolean
   onChoose: () => void
-  onOpenModelSettings: () => void
-  modelName: string
-  reasoningName: string
+  preferences: AIComposerPreferences
   onStartApplicationHelp: () => void
   documentsCount: number
   onToggleLibrary: () => void
@@ -3193,16 +3211,14 @@ function EmptyWorkspace({
       </div>
       <div className="empty-chat-compose-area">
         <AIComposer
+          {...preferences}
           value=""
           onChange={() => undefined}
           onSend={() => undefined}
           onAttach={onChoose}
-          onOpenModelSettings={onOpenModelSettings}
           placeholder="Задайте вопрос по документу…"
           inputLabel="Вопрос по документу"
           helperText="Чат станет доступен после загрузки документа"
-          modelName={modelName}
-          reasoningName={reasoningName}
           inputDisabled
           sendDisabled
           attachmentDisabled={isUploading}

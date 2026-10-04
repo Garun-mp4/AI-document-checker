@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type Ref } from 'react'
-import { ArrowUp, ChevronDown, Mic, Plus, Square, X } from 'lucide-react'
+import { ArrowUp, Mic, Plus, Square, X } from 'lucide-react'
 import { useLocalSpeechInput } from '../useLocalSpeechInput'
+import { CodexPreferenceControls } from './CodexPreferenceControls'
+import type { CodexPreferenceControlsProps } from './CodexPreferenceControls'
 import { VoiceLevelMeter } from './VoiceLevelMeter'
 
-type AIComposerProps = {
+export type AIComposerPreferences = Omit<CodexPreferenceControlsProps, 'disabled' | 'onOpenSettings'> & {
+  onOpenModelSettings: () => void
+}
+
+type AIComposerProps = AIComposerPreferences & {
   value: string
   onChange: (value: string) => void
   onSend: () => void
   onAttach: () => void
-  onOpenModelSettings: () => void
   placeholder: string
   inputLabel: string
   helperText: string
@@ -32,6 +37,14 @@ export function AIComposer({
   helperText,
   modelName,
   reasoningName,
+  modelOptions,
+  selectedModelId,
+  reasoningOptions,
+  selectedReasoningEffort,
+  authenticated,
+  busy: preferencesBusy,
+  onSelectModel,
+  onSelectReasoning,
   inputDisabled = false,
   sendDisabled = false,
   attachmentDisabled = false,
@@ -211,19 +224,20 @@ export function AIComposer({
               </div>}
             </div>
             <div className="ai-composer-controls">
-              <button
-                className="ai-composer-model-control"
-                type="button"
-                aria-haspopup="dialog"
-                aria-label={`Модель ${modelName}, уровень анализа ${reasoningName}. Настроить`}
-                title="Настроить модель и уровень анализа"
-                onClick={onOpenModelSettings}
+              <CodexPreferenceControls
+                modelOptions={modelOptions}
+                selectedModelId={selectedModelId}
+                reasoningOptions={reasoningOptions}
+                selectedReasoningEffort={selectedReasoningEffort}
+                modelName={modelName}
+                reasoningName={reasoningName}
+                authenticated={authenticated}
+                busy={preferencesBusy}
                 disabled={voiceActive}
-              >
-                <span className="ai-composer-model-name">{modelName}</span>
-                <span className="ai-composer-model-reasoning">{reasoningName}</span>
-                <ChevronDown aria-hidden="true" size={15} />
-              </button>
+                onOpenSettings={onOpenModelSettings}
+                onSelectModel={onSelectModel}
+                onSelectReasoning={onSelectReasoning}
+              />
               <button
                 ref={voiceControlRef}
                 className={`ai-composer-voice icon-button ${voiceActive ? 'is-active' : ''}`}
